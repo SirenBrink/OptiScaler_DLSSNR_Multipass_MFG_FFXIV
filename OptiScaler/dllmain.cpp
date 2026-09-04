@@ -947,7 +947,17 @@ static void CheckWorkingMode()
 
     // NVAPI
     // Doesn't seem to like GetModuleHandle for some reason, so call our load to make sure
-    if (GetDllNameWModule(&nvapiNamesW) != nullptr)
+    //
+    // Also loaded when it is not present yet and an interface is meant to be withheld. Streamline
+    // resolves its nvapi entry points as it initialises, and a detour installed after that resolve
+    // is never consulted -- the module is hooked, the caller holds addresses from before the hook.
+    // Loading it here puts the detour in first. Only on Nvidia, and only when something asks for it,
+    // so no process gains nvapi that would not have had it.
+    const bool withholdingAnInterface = Config::Instance()->DisableReflexSync.value_or_default() ||
+                                        Config::Instance()->DisableFlipMetering.value_or_default();
+
+    if (GetDllNameWModule(&nvapiNamesW) != nullptr ||
+        (withholdingAnInterface && IdentifyGpu::getPrimaryGpu().vendorId == VendorId::Nvidia))
     {
         // This hooks nvapi as well when possible
         auto nvapi64 = LibraryLoadHooks::LoadNvApi();
