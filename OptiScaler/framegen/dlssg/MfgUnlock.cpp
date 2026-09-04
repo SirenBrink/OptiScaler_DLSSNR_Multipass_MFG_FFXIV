@@ -5,6 +5,8 @@
 #include <Config.h>
 #include <scanner/scanner.h>
 
+#include "MfgBlackwellKernels.h"
+
 namespace
 {
 // mov ebx,1 / mov r8d,3 / cmp edi,0x1b0 / cmovl r8d,ebx. The two counts and the architecture
@@ -40,6 +42,41 @@ constexpr std::string_view kAdvertisePattern309 = "81 FD B0 01 00 00 0F 8C ? ? ?
 constexpr std::string_view kValidatePattern309 = "3D B0 01 00 00 0F 93 C0";
 
 
+
+// scanner::GetAddress only walks sections marked executable. Fatbins are data, so they need their own
+// search. Returns 0 unless exactly one non-executable section holds the sequence, once.
+uintptr_t FindDataBytes(HMODULE module, const uint8_t* needle, size_t length)
+{
+    auto base = reinterpret_cast<uint8_t*>(module);
+    auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    auto section = IMAGE_FIRST_SECTION(nt);
+
+    uintptr_t found = 0;
+    size_t hits = 0;
+
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+    {
+        const auto& s = section[i];
+
+        if (s.Characteristics & IMAGE_SCN_MEM_EXECUTE)
+            continue;
+
+        uint8_t* start = base + s.VirtualAddress;
+        uint8_t* end = start + s.Misc.VirtualSize;
+
+        for (uint8_t* p = std::search(start, end, needle, needle + length); p != end;
+             p = std::search(p + 1, end, needle, needle + length))
+        {
+            found = reinterpret_cast<uintptr_t>(p);
+
+            if (++hits > 1)
+                return 0;
+        }
+    }
+
+    return hits == 1 ? found : 0;
+}
 
 bool WriteBytes(uintptr_t address, const uint8_t* bytes, size_t count)
 {
@@ -145,6 +182,48 @@ bool PatchValidate(HMODULE module)
 }
 
 
+// Replaces the Ada kernels with the Blackwell ones the same module already carries.
+//
+// Kernel_EstimateIntermMvecsScatter reads three f32 fields of its parameter block on sm_120 and one on
+// sm_89, so on Ada every generated frame is placed at the same point between the two real ones: the
+// world does not advance while the interface, composited per present, does. Above 2X that is the
+// whole symptom.
+//
+// The sm_120 module carries no Blackwell-only instruction, so retargeted to sm_89 it compiles. Each
+// entry is one container rebuilt with that image in the sm_89 slot, SASS dropped so the driver JITs
+// it. Nothing is created; the code was already in the file.
+//
+// A container whose signature does not match is left alone, so a different build degrades to the
+// kernels it shipped with rather than a mixture this was never built against. The signature carries
+// the container's exact payload length, which is what makes it build-specific.
+bool PatchBlackwellKernels(HMODULE module)
+{
+    unsigned int replaced = 0;
+
+    for (const auto& entry : kMfgBlackwellKernels)
+    {
+        const auto address = FindDataBytes(module, entry.signature, entry.signatureSize);
+
+        if (address == 0 || entry.payloadSize > entry.slotSize)
+            continue;
+
+        if (!WriteBytes(address, entry.payload, entry.payloadSize))
+            continue;
+
+        // The container reports its own length, so the rest of the old payload is never read. Zeroed
+        // rather than left as the tail of a fatbin the header no longer describes.
+        const std::vector<uint8_t> pad(entry.slotSize - entry.payloadSize, 0);
+
+        if (WriteBytes(address + entry.payloadSize, pad.data(), pad.size()))
+            ++replaced;
+    }
+
+    LOG_INFO("MFG unlock: {} of {} kernel containers carry the Blackwell image", replaced,
+             std::size(kMfgBlackwellKernels));
+
+    return replaced == std::size(kMfgBlackwellKernels);
+}
+
 // Raises the wrapper's own ceiling to match, so the min() keeps what nvngx published.
 bool PatchWrapperClamp(HMODULE module)
 {
@@ -185,6 +264,9 @@ void MfgUnlock::TryApply()
 
             const bool advertise = PatchAdvertise(module);
             const bool validate = PatchValidate(module);
+
+            if (Config::Instance()->FGDLSSGAdaBlackwellKernels.value_or_default())
+                PatchBlackwellKernels(module);
 
             if (advertise && validate)
                 LOG_INFO("MFG unlock: nvngx_dlssg.dll patched for {} generated frames", kMaxGeneratedFrames);
