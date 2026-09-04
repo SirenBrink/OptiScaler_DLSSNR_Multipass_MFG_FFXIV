@@ -211,6 +211,9 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
                 StreamlineHooks::hookDlssg(dlssgModule);
             else
                 StreamlineHooks::hookLocalDlssg(dlssgModule);
+
+            // The wrapper takes min(published count, its own ceiling) while it initialises.
+            MfgUnlock::TryApply();
         }
         else
         {

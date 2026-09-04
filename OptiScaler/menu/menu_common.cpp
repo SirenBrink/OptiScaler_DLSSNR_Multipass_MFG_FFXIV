@@ -3496,9 +3496,9 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                 config->FGDLSSGAdaMfgUnlock = adaUnlock;
             }
 
-            ShowHelpMarker("Raises nvngx_dlssg.dll's generated frame maximum from one to five on pre-Blackwell "
-                           "cards, so the ratio above offers up to 6X. Patched in memory; the file on disk is "
-                           "untouched. Takes effect on the next game start.\n\n"
+            ShowHelpMarker("Raises the generated frame maximum in nvngx_dlssg.dll and in sl.dlss_g.dll's own "
+                           "ceiling, so the ratio above offers up to 6X on pre-Blackwell cards. Patched in "
+                           "memory; neither file on disk is touched. Takes effect on the next game start.\n\n"
                            "Pacing above 2X is uneven -- the module expects Blackwell's flip metering hardware. "
                            "Try DisableFlipMetering under [NvApi] alongside it.\n\n"
                            "Undocumented and unsupported by NVIDIA.");

@@ -16,6 +16,13 @@ constexpr std::string_view kAdvertisePattern = "BB 01 00 00 00 41 B8 03 00 00 00
 // is followed by a signed branch and a count test.
 constexpr std::string_view kValidatePattern = "3D B0 01 00 00 7C ? 83 FB 03 76";
 
+// sl.dlss_g.dll, where the count nvngx published is taken as min(published, 3):
+//     mov   r8d, 0x3
+//     cmp   ecx, r8d
+//     cmovb r8d, ecx
+// The wrapper carries its own ceiling, so raising nvngx alone gets three back.
+constexpr std::string_view kWrapperClampPattern = "41 B8 03 00 00 00 41 3B C8 44 0F 42 C1";
+
 // Five generated frames, the count both patched sites carry.
 constexpr uint8_t kMaxGeneratedFrames = 5;
 
@@ -97,28 +104,63 @@ bool PatchValidate(HMODULE module)
 
     return WriteBytes(branchAt, nop, sizeof(nop)) && WriteBytes(countAt, count, sizeof(count));
 }
+
+// Raises the wrapper's own ceiling to match, so the min() keeps what nvngx published.
+bool PatchWrapperClamp(HMODULE module)
+{
+    const auto address = scanner::GetAddress(module, kWrapperClampPattern);
+
+    if (address == 0)
+    {
+        LOG_WARN("MFG unlock: the wrapper clamp signature did not match, sl.dlss_g.dll left alone");
+        return false;
+    }
+
+    // The r8d immediate of the ceiling this clamps against.
+    const auto countAt = address + 2;
+    const uint8_t count[] = { kMaxGeneratedFrames };
+
+    LOG_INFO("MFG unlock: wrapper clamp at {:X}, count {} -> {}", address, *(const uint8_t*) countAt,
+             kMaxGeneratedFrames);
+
+    return WriteBytes(countAt, count, sizeof(count));
+}
 } // namespace
 
 void MfgUnlock::TryApply()
 {
-    static bool attempted = false;
-
-    if (attempted || !Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default())
+    if (!Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default())
         return;
 
-    auto module = GetModuleHandleW(L"nvngx_dlssg.dll");
+    // The two modules arrive at different times and each is latched on its own, so whichever is
+    // present first is patched then rather than waiting for the other.
+    static bool snippetDone = false;
+    static bool wrapperDone = false;
 
-    if (module == nullptr)
-        return;
+    if (!snippetDone)
+    {
+        if (auto module = GetModuleHandleW(L"nvngx_dlssg.dll"); module != nullptr)
+        {
+            snippetDone = true;
 
-    // Only once the module is present, so a game that never loads it keeps retrying cheaply.
-    attempted = true;
+            const bool advertise = PatchAdvertise(module);
+            const bool validate = PatchValidate(module);
 
-    const bool advertise = PatchAdvertise(module);
-    const bool validate = PatchValidate(module);
+            if (advertise && validate)
+                LOG_INFO("MFG unlock: nvngx_dlssg.dll patched for {} generated frames", kMaxGeneratedFrames);
+            else
+                LOG_WARN("MFG unlock: nvngx_dlssg.dll incomplete, advertise {}, validate {}", advertise, validate);
+        }
+    }
 
-    if (advertise && validate)
-        LOG_INFO("MFG unlock: nvngx_dlssg.dll patched for {} generated frames", kMaxGeneratedFrames);
-    else
-        LOG_WARN("MFG unlock: incomplete, advertise {}, validate {}", advertise, validate);
+    if (!wrapperDone)
+    {
+        if (auto module = GetModuleHandleW(L"sl.dlss_g.dll"); module != nullptr)
+        {
+            wrapperDone = true;
+
+            if (PatchWrapperClamp(module))
+                LOG_INFO("MFG unlock: sl.dlss_g.dll ceiling raised to {}", kMaxGeneratedFrames);
+        }
+    }
 }
