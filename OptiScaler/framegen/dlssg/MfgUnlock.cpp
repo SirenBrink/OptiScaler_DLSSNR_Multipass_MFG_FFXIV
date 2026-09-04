@@ -4,8 +4,8 @@
 
 #include <Config.h>
 #include <scanner/scanner.h>
+#include <misc/IdentifyGpu.h>
 
-#include "MfgBlackwellKernels.h"
 
 namespace
 {
@@ -182,46 +182,129 @@ bool PatchValidate(HMODULE module)
 }
 
 
-// Replaces the Ada kernels with the Blackwell ones the same module already carries.
+// Gives Ada the Blackwell kernels the module already carries.
 //
-// Kernel_EstimateIntermMvecsScatter reads three f32 fields of its parameter block on sm_120 and one on
-// sm_89, so on Ada every generated frame is placed at the same point between the two real ones: the
-// world does not advance while the interface, composited per present, does. Above 2X that is the
-// whole symptom.
+// nvngx_dlssg.dll ships two builds of the interpolation kernels. Kernel_EstimateIntermMvecsScatter
+// reads three f32 fields of its parameter block on sm_120 and one on sm_89, so on Ada every generated
+// frame is placed at the same point between the two real ones: the world does not advance between
+// them while the interface, composited once per present, does. At 2X there is one frame and nothing
+// to distinguish; above it that is the whole symptom.
 //
-// The sm_120 module carries no Blackwell-only instruction, so retargeted to sm_89 it compiles. Each
-// entry is one container rebuilt with that image in the sm_89 slot, SASS dropped so the driver JITs
-// it. Nothing is created; the code was already in the file.
+// The sm_120 module uses no instruction Ada lacks. So per container: the Blackwell PTX image is
+// relabelled sm_89, its .target directive is rewritten in place (".target sm_120" and
+// ".target sm_89 " are both fourteen bytes, and the directive sits in the literal run at the head of
+// the LZ4 stream), and the images that were sm_89 -- the Ada PTX and its SASS -- are relabelled to an
+// architecture that does not exist so the driver cannot select them. The driver then JITs Blackwell's
+// kernel when it asks for Ada's.
 //
-// A container whose signature does not match is left alone, so a different build degrades to the
-// kernels it shipped with rather than a mixture this was never built against. The signature carries
-// the container's exact payload length, which is what makes it build-specific.
+// Nothing is copied in and no payload changes length. A container without both images is left alone.
+constexpr uint32_t kArchAda = 89;
+constexpr uint32_t kArchBlackwell = 120;
+
+// No such shader model. Parks an image where nothing will ask for it.
+constexpr uint32_t kArchParked = 122;
+
+// Offsets inside a fatbin image header: payload length, and the architecture the image answers for.
+constexpr size_t kImagePayloadSize = 8;
+constexpr size_t kImageArch = 28;
+
 bool PatchBlackwellKernels(HMODULE module)
 {
-    unsigned int replaced = 0;
+    auto base = reinterpret_cast<uint8_t*>(module);
+    auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    auto section = IMAGE_FIRST_SECTION(nt);
 
-    for (const auto& entry : kMfgBlackwellKernels)
+    const uint8_t magic[] = { 0x50, 0xED, 0x55, 0xBA };
+    unsigned int rewritten = 0;
+
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)
     {
-        const auto address = FindDataBytes(module, entry.signature, entry.signatureSize);
+        const auto& s = section[i];
 
-        if (address == 0 || entry.payloadSize > entry.slotSize)
+        if (s.Characteristics & IMAGE_SCN_MEM_EXECUTE)
             continue;
 
-        if (!WriteBytes(address, entry.payload, entry.payloadSize))
-            continue;
+        uint8_t* start = base + s.VirtualAddress;
+        uint8_t* end = start + s.Misc.VirtualSize;
 
-        // The container reports its own length, so the rest of the old payload is never read. Zeroed
-        // rather than left as the tail of a fatbin the header no longer describes.
-        const std::vector<uint8_t> pad(entry.slotSize - entry.payloadSize, 0);
+        for (uint8_t* c = std::search(start, end, magic, magic + sizeof(magic)); c < end;
+             c = std::search(c + 1, end, magic, magic + sizeof(magic)))
+        {
+            if (c + 16 > end)
+                break;
 
-        if (WriteBytes(address + entry.payloadSize, pad.data(), pad.size()))
-            ++replaced;
+            const auto headerSize = *reinterpret_cast<const uint16_t*>(c + 6);
+            const auto fatSize = *reinterpret_cast<const uint64_t*>(c + 8);
+
+            if (headerSize != 0x10 || fatSize == 0 || c + 16 + fatSize > end)
+                continue;
+
+            uint8_t* blackwell = nullptr;
+            size_t blackwellHeader = 0;
+            size_t blackwellPayload = 0;
+            std::vector<uint8_t*> ada;
+
+            for (uint8_t* image = c + 16; image < c + 16 + fatSize;)
+            {
+                const auto kind = *reinterpret_cast<const uint16_t*>(image);
+                const auto imageHeader = *reinterpret_cast<const uint32_t*>(image + 4);
+                const auto payload = *reinterpret_cast<const uint64_t*>(image + kImagePayloadSize);
+                const auto arch = *reinterpret_cast<const uint32_t*>(image + kImageArch);
+
+                if (imageHeader == 0 || payload == 0)
+                    break;
+
+                // kind 1 is PTX, 2 is a cubin. Only the PTX can be retargeted; the cubin is parked.
+                if (kind == 1 && arch == kArchBlackwell)
+                {
+                    blackwell = image;
+                    blackwellHeader = imageHeader;
+                    blackwellPayload = payload;
+                }
+                else if (arch == kArchAda)
+                {
+                    ada.push_back(image);
+                }
+
+                image += imageHeader + payload;
+            }
+
+            if (blackwell == nullptr || ada.empty())
+                continue;
+
+            const char from[] = ".target sm_120";
+            const char to[] = ".target sm_89 ";
+            static_assert(sizeof(from) == sizeof(to), "the directive rewrite must not change length");
+
+            uint8_t* body = blackwell + blackwellHeader;
+            uint8_t* bodyEnd = body + blackwellPayload;
+            auto at = std::search(body, bodyEnd, from, from + sizeof(from) - 1);
+
+            if (at == bodyEnd)
+                continue;
+
+            if (!WriteBytes(reinterpret_cast<uintptr_t>(at), reinterpret_cast<const uint8_t*>(to),
+                            sizeof(to) - 1))
+                continue;
+
+            const uint32_t ada89 = kArchAda;
+            const uint32_t parked = kArchParked;
+
+            WriteBytes(reinterpret_cast<uintptr_t>(blackwell + kImageArch),
+                       reinterpret_cast<const uint8_t*>(&ada89), sizeof(ada89));
+
+            for (uint8_t* image : ada)
+                WriteBytes(reinterpret_cast<uintptr_t>(image + kImageArch),
+                           reinterpret_cast<const uint8_t*>(&parked), sizeof(parked));
+
+            ++rewritten;
+        }
     }
 
-    LOG_INFO("MFG unlock: {} of {} kernel containers carry the Blackwell image", replaced,
-             std::size(kMfgBlackwellKernels));
+    LOG_INFO("MFG unlock: {} kernel containers answer Ada with the Blackwell image", rewritten);
 
-    return replaced == std::size(kMfgBlackwellKernels);
+    return rewritten > 0;
 }
 
 // Raises the wrapper's own ceiling to match, so the min() keeps what nvngx published.
@@ -265,7 +348,15 @@ void MfgUnlock::TryApply()
             const bool advertise = PatchAdvertise(module);
             const bool validate = PatchValidate(module);
 
-            if (Config::Instance()->FGDLSSGAdaBlackwellKernels.value_or_default())
+            // Default on where it applies: below Blackwell the unlock alone produces frames that do
+            // not advance the picture, so the two belong together. dlssCapable is set from the same
+            // field, so an architecture that never reported leaves this off.
+            const auto& gpu = IdentifyGpu::getPrimaryGpu();
+            const bool preBlackwell = gpu.vendorId == VendorId::Nvidia &&
+                                      gpu.nvidiaArchInfo.architecture_id >= NV_GPU_ARCHITECTURE_TU100 &&
+                                      gpu.nvidiaArchInfo.architecture_id <= NV_GPU_ARCHITECTURE_AD100;
+
+            if (Config::Instance()->FGDLSSGAdaBlackwellKernels.value_or(preBlackwell))
                 PatchBlackwellKernels(module);
 
             if (advertise && validate)
