@@ -321,21 +321,13 @@ void RenderMenu(Config* config, float menuResScale)
                     if (edited)
                         config->DlssNrPassOverrides = DlssNr::SerializePassOverrides(overrides);
 
-                    HelpMarker("What each pass is told, where it should differ from the values above."
-                               "
-
-A control left on \"global\" follows the setting above it, so a"
-                               "
-pass you have not touched behaves exactly as it did before this"
-                               "
-existed."
-                               "
-
-The passes compound: a later pass sees what the one before it"
-                               "
-produced. Easing intensity down the chain keeps the last passes"
-                               "
-refining rather than re-amplifying what is already there.");
+                    HelpMarker(
+                        "What each pass is told, where it should differ from the values above."
+                        "\n\nA control left on \"global\" follows the setting above it, so a pass you"
+                        "\nhave not touched behaves exactly as it did before this existed."
+                        "\n\nThe passes compound: a later pass sees what the one before it produced."
+                        "\nEasing intensity down the chain keeps the last passes refining rather than"
+                        "\nre-amplifying what is already there.");
 
                     ImGui::TreePop();
                 }

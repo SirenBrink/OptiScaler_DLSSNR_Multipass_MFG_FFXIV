@@ -3490,11 +3490,10 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                 StreamlineHooks::updateDlssgOptions();
             }
 
-            if (bool adaUnlock = config->FGDLSSGAdaMfgUnlock.value_or_default();
-                ImGui::Checkbox("Unlock MFG on RTX 40", &adaUnlock))
-            {
+            bool adaUnlock = config->FGDLSSGAdaMfgUnlock.value_or_default();
+
+            if (ImGui::Checkbox("Unlock MFG on RTX 40", &adaUnlock))
                 config->FGDLSSGAdaMfgUnlock = adaUnlock;
-            }
 
             // The patch is applied once, as nvngx_dlssg.dll loads, so the box moving does nothing
             // this session. Say so beside it rather than only in the tooltip.
