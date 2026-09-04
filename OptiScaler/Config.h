@@ -713,6 +713,7 @@ class Config
 
     // NVAPI Override
     CustomOptional<bool> DisableFlipMetering { false };
+    CustomOptional<bool> DisableReflexSync { false };
 
     // Spoofing
     CustomOptional<bool, SoftDefault> DxgiSpoofing { true };

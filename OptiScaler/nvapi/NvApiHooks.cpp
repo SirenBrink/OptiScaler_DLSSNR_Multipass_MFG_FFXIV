@@ -205,6 +205,25 @@ void* __stdcall NvApiHooks::hkNvAPI_QueryInterface(unsigned int InterfaceId)
         return nullptr;
     }
 
+    // Withhold the entry points Streamline's multi-frame pacer is built on.
+    //
+    // RSYNC drives the spacing of generated frames through NvAPI_D3D_SetReflexSync. Where that entry
+    // point exists but the call fails -- dxvk-nvapi resolves it and returns an error -- Streamline
+    // retries every frame and reports setDynamicMFGParams failed with status 1, and the frames it
+    // does generate are presented unpaced. Refusing the interface leaves it on the pacing it uses
+    // when Reflex is absent, which is worse in principle and works in practice.
+    if (Config::Instance()->DisableReflexSync.value_or_default())
+    {
+        // getId answers 0 for a name the interface table does not carry, and no interface has id 0.
+        const auto reflexSync = GET_ID(NvAPI_D3D_SetReflexSync);
+
+        if (reflexSync != 0 && InterfaceId == reflexSync)
+        {
+            LOG_INFO("ReflexSync is disabled!");
+            return nullptr;
+        }
+    }
+
     if (InterfaceId == GET_ID(NvAPI_D3D_SetSleepMode) || InterfaceId == GET_ID(NvAPI_D3D_Sleep) ||
         InterfaceId == GET_ID(NvAPI_D3D_GetLatency) || InterfaceId == GET_ID(NvAPI_D3D_SetLatencyMarker) ||
         InterfaceId == GET_ID(NvAPI_D3D12_SetAsyncFrameMarker) || InterfaceId == GET_ID(NvAPI_Vulkan_GetLatency) ||
