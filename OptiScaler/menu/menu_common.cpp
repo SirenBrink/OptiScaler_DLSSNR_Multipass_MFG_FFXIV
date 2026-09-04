@@ -3490,6 +3490,19 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                 StreamlineHooks::updateDlssgOptions();
             }
 
+            if (bool adaUnlock = config->FGDLSSGAdaMfgUnlock.value_or_default();
+                ImGui::Checkbox("Unlock MFG on RTX 40", &adaUnlock))
+            {
+                config->FGDLSSGAdaMfgUnlock = adaUnlock;
+            }
+
+            ShowHelpMarker("Raises nvngx_dlssg.dll's generated frame maximum from one to five on pre-Blackwell "
+                           "cards, so the ratio above offers up to 6X. Patched in memory; the file on disk is "
+                           "untouched. Takes effect on the next game start.\n\n"
+                           "Pacing above 2X is uneven -- the module expects Blackwell's flip metering hardware. "
+                           "Try DisableFlipMetering under [NvApi] alongside it.\n\n"
+                           "Undocumented and unsupported by NVIDIA.");
+
             ImGui::BeginDisabled(state.dlssgLastSetMode != sl::DLSSGMode::eDynamic);
             static float fpsTarget = config->FGDLSSGFramerateTargetDMFG.value_or_default();
             ImGui::SliderFloat("DMFG FPS Target", &fpsTarget, 0, 200, "%.0f");

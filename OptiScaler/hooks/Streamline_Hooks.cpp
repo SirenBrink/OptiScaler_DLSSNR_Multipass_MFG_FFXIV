@@ -10,6 +10,7 @@
 #include <hooks/Reflex_Hooks.h>
 #include <menu/menu_overlay_base.h>
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <framegen/dlssg/MfgUnlock.h>
 #include <proxies/KernelBase_Proxy.h>
 #include <imgui/ImGuiNotify.hpp>
 
@@ -1146,6 +1147,10 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
         // Populate dlssgMfgMax once
         if (!state.dlssgMfgMax.has_value())
         {
+            // Before the read, so the count this captures is the patched one. Five stays under the
+            // sanity bound below.
+            MfgUnlock::TryApply();
+
             sl::DLSSGState localState {};
             sl::DLSSGOptions localOptions {};
             if (o_slDLSSGGetState(viewport, localState, &localOptions) == sl::Result::eOk &&
@@ -1181,6 +1186,9 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& state,
                                               const sl::DLSSGOptions* options)
 {
+    // Ahead of every read of numFramesToGenerateMax, which is the value the patch raises.
+    MfgUnlock::TryApply();
+
     sl::Result result {};
 
     const auto originalStructVersion = state.structVersion;
