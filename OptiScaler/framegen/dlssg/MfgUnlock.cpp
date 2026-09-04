@@ -28,6 +28,19 @@ constexpr std::string_view kWrapperClampPattern = "41 B8 03 00 00 00 41 3B C8 44
 // Five generated frames, the count both patched sites carry.
 constexpr uint8_t kMaxGeneratedFrames = 5;
 
+// 310.9 restructured both gates. The count is no longer an immediate next to the comparison: the
+// Blackwell branch starts at five and reads a configured value, and anything below Blackwell is sent
+// to a branch that publishes one.
+//     cmp ebp, 0x1b0
+//     jl  ada          <- neutralised, so every card takes the Blackwell branch
+//     mov edi, 0x5
+constexpr std::string_view kAdvertisePattern309 = "81 FD B0 01 00 00 0F 8C ? ? ? ? BF 05 00 00 00";
+
+// The capability flag in the same build is a setae rather than a branch.
+//     cmp   eax, 0x1b0
+//     setae al
+constexpr std::string_view kValidatePattern309 = "3D B0 01 00 00 0F 93 C0";
+
 // The fatbin holding main_kernel: container magic, version, header size, then the exact payload
 // length and the first image header. Unique in the module.
 constexpr uint8_t kBlendFatbinSignature[] = { 0x50, 0xED, 0x55, 0xBA, 0x01, 0x00, 0x10, 0x00,
@@ -105,6 +118,18 @@ std::string Hex(const uint8_t* bytes, size_t count)
 // Rewrites count and neutralises the architecture clamp, so MultiFrameCountMax is published as five.
 bool PatchAdvertise(HMODULE module)
 {
+    if (const auto at309 = scanner::GetAddress(module, kAdvertisePattern309); at309 != 0)
+    {
+        // The jl is a rel32, six bytes.
+        const auto branchAt = at309 + 6;
+        const uint8_t nop[] = { 0x0F, 0x1F, 0x44, 0x00, 0x00, 0x90 };
+
+        LOG_INFO("MFG unlock: advertise (310.9) at {:X}, jl {} -> {}", at309,
+                 Hex((const uint8_t*) branchAt, sizeof(nop)), Hex(nop, sizeof(nop)));
+
+        return WriteBytes(branchAt, nop, sizeof(nop));
+    }
+
     const auto address = scanner::GetAddress(module, kAdvertisePattern);
 
     if (address == 0)
@@ -130,6 +155,18 @@ bool PatchAdvertise(HMODULE module)
 // Drops the Ada branch and raises the accepted count, so a request for five is not rejected.
 bool PatchValidate(HMODULE module)
 {
+    if (const auto at309 = scanner::GetAddress(module, kValidatePattern309); at309 != 0)
+    {
+        // setae al -> mov al, 1, so the flag is set whatever the architecture reports.
+        const auto setAt = at309 + 5;
+        const uint8_t always[] = { 0xB0, 0x01, 0x90 };
+
+        LOG_INFO("MFG unlock: validate (310.9) at {:X}, setae {} -> {}", at309,
+                 Hex((const uint8_t*) setAt, sizeof(always)), Hex(always, sizeof(always)));
+
+        return WriteBytes(setAt, always, sizeof(always));
+    }
+
     const auto address = scanner::GetAddress(module, kValidatePattern);
 
     if (address == 0)
