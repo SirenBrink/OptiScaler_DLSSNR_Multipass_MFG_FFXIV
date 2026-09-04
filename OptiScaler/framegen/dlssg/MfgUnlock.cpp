@@ -5,6 +5,8 @@
 #include <Config.h>
 #include <scanner/scanner.h>
 
+#include "MfgTemporalBlob.h"
+
 namespace
 {
 // mov ebx,1 / mov r8d,3 / cmp edi,0x1b0 / cmovl r8d,ebx. The two counts and the architecture
@@ -25,6 +27,51 @@ constexpr std::string_view kWrapperClampPattern = "41 B8 03 00 00 00 41 3B C8 44
 
 // Five generated frames, the count both patched sites carry.
 constexpr uint8_t kMaxGeneratedFrames = 5;
+
+// The fatbin holding main_kernel: container magic, version, header size, then the exact payload
+// length and the first image header. Unique in the module.
+constexpr uint8_t kBlendFatbinSignature[] = { 0x50, 0xED, 0x55, 0xBA, 0x01, 0x00, 0x10, 0x00,
+                                              0x90, 0x57, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                              0x01, 0x00, 0x01, 0x01, 0x68, 0x00, 0x00, 0x00,
+                                              0x08, 0x17, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+// Header size plus payload of the stock container, which is what the replacement has to fit inside.
+constexpr size_t kBlendFatbinSize = 22432;
+
+// scanner::GetAddress only walks sections marked executable. The fatbin is data, so it needs its own
+// search. Returns 0 unless exactly one section contains the sequence, once.
+uintptr_t FindDataBytes(HMODULE module, const uint8_t* needle, size_t length)
+{
+    auto base = reinterpret_cast<uint8_t*>(module);
+    auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    auto section = IMAGE_FIRST_SECTION(nt);
+
+    uintptr_t found = 0;
+    size_t hits = 0;
+
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+    {
+        const auto& s = section[i];
+
+        if (s.Characteristics & IMAGE_SCN_MEM_EXECUTE)
+            continue;
+
+        uint8_t* start = base + s.VirtualAddress;
+        uint8_t* end = start + s.Misc.VirtualSize;
+
+        for (uint8_t* p = std::search(start, end, needle, needle + length); p != end;
+             p = std::search(p + 1, end, needle, needle + length))
+        {
+            found = reinterpret_cast<uintptr_t>(p);
+
+            if (++hits > 1)
+                return 0;
+        }
+    }
+
+    return hits == 1 ? found : 0;
+}
 
 bool WriteBytes(uintptr_t address, const uint8_t* bytes, size_t count)
 {
@@ -105,6 +152,37 @@ bool PatchValidate(HMODULE module)
     return WriteBytes(branchAt, nop, sizeof(nop)) && WriteBytes(countAt, count, sizeof(count));
 }
 
+// Replaces main_kernel's fatbin with one whose sm_89 image blends by the temporal parameter.
+//
+// Generated frames are otherwise all composed at the midpoint between the two source frames, which
+// is right for 2X and wrong for everything above it: five frames carrying one picture. The
+// replacement is PTX only, so the driver JITs it instead of running the sm_89 SASS the stock
+// container also carries. Costs a compile on first use.
+bool PatchTemporalBlend(HMODULE module)
+{
+    const auto address = FindDataBytes(module, kBlendFatbinSignature, sizeof(kBlendFatbinSignature));
+
+    if (address == 0)
+    {
+        LOG_WARN("MFG unlock: the blend fatbin was not found once, temporal fix not applied");
+        return false;
+    }
+
+    static_assert(sizeof(kMfgTemporalFatbin) <= kBlendFatbinSize, "replacement fatbin does not fit");
+
+    LOG_INFO("MFG unlock: blend fatbin at {:X}, {} bytes replaced by {}", address, kBlendFatbinSize,
+             sizeof(kMfgTemporalFatbin));
+
+    if (!WriteBytes(address, kMfgTemporalFatbin, sizeof(kMfgTemporalFatbin)))
+        return false;
+
+    // The container reports its own length, so the remainder of the old payload is never read. Zero
+    // it rather than leaving the tail of a fatbin the header no longer describes.
+    const std::vector<uint8_t> pad(kBlendFatbinSize - sizeof(kMfgTemporalFatbin), 0);
+
+    return WriteBytes(address + sizeof(kMfgTemporalFatbin), pad.data(), pad.size());
+}
+
 // Raises the wrapper's own ceiling to match, so the min() keeps what nvngx published.
 bool PatchWrapperClamp(HMODULE module)
 {
@@ -145,6 +223,9 @@ void MfgUnlock::TryApply()
 
             const bool advertise = PatchAdvertise(module);
             const bool validate = PatchValidate(module);
+
+            if (Config::Instance()->FGDLSSGAdaTemporalFix.value_or_default())
+                PatchTemporalBlend(module);
 
             if (advertise && validate)
                 LOG_INFO("MFG unlock: nvngx_dlssg.dll patched for {} generated frames", kMaxGeneratedFrames);
