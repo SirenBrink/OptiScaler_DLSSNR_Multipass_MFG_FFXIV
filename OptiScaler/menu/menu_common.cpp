@@ -7804,6 +7804,40 @@ void RenderExposureScanIndicator(float alpha)
     ImGui::End();
 }
 
+// StreamlineHooks::applyMenuDlssgInterlock only runs when DLSS-G options are pushed. A game that
+// pushes them on change rather than per frame would keep DLSS-G running while MenuOverlayVk submits
+// into its present path, so push on the visibility edge instead of waiting for the game.
+static void SyncDlssgToMenuVisibility()
+{
+    static bool interlockHeld = false;
+
+    auto& state = State::Instance();
+    auto visible = MenuCommon::IsVisible();
+
+    if (visible == interlockHeld)
+        return;
+
+    if (visible)
+    {
+        if (state.swapchainApi != API::Vulkan && !state.menuOverlayIsVulkan)
+            return;
+
+        if (state.dlssgLastSetMode == sl::DLSSGMode::eOff)
+            return;
+
+        // The hidden-menu charge in applyMenuDlssgInterlock only happens on a push; charge it here so
+        // the overlay holds off for 10 presents regardless of push cadence.
+        state.delayMenuRenderBy = 10;
+        interlockHeld = true;
+    }
+    else
+    {
+        interlockHeld = false;
+    }
+
+    StreamlineHooks::updateDlssgOptions();
+}
+
 bool MenuCommon::RenderMenu()
 {
     if (!_isInited)
@@ -7817,6 +7851,10 @@ bool MenuCommon::RenderMenu()
     UpdateRenderTiming(ctx);
     UpdateMenuInputMode(ctx);
     HandleMenuShortcuts(ctx);
+
+    // Runs before any submit this frame, so the key-toggle edge is covered on the frame it happens.
+    // Edges from the Close button and HideMenu are picked up on the next present.
+    SyncDlssgToMenuVisibility();
 
     // 2) Prepare one-shot notifications and start a new ImGui frame only when needed.
     UpdateVersionAndStartupNotifications(ctx);
