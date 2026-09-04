@@ -1722,8 +1722,8 @@ void StreamlineHooks::applyMenuDlssgInterlock(sl::DLSSGOptions& options, bool dl
 {
     auto& state = State::Instance();
 
-    // Keyed on the overlay, not the swapchain. Under vkd3d-proton swapchainApi is DX12 while
-    // MenuOverlayVk is the live ImGui backend, so both conditions are needed.
+    // Keyed on the overlay, not the swapchain: the submit this guards against is MenuOverlayVk's, and
+    // a title whose swapchainApi is not Vulkan can still have that overlay live.
     if (state.swapchainApi != API::Vulkan && !state.menuOverlayIsVulkan)
         return;
 
