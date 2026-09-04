@@ -269,6 +269,12 @@ class Config
     // -1 means follow local structure, which is the model's own default. It is not a strength of zero.
     CustomOptional<float> DlssNrSkinStructure { -1.0f };
     CustomOptional<bool> DlssNrAutoMask { true };
+    // Sparse per-pass model settings, "2:intensity=0.5,style=1;3:intensity=0.3". A pass with no
+    // entry uses the values above.
+    CustomOptional<std::string> DlssNrPassOverrides { "" };
+    // Lifts the pass slider past kDefaultMaxPasses. Each pass is another model run and another NGX
+    // feature holding its own history.
+    CustomOptional<bool> DlssNrUnlockPasses { false };
 
     // How much of the model's edit reaches the frame. Separated because detail synthesis is a luminance
     // edit and any colour shift is usually the part you do not want, and allowed past 1.0 because

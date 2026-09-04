@@ -21,6 +21,9 @@
 
 #include <mutex>
 #include <algorithm>
+#include <array>
+#include <optional>
+#include <sstream>
 #include <cstring>
 #include "precompile/DlssNr_Shader.h"
 
@@ -1453,6 +1456,101 @@ void RecordBuiltTuning(const Config& cfg)
 // cost is a CPU-side lock on a path that already records command lists.
 std::mutex g_nrMutex;
 
+// Per-pass model settings.
+//
+// Everything the model is told except the preset is an evaluate argument, so a later pass can be
+// driven differently from the first at no cost. The preset is latched when a feature is built, and
+// each pass owns its feature, so it varies too -- changing one rebuilds that pass alone.
+//
+// Stored sparsely, as "2:intensity=0.5,style=1;3:intensity=0.3": a pass with no entry uses the
+// global setting, so the default is what the chain did before this existed. Same shape as the
+// exposure scan's anchor list.
+std::array<DlssNr::PassTuning, DlssNr::kMaxPasses> g_passTuning {};
+std::string g_passTuningSource;
+
+void ParsePassOverrides(const std::string& text)
+{
+    if (text == g_passTuningSource)
+        return;
+
+    g_passTuningSource = text;
+    g_passTuning = {};
+
+    std::stringstream passes(text);
+    std::string entry;
+
+    while (std::getline(passes, entry, ';'))
+    {
+        const auto colon = entry.find(':');
+
+        if (colon == std::string::npos)
+            continue;
+
+        // One-based in the file: "pass 1" is the first pass, not the second.
+        const auto index = strtoul(entry.substr(0, colon).c_str(), nullptr, 10);
+
+        if (index < 1 || index > DlssNr::kMaxPasses)
+            continue;
+
+        auto& tuning = g_passTuning[index - 1];
+        std::stringstream fields(entry.substr(colon + 1));
+        std::string field;
+
+        while (std::getline(fields, field, ','))
+        {
+            const auto equals = field.find('=');
+
+            if (equals == std::string::npos)
+                continue;
+
+            const auto key = field.substr(0, equals);
+            const auto value = field.substr(equals + 1);
+
+            if (key == "intensity")
+                tuning.Intensity = strtof(value.c_str(), nullptr);
+            else if (key == "structure")
+                tuning.LocalStructure = strtof(value.c_str(), nullptr);
+            else if (key == "tone")
+                tuning.LocalTone = strtof(value.c_str(), nullptr);
+            else if (key == "skin")
+                tuning.SkinStructure = strtof(value.c_str(), nullptr);
+            else if (key == "style")
+                tuning.Style = (uint32_t) strtoul(value.c_str(), nullptr, 10);
+            else if (key == "preset")
+                tuning.Preset = (uint32_t) strtoul(value.c_str(), nullptr, 10);
+            else if (key == "mask")
+                tuning.AutoMask = value == "1" || value == "true";
+        }
+    }
+}
+
+// What the model is told for this pass: its own value where it has one, the global otherwise.
+struct EffectiveTuning
+{
+    float Intensity;
+    float LocalStructure;
+    float LocalTone;
+    float SkinStructure;
+    uint32_t Style;
+    uint32_t Preset;
+    bool AutoMask;
+};
+
+EffectiveTuning TuningFor(const Config& cfg, unsigned int pass)
+{
+    ParsePassOverrides(cfg.DlssNrPassOverrides.value_or_default());
+
+    const DlssNr::PassTuning own = pass < DlssNr::kMaxPasses ? g_passTuning[pass] : DlssNr::PassTuning {};
+
+    return { own.Intensity.value_or(cfg.DlssNrIntensity.value_or_default()),
+             own.LocalStructure.value_or(cfg.DlssNrLocalStructure.value_or_default()),
+             own.LocalTone.value_or(cfg.DlssNrLocalTone.value_or_default()),
+             own.SkinStructure.value_or(cfg.DlssNrSkinStructure.value_or_default()),
+             own.Style.value_or(cfg.DlssNrStyle.value_or_default()),
+             own.Preset.value_or(cfg.DlssNrPreset.value_or_default()),
+             own.AutoMask.value_or(cfg.DlssNrAutoMask.value_or_default()) };
+}
+
 // Runs the pass inside the same state envelope every other OptiScaler compute pass runs in.
 //
 // The upscaler's own evaluate is wrapped like this by TryEvaluateOptiFeature: root-signature tracking
@@ -1805,10 +1903,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Forced to one on the proxy path, which evaluates the main feature and returns several hundred
     // lines below the ramp. Read there instead of here, the count would still cost a work-size surface
     // and four features' worth of driver history for a chain that is never reached.
+    // The configured count is honoured only as far as the ceiling in force, so a file left holding a
+    // large number after the unlock is turned off does not keep running it.
+    const unsigned int passLimit = cfg.DlssNrUnlockPasses.value_or_default() ? DlssNr::kMaxPasses
+                                                                             : DlssNr::kDefaultMaxPasses;
+
     const unsigned int wantPasses =
         cfg.DlssNrUseProxy.value_or_default()
             ? 1u
-            : std::clamp(cfg.DlssNrPasses.value_or_default(), 1u, (uint32_t) DlssNr::kMaxPasses);
+            : std::clamp(cfg.DlssNrPasses.value_or_default(), 1u, (uint32_t) passLimit);
 
     ReleaseSurfacesIfFormatChanged(desc.Format);
 
@@ -2150,15 +2253,16 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 // Every argument the main feature was built with. The tuning is latched at creation,
                 // so a pass built with a different one would be a different model that nothing here
                 // records or could ever notice.
+                // The preset is latched here, so a pass carrying its own gets its own feature built
+                // with it. Everything else is an evaluate argument and is resolved per frame.
+                const auto passTuning = TuningFor(cfg, i);
+
                 g_nr.passFeature[i] = g_nr.create(
                     passSnippet->wstring().c_str(),
                     State::Instance().NVNGX_ApplicationDataPath.c_str(), device, cmdList,
-                    g_nr.capabilityParams, workWidth, workHeight,
-                    (int) cfg.DlssNrPreset.value_or_default(), cfg.DlssNrIntensity.value_or_default(),
-                    (int) cfg.DlssNrStyle.value_or_default(),
-                    cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
-                    cfg.DlssNrSkinStructure.value_or_default(),
-                    cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1);
+                    g_nr.capabilityParams, workWidth, workHeight, (int) passTuning.Preset,
+                    passTuning.Intensity, (int) passTuning.Style, passTuning.LocalStructure,
+                    passTuning.LocalTone, passTuning.SkinStructure, passTuning.AutoMask ? 1 : 0, 1);
             }
 
             g_nr.passBuildAfter = g_frames + kSettleFrames;
@@ -2490,6 +2594,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         setWork(slot, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         const bool wantReset = pass == 0 ? g_nr.reset : g_nr.passReset[pass];
+        const auto tuning = TuningFor(cfg, pass);
 
         // Every feature in the chain sees one frame per frame, so each is handed the frame's own
         // guides and the frame's own motion scale. Telling a later pass nothing moved would be a lie
@@ -2498,9 +2603,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             cmdList, pass == 0 ? g_nr.feature : g_nr.passFeature[pass], g_nr.capabilityParams,
             pass == 0 ? modelInput : work[(pass - 1) & 1u], depthIn, motionIn, work[slot], workWidth,
             workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0, wantReset ? 1 : 0,
-            cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
-            cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
-            cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0,
+            tuning.Intensity, (int) tuning.Style, tuning.LocalStructure, tuning.LocalTone,
+            tuning.SkinStructure, tuning.AutoMask ? 1 : 0,
             g_nr.guideMvScaleX * mvToWork, g_nr.guideMvScaleY * mvToWork);
 
         if (pass > 0)
@@ -3105,6 +3209,60 @@ void ProbeD3D11(void* d3d11Device)
         LOG_WARN("DLSS-NR D3D11: every init variant refused, last {} ({}) -- though the feature itself "
                  "reports this platform as supported, so the obstacle is in how it is being called",
                  result, NgxResultName((unsigned int) result));
+}
+
+// The menu edits a table and hands it back; the pass reads the string. Both live here so the format
+// has one definition.
+std::array<PassTuning, kMaxPasses> ParsePassOverridesForMenu(const std::string& text)
+{
+    ParsePassOverrides(text);
+    return g_passTuning;
+}
+
+std::string SerializePassOverrides(const std::array<PassTuning, kMaxPasses>& passes)
+{
+    std::string out;
+
+    for (size_t i = 0; i < passes.size(); ++i)
+    {
+        const auto& p = passes[i];
+        std::string fields;
+
+        auto add = [&fields](const char* key, const std::string& value)
+        {
+            if (!fields.empty())
+                fields += ',';
+
+            fields += key;
+            fields += '=';
+            fields += value;
+        };
+
+        if (p.Intensity.has_value())
+            add("intensity", std::format("{:.3f}", p.Intensity.value()));
+        if (p.LocalStructure.has_value())
+            add("structure", std::format("{:.3f}", p.LocalStructure.value()));
+        if (p.LocalTone.has_value())
+            add("tone", std::format("{:.3f}", p.LocalTone.value()));
+        if (p.SkinStructure.has_value())
+            add("skin", std::format("{:.3f}", p.SkinStructure.value()));
+        if (p.Style.has_value())
+            add("style", std::to_string(p.Style.value()));
+        if (p.Preset.has_value())
+            add("preset", std::to_string(p.Preset.value()));
+        if (p.AutoMask.has_value())
+            add("mask", p.AutoMask.value() ? "1" : "0");
+
+        if (fields.empty())
+            continue;
+
+        if (!out.empty())
+            out += ';';
+
+        out += std::to_string(i + 1) + ':' + fields;
+    }
+
+    return out;
 }
 
 CalibrationReading Calibration()

@@ -2,6 +2,10 @@
 
 #include <d3d12.h>
 
+#include <array>
+#include <optional>
+#include <string>
+
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <nvsdk_ngx.h>
 
@@ -21,7 +25,28 @@ namespace DlssNr
 {
 // The ceiling on how many times the model runs over one frame. The array of extra features, the
 // pass-side clamp, the slider's bounds and the slider's own clamp all read this one number.
-constexpr unsigned int kMaxPasses = 5;
+// What the arrays are sized for, and the ceiling the unlocked slider reaches.
+constexpr unsigned int kMaxPasses = 30;
+
+// What the slider offers unless the ceiling is lifted. Cost is exactly linear and the model is nearly
+// all of it, so five is already several times the frame budget of the pass at one.
+constexpr unsigned int kDefaultMaxPasses = 5;
+
+// Per-pass model settings, sparse: a field with no value follows the global setting. Serialised as
+// "2:intensity=0.5,style=1;3:intensity=0.3" -- one-based, so "1" is the first pass.
+struct PassTuning
+{
+    std::optional<float> Intensity;
+    std::optional<float> LocalStructure;
+    std::optional<float> LocalTone;
+    std::optional<float> SkinStructure;
+    std::optional<uint32_t> Style;
+    std::optional<uint32_t> Preset;
+    std::optional<bool> AutoMask;
+};
+
+std::array<PassTuning, kMaxPasses> ParsePassOverridesForMenu(const std::string& text);
+std::string SerializePassOverrides(const std::array<PassTuning, kMaxPasses>& passes);
 
 // The model runs immediately after the game's upscaler, before the interface is drawn. It is shown a
 // display-referred proxy of that frame -- the sort of picture it was trained on -- and its answer is

@@ -3496,6 +3496,14 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                 config->FGDLSSGAdaMfgUnlock = adaUnlock;
             }
 
+            // The patch is applied once, as nvngx_dlssg.dll loads, so the box moving does nothing
+            // this session. Say so beside it rather than only in the tooltip.
+            if (adaUnlock != (state.dlssgMfgMax.value_or(1) > 1))
+            {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.f, 0.8f, 0.f, 1.f), "(restart to apply)");
+            }
+
             ShowHelpMarker("Raises the generated frame maximum in nvngx_dlssg.dll and in sl.dlss_g.dll's own "
                            "ceiling, so the ratio above offers up to 6X on pre-Blackwell cards. Patched in "
                            "memory; neither file on disk is touched. Takes effect on the next game start.\n\n"

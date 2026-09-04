@@ -69,6 +69,49 @@ static bool DeferredSlider(const char* label, CustomOptional<float>* opt, float 
     return false;
 }
 
+// One per-pass control: a checkbox that decides whether this pass has an opinion, and the slider it
+// enables. Unchecked follows the global setting, which is what an untouched pass does.
+static bool PassOverrideSlider(const char* label, std::optional<float>* own, float global, float mn,
+                               float mx, int pass)
+{
+    bool changed = false;
+    bool has = own->has_value();
+
+    const std::string useId = std::string("##use") + label + std::to_string(pass);
+
+    if (ImGui::Checkbox(useId.c_str(), &has))
+    {
+        if (has)
+            *own = global;
+        else
+            own->reset();
+
+        changed = true;
+    }
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!has);
+
+    float value = own->value_or(global);
+    const std::string sliderId = std::string(label) + "##" + std::to_string(pass);
+
+    if (ImGui::SliderFloat(sliderId.c_str(), &value, mn, mx, "%.2f") && has)
+    {
+        *own = value;
+        changed = true;
+    }
+
+    ImGui::EndDisabled();
+
+    if (!has)
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled("global");
+    }
+
+    return changed;
+}
+
 void RenderMenu(Config* config, float menuResScale)
 {
 
@@ -179,7 +222,10 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::PushStyleColor(ImGuiCol_Text, colour);
             ImGui::PushStyleColor(ImGuiCol_SliderGrab, colour);
 
-            if (ImGui::SliderInt("Passes", &passes, 1, (int) DlssNr::kMaxPasses,
+            const bool unlocked = config->DlssNrUnlockPasses.value_or_default();
+            const int passLimit = (int) (unlocked ? DlssNr::kMaxPasses : DlssNr::kDefaultMaxPasses);
+
+            if (ImGui::SliderInt("Passes", &passes, 1, passLimit,
                                  passes == 1 ? "%d (native)" : "%dx model cost"))
                 pendingPasses = passes;
 
@@ -187,9 +233,94 @@ void RenderMenu(Config* config, float menuResScale)
 
             if (ImGui::IsItemDeactivatedAfterEdit() && pendingPasses >= 0)
             {
-                config->DlssNrPasses =
-                    (uint32_t) std::clamp(pendingPasses, 1, (int) DlssNr::kMaxPasses);
+                config->DlssNrPasses = (uint32_t) std::clamp(pendingPasses, 1, passLimit);
                 pendingPasses = -1;
+            }
+
+            if (bool lift = unlocked; ImGui::Checkbox("Lift the pass limit", &lift))
+            {
+                config->DlssNrUnlockPasses = lift;
+
+                // Dropping the ceiling under a larger count would leave the file asking for passes
+                // the slider can no longer show.
+                if (!lift && config->DlssNrPasses.value_or_default() > DlssNr::kDefaultMaxPasses)
+                    config->DlssNrPasses = DlssNr::kDefaultMaxPasses;
+            }
+
+            const std::string liftTip =
+                "Raises the slider above to " + std::to_string(DlssNr::kMaxPasses) +
+                "."
+                "\n\nCost is exactly linear and the model is nearly all of it, so ten passes is ten"
+                "\nmodel runs in one frame. Each also holds an NGX feature with its own history,"
+                "\nsized by the driver, and they are built one at a time with a settle between --"
+                "\nreaching a large count takes a while and the frames spent building show nothing."
+                "\n\nThe ratio guard under Colour has to rise with the count or the extra passes"
+                "\nspend their contribution against the clamp.";
+
+            HelpMarker(liftTip.c_str());
+
+            // Per-pass settings, one node each, only for the passes that are running.
+            //
+            // Written back as the sparse "2:intensity=0.5;3:style=1" the pass reads. A pass whose
+            // controls all sit at the global value contributes nothing, so the string stays empty
+            // until something is actually different and the default costs nothing to carry.
+            const auto liveCount = (int) config->DlssNrPasses.value_or_default();
+
+            if (liveCount > 1)
+            {
+                if (ImGui::TreeNode("Per pass"))
+                {
+                    auto overrides = DlssNr::ParsePassOverridesForMenu(
+                        config->DlssNrPassOverrides.value_or_default());
+
+                    bool edited = false;
+
+                    for (int pass = 0; pass < liveCount; ++pass)
+                    {
+                        const std::string label = "Pass " + std::to_string(pass + 1);
+
+                        if (!ImGui::TreeNode(label.c_str()))
+                            continue;
+
+                        auto& own = overrides[pass];
+
+                        edited |= PassOverrideSlider("Intensity", &own.Intensity,
+                                                     config->DlssNrIntensity.value_or_default(),
+                                                     0.0f, 4.0f, pass);
+                        edited |= PassOverrideSlider("Detail strength", &own.LocalStructure,
+                                                     config->DlssNrLocalStructure.value_or_default(),
+                                                     0.0f, 4.0f, pass);
+                        edited |= PassOverrideSlider("Local tone", &own.LocalTone,
+                                                     config->DlssNrLocalTone.value_or_default(),
+                                                     0.0f, 4.0f, pass);
+                        edited |= PassOverrideSlider("Skin structure", &own.SkinStructure,
+                                                     config->DlssNrSkinStructure.value_or_default(),
+                                                     -1.0f, 4.0f, pass);
+
+                        ImGui::TreePop();
+                    }
+
+                    if (edited)
+                        config->DlssNrPassOverrides = DlssNr::SerializePassOverrides(overrides);
+
+                    HelpMarker("What each pass is told, where it should differ from the values above."
+                               "
+
+A control left on \"global\" follows the setting above it, so a"
+                               "
+pass you have not touched behaves exactly as it did before this"
+                               "
+existed."
+                               "
+
+The passes compound: a later pass sees what the one before it"
+                               "
+produced. Easing intensity down the chain keeps the last passes"
+                               "
+refining rather than re-amplifying what is already there.");
+
+                    ImGui::TreePop();
+                }
             }
 
             HelpMarker("How many times the model runs over the frame, each pass shown the last one's"

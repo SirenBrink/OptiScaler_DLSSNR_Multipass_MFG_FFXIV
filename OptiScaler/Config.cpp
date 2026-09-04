@@ -354,6 +354,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrScanInverted.set_from_config(readBool("DlssNr", "ScanInverted"));
             DlssNrWhitePointTrim.set_from_config(readFloat("DlssNr", "WhitePointTrim"));
             DlssNrAutoCapture.set_from_config(readBool("DlssNr", "AutoCapture"));
+            DlssNrPassOverrides.set_from_config(readString("DlssNr", "PassOverrides"));
+            DlssNrUnlockPasses.set_from_config(readBool("DlssNr", "UnlockPasses"));
             DlssNrWhitePointScale.set_from_config(readFloat("DlssNr", "WhitePointScale"));
             DlssNrPreset.set_from_config(readUInt("DlssNr", "Preset"));
             DlssNrIntensity.set_from_config(readFloat("DlssNr", "Intensity"));
@@ -1236,6 +1238,9 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "ScanAnchorValue", GetFloatValue(Instance()->DlssNrScanAnchorValue.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanAnchorWhitePoint", GetFloatValue(Instance()->DlssNrScanAnchorWhitePoint.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanAnchors", Instance()->DlssNrScanAnchors.value_for_config_or("").c_str());
+    ini.SetValue("DlssNr", "PassOverrides", Instance()->DlssNrPassOverrides.value_for_config_or("").c_str());
+    ini.SetValue("DlssNr", "UnlockPasses",
+                 GetBoolValue(Instance()->DlssNrUnlockPasses.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanInverted", GetBoolValue(Instance()->DlssNrScanInverted.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanMeter", GetBoolValue(Instance()->DlssNrScanMeter.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Passes", GetIntValue(Instance()->DlssNrPasses.value_for_config()).c_str());
