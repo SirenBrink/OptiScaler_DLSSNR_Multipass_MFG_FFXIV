@@ -215,9 +215,11 @@ void RenderMenu(Config* config, float menuResScale)
             if (passes < 1)
                 passes = 1;
 
-            const ImVec4 colour = passes <= 1   ? ImVec4(0.35f, 0.88f, 0.38f, 1.0f)
-                                  : passes <= 3 ? ImVec4(0.95f, 0.70f, 0.20f, 1.0f)
-                                                : ImVec4(0.92f, 0.30f, 0.25f, 1.0f);
+            const ImVec4 colour =
+                passes <= 1                                  ? ImVec4(0.35f, 0.88f, 0.38f, 1.0f)
+                : passes <= 3                                ? ImVec4(0.95f, 0.70f, 0.20f, 1.0f)
+                : passes <= (int) DlssNr::kDefaultMaxPasses  ? ImVec4(0.92f, 0.30f, 0.25f, 1.0f)
+                                                             : ImVec4(1.00f, 0.25f, 0.85f, 1.0f);
 
             ImGui::PushStyleColor(ImGuiCol_Text, colour);
             ImGui::PushStyleColor(ImGuiCol_SliderGrab, colour);
@@ -249,7 +251,9 @@ void RenderMenu(Config* config, float menuResScale)
 
             const std::string liftTip =
                 "Raises the slider above to " + std::to_string(DlssNr::kMaxPasses) +
-                "."
+                ", which is far past what this pass"
+                "\nwas built for. Expect the frame time to scale with it and the game to stop being"
+                "\nplayable well before the top."
                 "\n\nCost is exactly linear and the model is nearly all of it, so ten passes is ten"
                 "\nmodel runs in one frame. Each also holds an NGX feature with its own history,"
                 "\nsized by the driver, and they are built one at a time with a settle between --"
@@ -258,6 +262,20 @@ void RenderMenu(Config* config, float menuResScale)
                 "\nspend their contribution against the clamp.";
 
             HelpMarker(liftTip.c_str());
+
+            // The tooltip is not enough for a slider that now reaches thirty. Say the cost on screen,
+            // and keep saying it while the count is past what the slider offers by default.
+            if (unlocked)
+            {
+                const int live = (int) config->DlssNrPasses.value_or_default();
+
+                if (live > (int) DlssNr::kDefaultMaxPasses)
+                    ImGui::TextColored(ImVec4(1.00f, 0.25f, 0.85f, 1.0f),
+                                       "%d passes: %dx the model's cost, every frame.", live, live);
+                else
+                    ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.20f, 1.0f),
+                                       "Unlocked. Each pass past this point is another whole model run.");
+            }
 
             // Per-pass settings, one node each, only for the passes that are running.
             //
