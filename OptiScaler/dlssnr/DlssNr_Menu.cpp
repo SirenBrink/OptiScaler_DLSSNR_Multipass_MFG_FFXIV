@@ -385,6 +385,28 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nThe frame itself stays at full detail whatever this says -- only the"
                        "\nmodel's own work is done small.");
 
+        {
+            bool preUpscale = config->DlssNrPreUpscale.value_or_default();
+
+            if (ImGui::Checkbox("Run before the upscaler", &preUpscale))
+                config->DlssNrPreUpscale = preUpscale;
+
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.20f, 1.0f), "(experimental)");
+
+            HelpMarker("Shows the model the frame the upscaler is about to read, instead of the one it"
+                       "\nwrote. The model runs at render resolution, so at Performance it costs about a"
+                       "\nquarter of what it costs after the upscaler, and it sees rendered pixels rather"
+                       "\nthan reconstructed ones."
+                       "\n\nUnlike Model resolution this does not soften what the model returns: the model"
+                       "\nruns 1:1 on a smaller frame rather than small on a large one, and the upscaler"
+                       "\nenlarges its work along with everything else."
+                       "\n\nUntested territory. Colour at this point is jittered by a different subpixel"
+                       "\noffset every frame and the model is given no way to know that, so its history"
+                       "\nmay reproject against an offset it cannot see. Look for shimmer and swimming on"
+                       "\nfine detail while the camera moves.");
+        }
+
         // Only meaningful below 100%: at the same rate the residual collapses to the model's own
         // picture and the two modes are identical, so the control says so by going grey.
         {

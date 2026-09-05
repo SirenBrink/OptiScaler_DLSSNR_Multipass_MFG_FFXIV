@@ -346,6 +346,15 @@ class Config
     // untouched whatever this is set to. 1.0 is full resolution and behaves exactly as before.
     CustomOptional<float> DlssNrWorkingScale { 1.0f };
 
+    // Run the model before the upscaler instead of after it.
+    //
+    // The model asks for a 1:1 scaling ratio at every quality level it accepts, so the only way to run
+    // it on fewer pixels is to hand it a smaller frame. Here that is the game's render-resolution
+    // colour buffer, which is also rendered samples rather than the upscaler's reconstruction.
+    //
+    // Experimental: colour at this point is jittered per frame and the model takes no jitter offset.
+    CustomOptional<bool> DlssNrPreUpscale { false };
+
     // Ask the driver's own nvngx.dll whether it will dispatch Neural Rendering, once per session.
     //
     // Everything here drives the model's DLL directly through a forwarder, because the model refuses

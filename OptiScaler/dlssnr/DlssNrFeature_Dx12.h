@@ -62,7 +62,20 @@ std::string SerializePassOverrides(const std::array<PassTuning, kMaxPasses>& pas
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                           ID3D12CommandQueue* timingQueue = nullptr);
 
+// The same pass, run on the frame the upscaler is about to read rather than on the one it wrote.
+//
+// Experimental. The model is shown the game's render-resolution colour buffer, so it costs what that
+// resolution costs rather than what the display resolution costs, and it sees rendered samples
+// instead of the upscaler's reconstruction. Against that: colour arriving here is jittered per frame
+// and the model takes no jitter offset, so its history reprojects against an offset it cannot see.
+//
+// The edit lands on a surface of ours. The caller substitutes it for the upscale and puts the game's
+// own buffer back afterwards.
+void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+                           ID3D12CommandQueue* timingQueue = nullptr);
 
+// The surface EvaluateBeforeUpscale wrote, or null when this frame's pass did not run.
+ID3D12Resource* PreUpscaleResult();
 
 // Frame generation titles tag their UI layer through Streamline; a copy of it makes the HUD mask
 // exact at the finished frame. Called at tag time.
