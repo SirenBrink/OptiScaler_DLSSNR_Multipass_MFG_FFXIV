@@ -6,16 +6,18 @@ Modify these to your OptiScaler.ini (read the comments, might not apply to you):
 
 ```ini
 [NvApi]
-; x2~x6 MFG spacing is uneven without this (basically frame generation will feel laggy)
+; x2~x6 MFG spacing is uneven without this (basically frame generation will feel laggy) for 40XX cards only! (?) older cards should keep it auto?
 DisableFlipMetering = true
 
-; ONLY IF YOURE ON LINUX? set this to true, otherwise keep to auto
+; only if youre on linux and noticing some weird motion pacing bug
 DisableReflexSync = true
 
 [DLSSG]
 ; only needed if you have a 40XX card
 AdaMfgUnlock = true
 ```
+
+These values should be tried and played with if things don't behave as you expect.
 
 ## Step 2:
 
@@ -32,7 +34,17 @@ you pick is the one you override in Step 5.
 ## Step 4:
 
 You need to put the `nvngx_dlssnr.dll` file (about 158mb) in the game's folder. Make sure to use
-the patched version if you have a card other than a 50XX.
+the patched version if you have a card other than a 50XX. It is not in either package.
+
+There are two downloads. The plain one is the loader by itself. The `_with_DLSS` one also carries,
+already in place and needing no action:
+
+- `OptiScaler\nvngx_dlss.dll`, `nvngx_dlssd.dll`, `nvngx_dlssg.dll` are DLSS 310.9. OptiScaler
+  searches its own folder ahead of the exe folder, so these are used without touching what the
+  game ships.
+- `OptiScaler\streamline\sl.*.dll` are Streamline 2.14.
+
+Take the plain one if the game already has newer, or you keep your own set.
 
 ## Step 5 (proton only)
 
@@ -50,18 +62,19 @@ For support, contact y4my4m in Harmony's town hall (https://har.mony.lol)
 
 ---
 
-In case of emergency:
-- Copy all the sl.*.dll files in OptiScaler/streamline into the base game's folder, essentially
-  updating to streamline 2.14
-- Put nvngx_dlss.dll, nvngx_dlssd.dll, nvngx_dlssg.dll from DLSS 310.9 into the game's folder
+In case of emergency, with the files from the `_with_DLSS` package:
+- Copy `OptiScaler\streamline\sl.*.dll` over the set the game ships
+- Copy `OptiScaler\nvngx_dlss.dll`, `nvngx_dlssd.dll`, `nvngx_dlssg.dll` next to the exe
 
-You shouldn't have to do this, but worth the shot if nothing else works.
+You shouldn't have to do this, but worth the shot if nothing else works. Keep a copy of whatever
+you overwrite.
 
-A game that ships its own Streamline loads it from where it put it, not from the folder holding
-the exe. Unreal titles keep it under `Engine\Plugins\Runtime\Nvidia\Streamline\Binaries\
-ThirdParty\Win64`. Copy over that set, and keep a copy of the originals.
+The first one is the fix for a game stuck at 2X. A game that ships its own Streamline loads it
+from where it put it, and OptiScaler's copy does not override that. Unreal titles keep theirs
+under `Engine\Plugins\Runtime\Nvidia\Streamline\Binaries\ThirdParty\Win64`, which is where the
+files have to go, not next to the exe.
 
-The overlay reports the version it found. Below Streamline 2.7.1 there is no multi frame
+The overlay reports the Streamline version it found. Below 2.7.1 there is no multi frame
 generation to unlock and the ratio stops at 2X, whatever the ini asks for.
 
 ---
@@ -89,6 +102,8 @@ Versions before 4 are not recorded here.
   instead of being read and ignored.
 - A reported maximum below the configured interpolation count no longer rewrites that count
   in the ini.
+- A generated frame ceiling read before nvngx_dlssg.dll loads is no longer cached. It held
+  Ada's 1 for the session and clamped the ratio with it.
 - Neural Rendering on a native D3D11 upscaler names what it needs instead of waiting forever.
 - Per-pass Neural Rendering settings, and a pass ceiling that can be lifted.
 
