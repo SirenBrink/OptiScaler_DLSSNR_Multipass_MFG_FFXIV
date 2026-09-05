@@ -3,6 +3,7 @@
 #include "MfgUnlock.h"
 
 #include <Config.h>
+#include <Util.h>
 #include <scanner/scanner.h>
 #include <misc/IdentifyGpu.h>
 
@@ -76,6 +77,26 @@ uintptr_t FindDataBytes(HMODULE module, const uint8_t* needle, size_t length)
     }
 
     return hits == 1 ? found : 0;
+}
+
+MfgUnlock::Status g_status {};
+
+// The module's own file version, for the report. A signature that does not match is expected on a
+// version nobody has looked at, and the version is the one thing that makes such a report actionable.
+std::string ModuleVersion(HMODULE module)
+{
+    wchar_t path[MAX_PATH] {};
+
+    if (GetModuleFileNameW(module, path, MAX_PATH) == 0)
+        return {};
+
+    version_t file {};
+    version_t product {};
+
+    if (!Util::GetFileVersion(path, &file, &product))
+        return {};
+
+    return std::format("{}.{}.{}", file.major, file.minor, file.patch);
 }
 
 bool WriteBytes(uintptr_t address, const uint8_t* bytes, size_t count)
@@ -208,7 +229,7 @@ constexpr uint32_t kArchParked = 122;
 constexpr size_t kImagePayloadSize = 8;
 constexpr size_t kImageArch = 28;
 
-bool PatchBlackwellKernels(HMODULE module)
+unsigned int RewriteBlackwellKernels(HMODULE module)
 {
     auto base = reinterpret_cast<uint8_t*>(module);
     auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
@@ -304,7 +325,7 @@ bool PatchBlackwellKernels(HMODULE module)
 
     LOG_INFO("MFG unlock: {} kernel containers answer Ada with the Blackwell image", rewritten);
 
-    return rewritten > 0;
+    return rewritten;
 }
 
 // Raises the wrapper's own ceiling to match, so the min() keeps what nvngx published.
@@ -344,9 +365,14 @@ void MfgUnlock::TryApply()
         if (auto module = GetModuleHandleW(L"nvngx_dlssg.dll"); module != nullptr)
         {
             snippetDone = true;
+            g_status.ModuleFound = true;
+            g_status.SnippetVersion = ModuleVersion(module);
 
             const bool advertise = PatchAdvertise(module);
             const bool validate = PatchValidate(module);
+
+            g_status.AdvertiseMatched = advertise;
+            g_status.ValidateMatched = validate;
 
             // Default on where it applies: below Blackwell the unlock alone produces frames that do
             // not advance the picture, so the two belong together. dlssCapable is set from the same
@@ -357,7 +383,7 @@ void MfgUnlock::TryApply()
                                       gpu.nvidiaArchInfo.architecture_id <= NV_GPU_ARCHITECTURE_AD100;
 
             if (Config::Instance()->FGDLSSGAdaBlackwellKernels.value_or(preBlackwell))
-                PatchBlackwellKernels(module);
+                g_status.KernelsRewritten = RewriteBlackwellKernels(module);
 
             if (advertise && validate)
                 LOG_INFO("MFG unlock: nvngx_dlssg.dll patched for {} generated frames", kMaxGeneratedFrames);
@@ -371,9 +397,12 @@ void MfgUnlock::TryApply()
         if (auto module = GetModuleHandleW(L"sl.dlss_g.dll"); module != nullptr)
         {
             wrapperDone = true;
+            g_status.WrapperMatched = PatchWrapperClamp(module);
 
-            if (PatchWrapperClamp(module))
+            if (g_status.WrapperMatched)
                 LOG_INFO("MFG unlock: sl.dlss_g.dll ceiling raised to {}", kMaxGeneratedFrames);
         }
     }
 }
+
+const MfgUnlock::Status& MfgUnlock::LastStatus() { return g_status; }

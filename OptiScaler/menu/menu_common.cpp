@@ -17,6 +17,7 @@
 #include <proxies/Streamline_Proxy.h>
 
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <framegen/dlssg/MfgUnlock.h>
 
 #include <nvapi/fakenvapi.h>
 #include <hooks/Reflex_Hooks.h>
@@ -3501,6 +3502,47 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             {
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(1.f, 0.8f, 0.f, 1.f), "(restart to apply)");
+            }
+
+            // What the last attempt found.
+            //
+            // The signatures carry the shape of the code they patch, so a module nobody has looked at
+            // is not recognised -- the expected outcome on an unexamined version, not a fault. Saying
+            // which version that was is the difference between a report that can be acted on and "it
+            // does not work".
+            if (adaUnlock)
+            {
+                const auto& mfg = MfgUnlock::LastStatus();
+
+                const ImVec4 good(0.4f, 0.9f, 0.5f, 1.f);
+                const ImVec4 bad(1.f, 0.55f, 0.4f, 1.f);
+
+                if (!mfg.ModuleFound)
+                {
+                    ImGui::TextColored(bad, "nvngx_dlssg.dll is not loaded -- this game is not running "
+                                            "DLSS frame generation.");
+                }
+                else
+                {
+                    const char* version = mfg.SnippetVersion.empty() ? "version unknown" : mfg.SnippetVersion.c_str();
+
+                    if (mfg.AdvertiseMatched && mfg.ValidateMatched)
+                        ImGui::TextColored(good, "nvngx_dlssg %s: both gates patched.", version);
+                    else
+                        ImGui::TextColored(bad,
+                                           "nvngx_dlssg %s: not recognised (advertise %s, validate %s)."
+                                           " Report this version.",
+                                           version, mfg.AdvertiseMatched ? "ok" : "no",
+                                           mfg.ValidateMatched ? "ok" : "no");
+
+                    // Only reported when it fires. Streamline dropped its own min(count, 3) after 2.7,
+                    // so on a current wrapper there is nothing to match and silence is the right answer.
+                    if (mfg.WrapperMatched)
+                        ImGui::TextColored(good, "sl.dlss_g.dll: ceiling raised.");
+
+                    if (mfg.KernelsRewritten > 0)
+                        ImGui::TextColored(good, "%u kernel containers run the Blackwell image.", mfg.KernelsRewritten);
+                }
             }
 
             ShowHelpMarker("Raises the generated frame maximum in nvngx_dlssg.dll and in sl.dlss_g.dll's own "

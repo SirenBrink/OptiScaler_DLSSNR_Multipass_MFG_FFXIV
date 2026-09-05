@@ -1011,8 +1011,11 @@ void RenderMenu(Config* config, float menuResScale)
             }
         }
 
+        // Reaches as far as Passes does. The guard is applied once to the finished composition while
+        // the passes compound the ratio it bounds, so a count the slider above can reach needs a guard
+        // that can follow it.
         float maxRatio = config->DlssNrMaxRatio.value_or_default();
-        if (ImGui::SliderFloat("Highlight guard", &maxRatio, 1.0f, 8.0f, "%.1fx"))
+        if (ImGui::SliderFloat("Highlight guard", &maxRatio, 1.0f, (float) DlssNr::kMaxPasses, "%.1fx"))
             config->DlssNrMaxRatio = maxRatio;
 
         HelpMarker("The most the pass may move any pixel, as a multiple of what it already was --"
