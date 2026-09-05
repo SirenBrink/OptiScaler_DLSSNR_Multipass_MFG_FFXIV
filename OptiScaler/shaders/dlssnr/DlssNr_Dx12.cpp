@@ -3264,12 +3264,15 @@ bool EvaluateStage(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* para
     g_nr.wroteTarget = false;
     g_nr.caller = "pipeline-stage";
 
+    // Set on entry, not on the frame completing. What the pass after the upscale needs to know is
+    // whether the arrangement carries the model at all, and reaching here answers it. Asking a frame's
+    // outcome instead ran the model a second time at display resolution on every frame that gave up
+    // part way -- which is precisely the frame that could least afford it.
+    g_nr.stageEverRan = true;
+
     // Both frames belong to the pipeline this stage sits in, where surfaces rest in UNORDERED_ACCESS
     // between stages. The stage that reads dest next transitions it itself and will do so from there.
     EvaluateAtSeam(cmdList, params, timingQueue, true, source, dest, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-    if (g_nr.wroteTarget)
-        g_nr.stageEverRan = true;
 
     return g_nr.wroteTarget;
 }
