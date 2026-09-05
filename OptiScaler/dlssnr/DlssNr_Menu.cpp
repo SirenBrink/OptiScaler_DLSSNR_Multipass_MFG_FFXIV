@@ -161,6 +161,16 @@ void RenderMenu(Config* config, float menuResScale)
                 if (ImGui::SmallButton("Retry"))
                     DlssNr::RetryAfterFailure();
             }
+            // The model is D3D12 and Vulkan only. A native D3D11 upscaler creates no D3D12 device,
+            // so nothing ever arrives and the wait below would never end.
+            else if (auto feature = State::Instance().currentFeature;
+                     feature != nullptr && feature->Api() == API::DX11 && !feature->IsWithDx12())
+            {
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                                   "%s runs natively on D3D11, which the model has no path for.",
+                                   feature->Name().c_str());
+                ImGui::TextDisabled("Pick an upscaler marked w/Dx12 above, then restart the game.");
+            }
             else if (enabled)
                 ImGui::TextUnformatted("Waiting for the upscaler to run.");
         }
