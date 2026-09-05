@@ -194,6 +194,21 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
                                 Config::Instance()->DlssNrEnabled.value_or_default() &&
                                 TargetWidth() == RenderWidth() && RenderWidth() < DisplayWidth();
 
+    // Asked for and not taken. The split is decided from three numbers settled when the feature was
+    // built, so a mismatch here is silent and looks exactly like the option doing nothing.
+    if (!useDualFeature && !_isEnlargementStage && Config::Instance()->DlssNrDualFeature.value_or_default() &&
+        Config::Instance()->DlssNrEnabled.value_or_default())
+    {
+        static unsigned int saidTarget = 0;
+
+        if (saidTarget != TargetWidth())
+        {
+            saidTarget = TargetWidth();
+            LOG_WARN("DLSS-NR dual feature: asked for, not taken -- target {}x{}, render {}x{}, display {}x{}",
+                     TargetWidth(), TargetHeight(), RenderWidth(), RenderHeight(), DisplayWidth(), DisplayHeight());
+        }
+    }
+
     // An upscaler does the enlarging when one is asked for and builds. Otherwise the spatial scaler,
     // which needs nothing the first half has already consumed and so cannot be wrong about it.
     const bool useUpscalerEnlarger = useDualFeature && EnsureEnlarger(InCommandList, InParameters);

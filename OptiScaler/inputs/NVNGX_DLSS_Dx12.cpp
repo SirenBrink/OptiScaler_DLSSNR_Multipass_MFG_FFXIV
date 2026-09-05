@@ -1246,7 +1246,12 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
     const NVSDK_NGX_Result optiResult = TryEvaluateOptiFeature(InCmdList, InFeatureHandle, InParameters, InCallback);
 
     // Same pass, for OptiScaler's own upscalers rather than native DLSS.
-    if (optiResult == NVSDK_NGX_Result_Success && feature != NVSDK_NGX_Feature_FrameGeneration && !preNr.substituted)
+    //
+    // The dual-feature arrangement runs the model inside that upscaler's own pipeline, at render
+    // resolution. Running it here as well runs it a second time on the enlarged frame, at exactly the
+    // full cost the arrangement exists to avoid.
+    if (optiResult == NVSDK_NGX_Result_Success && feature != NVSDK_NGX_Feature_FrameGeneration && !preNr.substituted &&
+        !Config::Instance()->DlssNrDualFeature.value_or_default())
         DlssNr::EvaluateAfterUpscale(InCmdList, InParameters);
 
     return optiResult;
