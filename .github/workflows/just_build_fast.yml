@@ -13,7 +13,7 @@ on:
   # lives on a topic branch answers 404 forever. A push trigger scoped to the branch both registers it
   # and fires it, which is the same workaround the signing build carries.
   push:
-    branches: [ "nr-dual-enlarger" ]
+    branches: [ "nr-dual-enlarger", "nr-split-vulkan" ]
 
 env:
   SOLUTION_FILE_PATH: .

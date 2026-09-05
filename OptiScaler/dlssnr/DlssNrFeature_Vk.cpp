@@ -14,6 +14,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 
 namespace DlssNr
@@ -78,6 +79,19 @@ struct VkState
     // cost -- then runs on this instead of the full proxy, which is the whole point of the working
     // scale slider. Unused (and never created) at scale 1, so the default path is unchanged.
     OwnedImage proxySmall;
+
+    // What the upscaler writes when the model runs as a stage of that upscaler's own pipeline. Render
+    // sized and in the frame's own format, so it is sized independently of the surfaces above and
+    // rebuilt on its own terms.
+    OwnedImage stageInput;
+
+    // Whether the pass has ever run as a stage of an upscaler's pipeline.
+    //
+    // Not scoped to a frame, because there is no frame clock the two call sites can agree on. Nor is
+    // the question really about this frame: a game driving two upscaler features reaches the pass
+    // after the upscale through the other one, on its own command buffer, and once the arrangement is
+    // carrying the model there is nothing for it to do there.
+    bool stageEverRan = false;
 
     std::unique_ptr<DlssNr_Vk> pass;
 
@@ -444,6 +458,17 @@ unsigned int GameCreateFlags(NVSDK_NGX_Parameter* params)
     return flags;
 }
 
+// Every way out of the pass before it does anything is silent on purpose -- an evaluate that carries
+// no depth is normal and would otherwise print every frame forever. Each distinct reason is reported
+// once. Once, not once per frame. Mirrors ReportSkipOnce on the D3D12 path.
+void ReportSkipOnceVk(const char* reason)
+{
+    static std::set<std::string> seen;
+
+    if (seen.insert(reason).second)
+        LOG_INFO("DLSS-NR Vulkan did not run: {}", reason);
+}
+
 std::optional<std::filesystem::path> FindSnippet()
 {
     auto snippet = Util::FindFilePath(Util::DllPath().remove_filename(), "nvngx_dlssnr.dll");
@@ -468,30 +493,46 @@ bool ExposureOfferedVk() { return g_vk.exposureOffered; }
 
 std::optional<double> LastGpuTimeVk() { return g_vk.lastGpuTime; }
 
-void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* params, VkInstance instance,
-                            VkPhysicalDevice physicalDevice, VkDevice device)
+// Runs the pass on the two frames it is given, reading everything else from the game's parameter
+// block.
+//
+// Unsplit, sourceView and destView are one and the same: the frame the upscaler wrote, read and
+// edited in place, arriving in VK_IMAGE_LAYOUT_GENERAL because that is what NGX requires of a
+// resource it is handed. Split, they are two surfaces of an upscaler's own pipeline and the source is
+// this pass's own stage-input image, which is therefore transitioned rather than assumed.
+//
+// width, height and frameFormat describe the source, which is also what the edit is written at.
+// Answers whether the resolve reached destView.
+bool EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* params, VkInstance instance,
+                      VkPhysicalDevice physicalDevice, VkDevice device, bool split, VkImageView sourceView,
+                      VkImageView destView, uint32_t width, uint32_t height, VkFormat frameFormat,
+                      VkImageLayout sourceLayout)
 {
     auto& cfg = *Config::Instance();
 
     if (!cfg.DlssNrEnabled.value_or_default())
-        return;
+    {
+        ReportSkipOnceVk("it is switched off");
+        return false;
+    }
 
     if (cmdBuffer == VK_NULL_HANDLE || params == nullptr || device == VK_NULL_HANDLE ||
         physicalDevice == VK_NULL_HANDLE)
-        return;
+    {
+        ReportSkipOnceVk("no command buffer, no parameter block or no device");
+        return false;
+    }
 
     std::lock_guard<std::mutex> lock(g_vkMutex);
 
     if (g_vk.failed)
-        return;
+        return false;
 
     // The game's own resources, already wrapped: NGX hands Vulkan resources over as
     // NVSDK_NGX_Resource_VK, so only this pass's own images need building.
-    NVSDK_NGX_Resource_VK* colour = nullptr;
     NVSDK_NGX_Resource_VK* depth = nullptr;
     NVSDK_NGX_Resource_VK* motion = nullptr;
 
-    params->Get(NVSDK_NGX_Parameter_Output, (void**) &colour);
     params->Get(NVSDK_NGX_Parameter_Depth, (void**) &depth);
     params->Get(NVSDK_NGX_Parameter_MotionVectors, (void**) &motion);
 
@@ -562,7 +603,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
                  g_vk.gameExposure, g_vk.gamePreExposure, g_vk.gamePreExposure / g_vk.gameExposure);
     }
 
-    if (colour == nullptr || depth == nullptr || motion == nullptr)
+    if (sourceView == VK_NULL_HANDLE || destView == VK_NULL_HANDLE || depth == nullptr || motion == nullptr)
     {
         static bool said = false;
 
@@ -570,19 +611,19 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         {
             said = true;
             LOG_INFO("DLSS-NR Vulkan: the parameter block carried no {}",
-                     colour == nullptr ? "output" : (depth == nullptr ? "depth" : "motion vectors"));
+                     sourceView == VK_NULL_HANDLE || destView == VK_NULL_HANDLE ? "output"
+                     : depth == nullptr                                         ? "depth"
+                                                                                : "motion vectors");
         }
 
-        return;
+        return false;
     }
 
-    const uint32_t width = colour->Resource.ImageViewInfo.Width;
-    const uint32_t height = colour->Resource.ImageViewInfo.Height;
     const uint32_t guideWidth = depth->Resource.ImageViewInfo.Width;
     const uint32_t guideHeight = depth->Resource.ImageViewInfo.Height;
 
     if (width == 0 || height == 0)
-        return;
+        return false;
 
     // The model's working size. The slider is a fraction of the frame; at 1 it is the frame, and the
     // reduced path below never runs, so the default is byte-for-byte what it was.
@@ -606,7 +647,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     }
 
     if (!LoadForwarder())
-        return;
+        return false;
 
     // Initialise NGX on this device, once. The snippet path is the model itself; the forwarder loads
     // it so the caller gate sees a module named nvngx.dll.
@@ -617,7 +658,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         if (!snippet.has_value())
         {
             Fail("nvngx_dlssnr.dll was not found beside OptiScaler or the game");
-            return;
+            return false;
         }
 
         const int probe = g_vk.probe != nullptr ? g_vk.probe(snippet->wstring().c_str()) : 0;
@@ -628,7 +669,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         {
             LOG_ERROR("DLSS-NR Vulkan: the model's Vulkan surface is incomplete (probe {})", probe);
             Fail("the model does not expose a complete Vulkan surface");
-            return;
+            return false;
         }
 
         const int result =
@@ -639,7 +680,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         {
             LOG_ERROR("DLSS-NR Vulkan: NVSDK_NGX_VULKAN_Init_Ext returned {}", result);
             Fail("the model would not initialise on this Vulkan device");
-            return;
+            return false;
         }
 
         g_vk.ngxInitialised = true;
@@ -652,7 +693,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
             g_vk.capabilityParams == nullptr)
         {
             Fail("a parameter block could not be allocated");
-            return;
+            return false;
         }
     }
 
@@ -689,7 +730,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         {
             g_vk.pass.reset();
             Fail("the composition pass could not be created");
-            return;
+            return false;
         }
     }
 
@@ -737,7 +778,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         if (!ok)
         {
             Fail("the pass could not allocate its own surfaces");
-            return;
+            return false;
         }
 
         g_vk.width = width;
@@ -758,7 +799,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         if (g_vk.feature == nullptr)
         {
             Fail("the model would not build a feature on this device");
-            return;
+            return false;
         }
 
         LOG_INFO("DLSS-NR Vulkan: feature up at {}x{} (frame {}x{})", workWidth, workHeight, width, height);
@@ -794,7 +835,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
 
     // Both have to agree. A game can set the HDR flag on a buffer that cannot hold open-ended light,
     // and encoding an already tone-mapped frame a second time looks washed out and banded.
-    const bool linearHdr = gameSaysHdr && FormatCanHoldLinearHdr(colour->Resource.ImageViewInfo.Format);
+    const bool linearHdr = gameSaysHdr && FormatCanHoldLinearHdr(frameFormat);
 
     // The same rule as the D3D12 path, deliberately spelled the same way: the game divides its frame
     // by preExposure and multiplies by exposure, so undoing that is the divisor this pass wants, and
@@ -818,8 +859,8 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     {
         saidEncoding = true;
         LOG_INFO("DLSS-NR Vulkan: the game's buffer is {} (flag {}, format {}), depth {}",
-                 linearHdr ? "linear HDR" : "already tone-mapped", gameSaysHdr ? "set" : "clear",
-                 (int) colour->Resource.ImageViewInfo.Format, depthInverted ? "inverted" : "normal");
+                 linearHdr ? "linear HDR" : "already tone-mapped", gameSaysHdr ? "set" : "clear", (int) frameFormat,
+                 depthInverted ? "inverted" : "normal");
     }
 
     DlssNrConstants encode {};
@@ -836,8 +877,6 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     encode.GuideWidth = guideWidth;
     encode.GuideHeight = guideHeight;
 
-    const VkImageSubresourceRange colourRange = colour->Resource.ImageViewInfo.SubresourceRange;
-
     // Open the measurement. Reset immediately before writing: a query pool slot must be reset before
     // it is written again, and doing it here rather than at the end keeps the two in one place.
     const uint32_t timingSlot = (uint32_t) (g_vk.timedFrames % kTimingSlots);
@@ -848,24 +887,33 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         vkCmdWriteTimestamp(cmdBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_vk.queryPool, timingSlot * 2);
     }
 
-    // The game's colour is read here and written at the end. Its layout on arrival is GENERAL, which
-    // is what NGX requires of a resource it is handed, so it is left alone.
+    // Unsplit, the game's colour is read here and written at the end. Its layout on arrival is
+    // GENERAL, which is what NGX requires of a resource it is handed, so it is left alone.
     Transition(cmdBuffer, g_vk.proxy, VK_IMAGE_LAYOUT_GENERAL);
     Transition(cmdBuffer, g_vk.keep, VK_IMAGE_LAYOUT_GENERAL);
 
-    // Read in GENERAL, which is the layout it is actually in.
+    // Where the encode reads the source.
     //
-    // This slot used to take the default and declare SHADER_READ_ONLY_OPTIMAL, which disagreed with
-    // the comment four lines up and with the resolve below -- the resolve writes this same image as a
-    // storage image, which is only legal in GENERAL, and nothing transitions it in between. It is the
-    // upscaler's output, a storage image the upscaler has just written, so GENERAL is what it is.
-    // Inert on the only hardware this model runs on, wrong everywhere it is read.
-    if (!g_vk.pass->Dispatch(cmdBuffer, encode, width, height, colour->Resource.ImageViewInfo.ImageView,
-                             VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, g_vk.proxy.view, g_vk.keep.view,
-                             VK_IMAGE_LAYOUT_GENERAL))
+    // Unsplit that is GENERAL, which is the layout it is actually in: the game's own frame, a storage
+    // image the upscaler has just written, and nothing transitions it between that write and the
+    // resolve writing it again. Declaring SHADER_READ_ONLY_OPTIMAL here would disagree with both.
+    //
+    // Split, the source is this pass's own stage-input surface. Owning it means the read can be moved
+    // to the layout it wants, and the move is also the dependency that orders it after the upscaler's
+    // write into that surface.
+    VkImageLayout encodeLayout = sourceLayout;
+
+    if (split && g_vk.stageInput.Valid() && g_vk.stageInput.view == sourceView)
+    {
+        Transition(cmdBuffer, g_vk.stageInput, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        encodeLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    if (!g_vk.pass->Dispatch(cmdBuffer, encode, width, height, sourceView, VK_NULL_HANDLE, VK_NULL_HANDLE,
+                             VK_NULL_HANDLE, g_vk.proxy.view, g_vk.keep.view, encodeLayout))
     {
         Fail("the encode dispatch failed");
-        return;
+        return false;
     }
 
     // The model's input: the full proxy, or a downsampled copy of it when the working scale is below
@@ -888,7 +936,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
         {
             Fail("the downsample dispatch failed");
-            return;
+            return false;
         }
 
         modelInput = &g_vk.proxySmall;
@@ -978,7 +1026,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     {
         LOG_ERROR("DLSS-NR Vulkan: evaluate returned {}", evaluated);
         Fail("the model refused to evaluate");
-        return;
+        return false;
     }
 
     // -----------------------------------------------------------------------------------------
@@ -994,12 +1042,14 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
 
     Transition(cmdBuffer, *modelInput, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
+    // The edit lands on destView, which the shader binds as a storage image and therefore reads as
+    // GENERAL. Unsplit that is the game's frame, arriving and staying in GENERAL. Split it belongs to
+    // the caller's pipeline, which rests its surfaces there too, so neither is transitioned here.
     if (!g_vk.pass->Dispatch(cmdBuffer, resolve, width, height, modelInput->view, g_vk.output.view, g_vk.keep.view,
-                             VK_NULL_HANDLE, colour->Resource.ImageViewInfo.ImageView, VK_NULL_HANDLE,
-                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+                             VK_NULL_HANDLE, destView, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
     {
         Fail("the resolve dispatch failed");
-        return;
+        return false;
     }
 
     // Close it, and read the pair from three frames ago -- retired by now, so the read does not wait.
@@ -1036,7 +1086,117 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         reported = true;
         LOG_INFO("DLSS-NR Vulkan: running natively at {}x{}, guides {}x{}", width, height, guideWidth, guideHeight);
     }
+
+    return true;
 }
+
+void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* params, VkInstance instance,
+                            VkPhysicalDevice physicalDevice, VkDevice device)
+{
+    // The model runs inside the upscaler's own pipeline, at render resolution. Running it here as well
+    // runs it on the enlarged frame at full cost, which is the cost the arrangement exists to avoid --
+    // and a game driving a second upscaler feature arrives here once per evaluate of that one too, so
+    // it is not one extra run but several.
+    if (StageCarriesTheModelVk())
+    {
+        ReportSkipOnceVk("the model runs inside the upscaler instead");
+        return;
+    }
+
+    if (params == nullptr)
+        return;
+
+    NVSDK_NGX_Resource_VK* colour = nullptr;
+    params->Get(NVSDK_NGX_Parameter_Output, (void**) &colour);
+
+    NVSDK_NGX_ImageViewInfo_VK info {};
+
+    if (colour != nullptr)
+        info = colour->Resource.ImageViewInfo;
+
+    // Read and edited in place, so the two frames are one frame.
+    EvaluateAtSeamVk(cmdBuffer, params, instance, physicalDevice, device, false, info.ImageView, info.ImageView,
+                     info.Width, info.Height, info.Format, VK_IMAGE_LAYOUT_GENERAL);
+}
+
+bool EvaluateStageVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* params, VkInstance instance,
+                     VkPhysicalDevice physicalDevice, VkDevice device, const VkImageInfo& source,
+                     const VkImageInfo& dest)
+{
+    if (cmdBuffer == VK_NULL_HANDLE || source.ImageView == VK_NULL_HANDLE || dest.ImageView == VK_NULL_HANDLE)
+        return false;
+
+    // Set on entry, not on the frame completing. What the pass after the upscale needs to know is
+    // whether the arrangement carries the model at all, and reaching here answers it. Asking a frame's
+    // outcome instead ran the model a second time at display resolution on every frame that gave up
+    // part way -- which is precisely the frame that could least afford it.
+    g_vk.stageEverRan = true;
+
+    const bool wrote =
+        EvaluateAtSeamVk(cmdBuffer, params, instance, physicalDevice, device, true, source.ImageView, dest.ImageView,
+                         source.Width, source.Height, source.Format, VK_IMAGE_LAYOUT_GENERAL);
+
+    if (!wrote)
+    {
+        // Declining hands the source back in the layout the stage before it wrote it, so the copy the
+        // caller falls back to finds what it left. The seam may have moved it partway through.
+        std::lock_guard<std::mutex> lock(g_vkMutex);
+        Transition(cmdBuffer, g_vk.stageInput, VK_IMAGE_LAYOUT_GENERAL);
+    }
+
+    return wrote;
+}
+
+VkImageInfo StageInputSurfaceVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysicalDevice physicalDevice,
+                                const VkImageInfo& like)
+{
+    if (cmdBuffer == VK_NULL_HANDLE || device == VK_NULL_HANDLE || physicalDevice == VK_NULL_HANDLE ||
+        like.Width == 0 || like.Height == 0 || like.Format == VK_FORMAT_UNDEFINED)
+        return VkImageInfo {};
+
+    std::lock_guard<std::mutex> lock(g_vkMutex);
+
+    g_vk.physicalDevice = physicalDevice;
+
+    // Reached before the seam on the first frame, so the device is matched here as well. A device
+    // change frees everything made on the old one; those handles are abandoned rather than destroyed.
+    if (g_vk.device != device)
+    {
+        ShutdownVk(false);
+        g_vk.device = device;
+        g_vk.physicalDevice = physicalDevice;
+    }
+
+    if (!g_vk.stageInput.Valid() || g_vk.stageInput.width != like.Width || g_vk.stageInput.height != like.Height ||
+        g_vk.stageInput.format != like.Format)
+    {
+        // Previous frames' command buffers still reference the surface about to be freed, and freeing
+        // a Vulkan resource in-flight GPU work still touches is device removal. Same rule, and the
+        // same one-off hitch, as the resize path in the seam.
+        if (g_vk.stageInput.Valid())
+            vkDeviceWaitIdle(device);
+
+        if (!CreateImage(g_vk.stageInput, like.Width, like.Height, like.Format, true))
+            return VkImageInfo {};
+
+        LOG_INFO("DLSS-NR Vulkan: stage input surface {}x{} format {}", like.Width, like.Height, (int) like.Format);
+    }
+
+    // The upscaler writes this as a storage image, which is where the seam expects to find it too.
+    Transition(cmdBuffer, g_vk.stageInput, VK_IMAGE_LAYOUT_GENERAL);
+
+    VkImageInfo info = like;
+    info.Image = g_vk.stageInput.image;
+    info.ImageView = g_vk.stageInput.view;
+    info.SubresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    info.Format = g_vk.stageInput.format;
+    info.Width = g_vk.stageInput.width;
+    info.Height = g_vk.stageInput.height;
+
+    return info;
+}
+
+bool StageCarriesTheModelVk() { return g_vk.stageEverRan && Config::Instance()->DlssNrDualFeature.value_or_default(); }
 
 void ShutdownVk(bool deviceAlive)
 {
@@ -1058,6 +1218,7 @@ void ShutdownVk(bool deviceAlive)
         g_vk.proxy = OwnedImage {};
         g_vk.proxySmall = OwnedImage {};
         g_vk.keep = OwnedImage {};
+        g_vk.stageInput = OwnedImage {};
         g_vk.meter = OwnedImage {};
 
         for (int i = 0; i < 4; ++i)
@@ -1094,6 +1255,7 @@ void ShutdownVk(bool deviceAlive)
     DestroyImage(g_vk.proxy);
     DestroyImage(g_vk.proxySmall);
     DestroyImage(g_vk.keep);
+    DestroyImage(g_vk.stageInput);
     DestroyImage(g_vk.meter);
     DestroyMeterReadback();
 
