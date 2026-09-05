@@ -386,10 +386,38 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nmodel's own work is done small.");
 
         {
+            bool dual = config->DlssNrDualFeature.value_or_default();
+
+            if (ImGui::Checkbox("Run inside the upscaler", &dual))
+                config->DlssNrDualFeature = dual;
+
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.20f, 1.0f), "(experimental, restart)");
+
+            HelpMarker("Splits the upscaler in two and puts the model between the halves. The upscaler"
+                       "\nwrites at render resolution, the model runs on that, and the enlargement to"
+                       "\ndisplay resolution happens afterwards."
+                       "\n\nWith ray reconstruction this makes the first half a denoiser and nothing else,"
+                       "\nwhich is the arrangement worth having: the frame the model sees is clean, and it"
+                       "\nis a quarter of the pixels at Performance."
+                       "\n\nUnlike 'Run before the upscaler', the frame here has already been through"
+                       "\ntemporal accumulation, so the subpixel jitter the model cannot be told about is"
+                       "\nresolved before it sees anything."
+                       "\n\nThe enlargement is the output scaler, not the upscaler's own. Takes effect when"
+                       "\nthe upscaler is next built, so restart or change quality after ticking it."
+                       "\n\nDoes nothing when render resolution already equals display resolution -- at"
+                       "\nDLAA there is no smaller frame to run on.");
+
             bool preUpscale = config->DlssNrPreUpscale.value_or_default();
+
+            if (dual)
+                ImGui::BeginDisabled();
 
             if (ImGui::Checkbox("Run before the upscaler", &preUpscale))
                 config->DlssNrPreUpscale = preUpscale;
+
+            if (dual)
+                ImGui::EndDisabled();
 
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.20f, 1.0f), "(experimental)");

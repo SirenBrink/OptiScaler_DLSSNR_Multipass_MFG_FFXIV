@@ -355,6 +355,17 @@ class Config
     // Experimental: colour at this point is jittered per frame and the model takes no jitter offset.
     CustomOptional<bool> DlssNrPreUpscale { false };
 
+    // Split the upscaler in two and put the model between the halves.
+    //
+    // The upscaler is built to write at render resolution instead of display resolution, which for
+    // ray reconstruction makes it a denoiser and nothing else. The model then runs on a clean,
+    // temporally settled frame at render resolution, and the enlargement happens after it.
+    //
+    // This is the arrangement that answers the jitter objection to DlssNrPreUpscale: the frame the
+    // model is shown here has already been through temporal accumulation, so the subpixel offset the
+    // model cannot be told about has been resolved before it ever sees the picture.
+    CustomOptional<bool> DlssNrDualFeature { false };
+
     // Ask the driver's own nvngx.dll whether it will dispatch Neural Rendering, once per session.
     //
     // Everything here drives the model's DLL directly through a forwarder, because the model refuses

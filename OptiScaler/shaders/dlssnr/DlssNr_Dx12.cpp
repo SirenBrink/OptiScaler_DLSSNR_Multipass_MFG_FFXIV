@@ -1772,9 +1772,9 @@ DlssNr_Dx12::~DlssNr_Dx12()
     }
 }
 
-void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
-                           ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output,
-                           const DlssNrFrameInfo& frame, ID3D12CommandQueue* timingQueue)
+void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
+                           ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
+                           ID3D12CommandQueue* timingQueue, std::optional<D3D12_RESOURCE_STATES> callerOutputArrival)
 {
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
     const Config& cfg = *Config::Instance();
@@ -1800,7 +1800,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Where the source sits between this pass's reads. Unsplit that is the output's own idle state,
     // UNORDERED_ACCESS. Split it is the game's colour buffer, which arrives shader-readable unless
     // ColorResourceBarrier says otherwise -- the same key every upscaler in this tree honours for it.
-    const D3D12_RESOURCE_STATES sourceIdle = !split ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+    // A caller that states where its output rests is running its own pipeline, and both frames it hands
+    // over are surfaces of that pipeline resting in the same state. The game's colour key describes the
+    // game's buffer and does not apply to them.
+    const D3D12_RESOURCE_STATES sourceIdle = !split                            ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                                             : callerOutputArrival.has_value() ? callerOutputArrival.value()
                                              : cfg.ColorResourceBarrier.has_value()
                                                  ? (D3D12_RESOURCE_STATES) cfg.ColorResourceBarrier.value()
                                                  : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -1815,7 +1819,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // A split target is not the upscaler's output but its colour input, so it rests where a colour
     // input rests and the output key does not apply to it.
     const D3D12_RESOURCE_STATES outputArrival =
-        split ? sourceIdle
+        callerOutputArrival.has_value() ? callerOutputArrival.value()
+        : split                         ? sourceIdle
         : Config::Instance()->OutputResourceBarrier.has_value()
             ? (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value()
             : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -2946,8 +2951,12 @@ void RetryAfterFailure()
 // Before the upscaler the frame the model is shown is the game's own colour buffer at render
 // resolution, and the edit cannot land on it -- the upscaler reads it next and it is not ours to
 // write. The edit lands on a surface of ours, which the caller then points the upscaler at.
+// sourceIn and destIn override what the parameter block would have supplied. Both or neither: a
+// caller holding the two frames is placing the pass somewhere the parameter block does not describe,
+// and half an override would leave the pass reading one pipeline and writing another.
 void EvaluateAtSeam(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params, ID3D12CommandQueue* timingQueue,
-                    bool preUpscale)
+                    bool preUpscale, ID3D12Resource* sourceIn = nullptr, ID3D12Resource* destIn = nullptr,
+                    std::optional<D3D12_RESOURCE_STATES> destArrival = std::nullopt)
 {
     if (!Config::Instance()->DlssNrEnabled.value_or_default())
     {
@@ -2978,8 +2987,9 @@ void EvaluateAtSeam(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* par
         }
     }
 
-    ID3D12Resource* target = preUpscale ? GetResource(params, NVSDK_NGX_Parameter_Color, "DLSSD.Color")
-                                        : GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output");
+    ID3D12Resource* target = sourceIn != nullptr ? sourceIn
+                             : preUpscale        ? GetResource(params, NVSDK_NGX_Parameter_Color, "DLSSD.Color")
+                                                 : GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output");
     ID3D12Resource* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
     ID3D12Resource* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
 
@@ -3152,7 +3162,11 @@ void EvaluateAtSeam(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* par
     // of ours matching the game's colour buffer, and the caller substitutes it for the upscale.
     ID3D12Resource* dest = target;
 
-    if (preUpscale)
+    if (destIn != nullptr)
+    {
+        dest = destIn;
+    }
+    else if (preUpscale)
     {
         // Where a colour buffer rests, which is where the pass will expect to find this one. Read the
         // same way the pass reads it, so the two cannot disagree.
@@ -3173,7 +3187,7 @@ void EvaluateAtSeam(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* par
 
     device->Release();
 
-    g_compose->Dispatch(cmdList, target, depth, motion, dest, frame, timingQueue);
+    g_compose->Dispatch(cmdList, target, depth, motion, dest, frame, timingQueue, destArrival);
 }
 
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
@@ -3191,6 +3205,37 @@ void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramet
 }
 
 ID3D12Resource* PreUpscaleResult() { return g_nr.wroteTarget ? g_nr.preOut : nullptr; }
+
+bool EvaluateStage(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params, ID3D12Resource* source,
+                   ID3D12Resource* dest, ID3D12CommandQueue* timingQueue)
+{
+    if (source == nullptr || dest == nullptr)
+        return false;
+
+    g_nr.wroteTarget = false;
+
+    // Both frames belong to the pipeline this stage sits in, where surfaces rest in UNORDERED_ACCESS
+    // between stages. The stage that reads dest next transitions it itself and will do so from there.
+    EvaluateAtSeam(cmdList, params, timingQueue, true, source, dest, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    return g_nr.wroteTarget;
+}
+
+ID3D12Resource* StageInputSurface(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* like)
+{
+    if (cmdList == nullptr || like == nullptr)
+        return nullptr;
+
+    ID3D12Device* device = nullptr;
+
+    if (FAILED(like->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
+        return nullptr;
+
+    // The upscaler writes this as a UAV, which is where the pass expects to find it too.
+    ID3D12Resource* surface = EnsurePreUpscaleSurface(device, cmdList, like, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    device->Release();
+
+    return surface;
+}
 
 // The pass. Resources in, nothing read from anywhere the caller cannot see.
 

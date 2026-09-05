@@ -5,6 +5,7 @@
 
 #include "IFeature_Dx12.h"
 #include "State.h"
+#include <dlssnr/DlssNr.h>
 
 void IFeature_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
                                     D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState) const
@@ -81,8 +82,15 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     if (!RCAS->IsInit())
         useRcas = false;
 
-    bool useOutputScaling =
-        Config::Instance()->OutputScalingEnabled.value_or_default() && (LowResMV() || RenderWidth() == DisplayWidth());
+    // The model between the halves of the upscaler. SetInitParameters has already pointed the upscaler
+    // at render resolution, so the enlargement is not optional here -- without it the frame reaching
+    // the game would be the small one.
+    const bool useDualFeature = Config::Instance()->DlssNrDualFeature.value_or_default() &&
+                                Config::Instance()->DlssNrEnabled.value_or_default() &&
+                                TargetWidth() == RenderWidth() && RenderWidth() < DisplayWidth();
+
+    bool useOutputScaling = useDualFeature || (Config::Instance()->OutputScalingEnabled.value_or_default() &&
+                                               (LowResMV() || RenderWidth() == DisplayWidth()));
 
     if (!OutputScaler->IsInit())
         useOutputScaling = false;
@@ -97,6 +105,39 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
 
     // Order is important as that's the order of shader dispatch
     std::vector<ShaderPass> pipeline;
+
+    // First, so it runs on what the upscaler wrote and before anything enlarges it. The model asks for
+    // a 1:1 scaling ratio at every quality level, so the only way to run it on fewer pixels is to give
+    // it a smaller frame -- which is what the upscaler writing at render resolution produces.
+    if (useDualFeature)
+    {
+        pipeline.push_back({ // Setup
+                             [&](ID3D12Resource* nextOutput) -> ID3D12Resource*
+                             { return DlssNr::StageInputSurface(InCommandList, nextOutput); },
+
+                             // Dispatch
+                             [&](ID3D12Resource* input, ID3D12Resource* output) -> bool
+                             {
+                                 if (DlssNr::EvaluateStage(InCommandList, InParameters, input, output))
+                                     return true;
+
+                                 // A pass that declines leaves the frame where it is, so the enlargement still has
+                                 // something to read. The upscaler's own result, unedited, is the right fallback.
+                                 ResourceBarrier(InCommandList, input, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                 D3D12_RESOURCE_STATE_COPY_SOURCE);
+                                 ResourceBarrier(InCommandList, output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                 D3D12_RESOURCE_STATE_COPY_DEST);
+
+                                 InCommandList->CopyResource(output, input);
+
+                                 ResourceBarrier(InCommandList, input, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                                 ResourceBarrier(InCommandList, output, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+                                 return true;
+                             } });
+    }
 
     if (useOutputScaling)
     {

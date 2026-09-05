@@ -77,6 +77,18 @@ void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramet
 // The surface EvaluateBeforeUpscale wrote, or null when this frame's pass did not run.
 ID3D12Resource* PreUpscaleResult();
 
+// The pass as one stage of an upscaler's own pipeline, on two frames the caller already holds.
+//
+// Everything the model needs beyond the two frames -- depth, motion vectors, the create flags, the
+// reset -- still comes from the parameter block, because those are the game's and unchanged by where
+// the stage sits. Answers whether the edit reached dest; false leaves dest untouched.
+bool EvaluateStage(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params, ID3D12Resource* source,
+                   ID3D12Resource* dest, ID3D12CommandQueue* timingQueue = nullptr);
+
+// The surface the stage before this one should write, matched to the frame this one will write.
+// Rebuilt when that frame changes size or format. Owned here, so the caller holds a borrowed pointer.
+ID3D12Resource* StageInputSurface(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* like);
+
 // Frame generation titles tag their UI layer through Streamline; a copy of it makes the HUD mask
 // exact at the finished frame. Called at tag time.
 
