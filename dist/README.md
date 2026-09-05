@@ -57,6 +57,13 @@ In case of emergency:
 
 You shouldn't have to do this, but worth the shot if nothing else works.
 
+A game that ships its own Streamline loads it from where it put it, not from the folder holding
+the exe. Unreal titles keep it under `Engine\Plugins\Runtime\Nvidia\Streamline\Binaries\
+ThirdParty\Win64`. Copy over that set, and keep a copy of the originals.
+
+The overlay reports the version it found. Below Streamline 2.7.1 there is no multi frame
+generation to unlock and the ratio stops at 2X, whatever the ini asks for.
+
 ---
 
 ## Changelog
@@ -75,6 +82,14 @@ Versions before 4 are not recorded here.
   whose adapter enumeration re-enters the same hook and hangs or crashes the game.
 - MFG unlock reports the detected DLSS-G version and which patches matched, so a bug report
   carries a version number.
+- The generated frame ceiling is published where the count crosses `slDLSSGGetState`, rather
+  than by scanning `sl.dlss_g.dll` for the clamp. The scan matched nothing on any shipped
+  Streamline and could not tell one candidate from another.
+- `OverrideInterpolationCount` needs Streamline 2.7.1. Below that it says so in the log
+  instead of being read and ignored.
+- A reported maximum below the configured interpolation count no longer rewrites that count
+  in the ini.
+- Neural Rendering on a native D3D11 upscaler names what it needs instead of waiting forever.
 - Per-pass Neural Rendering settings, and a pass ceiling that can be lifted.
 
 ---
