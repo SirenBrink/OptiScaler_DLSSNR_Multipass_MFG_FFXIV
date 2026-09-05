@@ -9,6 +9,11 @@ name: Build (Fast)
 
 on:
   workflow_dispatch:
+  # GitHub registers workflow_dispatch from the default branch only, so a dispatch-only workflow that
+  # lives on a topic branch answers 404 forever. A push trigger scoped to the branch both registers it
+  # and fires it, which is the same workaround the signing build carries.
+  push:
+    branches: [ "nr-dual-enlarger" ]
 
 env:
   SOLUTION_FILE_PATH: .

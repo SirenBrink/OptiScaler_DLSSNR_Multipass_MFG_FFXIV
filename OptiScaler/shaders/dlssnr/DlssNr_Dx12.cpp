@@ -256,11 +256,14 @@ struct NrState
     // surface for the frame needs this: without it a skipped pass hands over last frame's picture.
     bool wroteTarget = false;
 
-    // The present this pass last ran on as a stage of an upscaler's own pipeline, +1 so that zero
-    // means never. Scoped to the present rather than latched and cleared because the pass after the
-    // upscale is reached several times per frame -- a game evaluating a native feature four times
-    // over gets four of them -- and a one-shot latch would stop only the first.
-    unsigned long long stageRanAtPresent = 0;
+    // Whether the pass has ever run as a stage of an upscaler's own pipeline.
+    //
+    // Not scoped to a frame, because there is no frame clock the two call sites can agree on:
+    // State::frameCount counts presents, and frame generation makes several of those per rendered
+    // frame. Nor is the question really about this frame. A game driving two upscaler features reaches
+    // the pass after the upscale through the other one, on its own command list, and once the
+    // arrangement is carrying the model there is nothing for it to do there.
+    bool stageEverRan = false;
 
     // The white point meter.
     //
@@ -3199,16 +3202,16 @@ void EvaluateAtSeam(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* par
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                           ID3D12CommandQueue* timingQueue)
 {
-    // The model has already run on this frame, inside an upscaler's own pipeline and at render
-    // resolution. Running it again here runs it on the enlarged frame at full cost, which is what the
-    // arrangement exists to avoid -- and a game that evaluates a native feature several times over
-    // arrives here once per evaluate, so this is several of them.
+    // The model runs inside the upscaler's own pipeline, at render resolution. Running it here as well
+    // runs it on the enlarged frame at full cost, which is the cost the arrangement exists to avoid --
+    // and a game driving a second upscaler feature arrives here once per evaluate of that one too, so
+    // it is not one extra run but several.
     //
     // Checked here rather than at the call sites because there are four of them and only one carried
     // the check.
-    if (StageRanThisFrame())
+    if (StageCarriesTheModel())
     {
-        ReportSkipOnce("the model already ran inside the upscaler this frame");
+        ReportSkipOnce("the model runs inside the upscaler instead");
         return;
     }
 
@@ -3238,12 +3241,15 @@ bool EvaluateStage(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* para
     EvaluateAtSeam(cmdList, params, timingQueue, true, source, dest, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     if (g_nr.wroteTarget)
-        g_nr.stageRanAtPresent = State::Instance().frameCount + 1;
+        g_nr.stageEverRan = true;
 
     return g_nr.wroteTarget;
 }
 
-bool StageRanThisFrame() { return g_nr.stageRanAtPresent == State::Instance().frameCount + 1; }
+// Both halves of the question: the arrangement is switched on, and it has been seen to work. Asking
+// only the setting made the model silent whenever the split did not apply; asking only the flag would
+// keep declining after the setting was turned off.
+bool StageCarriesTheModel() { return g_nr.stageEverRan && Config::Instance()->DlssNrDualFeature.value_or_default(); }
 
 ID3D12Resource* StageInputSurface(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* like)
 {
