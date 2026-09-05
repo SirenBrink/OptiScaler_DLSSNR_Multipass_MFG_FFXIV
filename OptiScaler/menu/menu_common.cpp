@@ -3535,10 +3535,17 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                                            version, mfg.AdvertiseMatched ? "ok" : "no",
                                            mfg.ValidateMatched ? "ok" : "no");
 
-                    // Only reported when it fires. Streamline dropped its own min(count, 3) after 2.7,
-                    // so on a current wrapper there is nothing to match and silence is the right answer.
+                    // Streamline dropped its own min(count, 3) after 2.7, so on a current wrapper there
+                    // is nothing to match and no clamp is the expected reading. It is also what a
+                    // build the scan does not recognise looks like, hence the version and the ratio.
+                    const char* wrapper = mfg.WrapperVersion.empty() ? "version unknown" : mfg.WrapperVersion.c_str();
+
                     if (mfg.WrapperMatched)
-                        ImGui::TextColored(good, "sl.dlss_g.dll: ceiling raised.");
+                        ImGui::TextColored(good, "sl.dlss_g %s: ceiling raised.", wrapper);
+                    else if (mfg.WrapperExhausted)
+                        ImGui::TextDisabled("sl.dlss_g %s: no clamp found. Expected after Streamline 2.7."
+                                            " Report this version if the ratio stops at 4X.",
+                                            wrapper);
 
                     if (mfg.KernelsRewritten > 0)
                         ImGui::TextColored(good, "%u kernel containers run the Blackwell image.", mfg.KernelsRewritten);

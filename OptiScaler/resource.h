@@ -34,6 +34,12 @@
 #define VER_DEV_RELEASE
 // #define VER_PRE_RELEASE
 
+// Follows the release suffix in every flavour of VER_PRODUCT_VERSION_STR. Adjacent literals
+// concatenate, so an empty tag reproduces the upstream string byte for byte.
+#ifndef VER_FORK_TAG
+#define VER_FORK_TAG "-fork-y4my4my4m-v4"
+#endif
+
 #define VER_FILE_VERSION VER_MAJOR_VERSION, VER_MINOR_VERSION, VER_HOTFIX_VERSION, VER_BUILD_NUMBER
 #define VER_FILE_VERSION_STR                                                                                           \
     STRINGIZE(VER_MAJOR_VERSION) "." STRINGIZE(VER_MINOR_VERSION) "." STRINGIZE(VER_HOTFIX_VERSION) "." STRINGIZE(VER_BUILD_NUMBER)
@@ -43,13 +49,13 @@
 
 #ifdef VER_DEV_RELEASE
 #define VER_PRODUCT_VERSION_STR                                                                                        \
-    STRINGIZE(VER_MAJOR_VERSION) "." STRINGIZE(VER_MINOR_VERSION) "." STRINGIZE(VER_HOTFIX_VERSION) "-dev (" VER_BUILD_COMMIT ") (" VER_BUILD_DATE ")"
+    STRINGIZE(VER_MAJOR_VERSION) "." STRINGIZE(VER_MINOR_VERSION) "." STRINGIZE(VER_HOTFIX_VERSION) "-dev" VER_FORK_TAG " (" VER_BUILD_COMMIT ") (" VER_BUILD_DATE ")"
 #elif VER_PRE_RELEASE
 #define VER_PRODUCT_VERSION_STR                                                                                        \
-    STRINGIZE(VER_MAJOR_VERSION) "." STRINGIZE(VER_MINOR_VERSION) "." STRINGIZE(VER_HOTFIX_VERSION) "-pre" STRINGIZE(VER_BUILD_NUMBER) " (" VER_BUILD_COMMIT ") (" VER_BUILD_DATE ")"
+    STRINGIZE(VER_MAJOR_VERSION) "." STRINGIZE(VER_MINOR_VERSION) "." STRINGIZE(VER_HOTFIX_VERSION) "-pre" STRINGIZE(VER_BUILD_NUMBER) VER_FORK_TAG " (" VER_BUILD_COMMIT ") (" VER_BUILD_DATE ")"
 #else
 #define VER_PRODUCT_VERSION_STR                                                                                        \
-    STRINGIZE(VER_MAJOR_VERSION) "." STRINGIZE(VER_MINOR_VERSION) "." STRINGIZE(VER_HOTFIX_VERSION) "-final (" VER_BUILD_COMMIT ")"
+    STRINGIZE(VER_MAJOR_VERSION) "." STRINGIZE(VER_MINOR_VERSION) "." STRINGIZE(VER_HOTFIX_VERSION) "-final" VER_FORK_TAG " (" VER_BUILD_COMMIT ")"
 #endif // VER_PRE_RELEASE
 
 #define VER_PRODUCT_NAME "OptiScaler v" VER_PRODUCT_VERSION_STR

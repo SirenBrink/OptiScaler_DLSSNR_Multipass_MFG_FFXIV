@@ -26,6 +26,10 @@ constexpr std::string_view kValidatePattern = "3D B0 01 00 00 7C ? 83 FB 03 76";
 // The wrapper carries its own ceiling, so raising nvngx alone gets three back.
 constexpr std::string_view kWrapperClampPattern = "41 B8 03 00 00 00 41 3B C8 44 0F 42 C1";
 
+// Bytes between the clamp's immediate and its cmov, for the scan that stands in when no literal
+// signature matches. Covers the compare and one intervening instruction.
+constexpr size_t kClampWindow = 12;
+
 // Five generated frames, the count both patched sites carry.
 constexpr uint8_t kMaxGeneratedFrames = 5;
 
@@ -328,25 +332,208 @@ unsigned int RewriteBlackwellKernels(HMODULE module)
     return rewritten;
 }
 
-// Raises the wrapper's own ceiling to match, so the min() keeps what nvngx published.
-bool PatchWrapperClamp(HMODULE module)
+// The same clamp with whatever registers a build picked, for versions the literal signature does not
+// cover. Encoding: mov r32, imm32 is B8+rd, carrying REX.B (0x41) for r8d..r15d; the unsigned cmovs
+// are 0F 42, 0F 43, 0F 46 and 0F 47, carrying REX.R (0x44) over the same range. A site counts when
+// the immediate is 3, a compare stands between the two, and the cmov writes the register the 3 went
+// into -- min() and max() against a constant three, and little else.
+//
+// Returns the address of the immediate when the module holds exactly one such site. Ambiguity is
+// refused rather than guessed; hits carries the count for the log.
+uintptr_t FindClampImmediate(HMODULE module, unsigned* hits)
 {
-    const auto address = scanner::GetAddress(module, kWrapperClampPattern);
+    auto base = reinterpret_cast<uint8_t*>(module);
+    auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    auto section = IMAGE_FIRST_SECTION(nt);
 
-    if (address == 0)
+    // REX + opcode + imm32, then the window, then the cmov's escape, opcode and modrm.
+    constexpr size_t kSiteMax = 2 + 4 + kClampWindow + 3;
+
+    uintptr_t found = 0;
+
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)
     {
-        LOG_WARN("MFG unlock: the wrapper clamp signature did not match, sl.dlss_g.dll left alone");
+        const auto& s = section[i];
+
+        if ((s.Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0 || s.Misc.VirtualSize < kSiteMax)
+            continue;
+
+        const uint8_t* start = base + s.VirtualAddress;
+        const uint8_t* end = start + s.Misc.VirtualSize - kSiteMax;
+
+        for (const uint8_t* p = start; p < end; ++p)
+        {
+            size_t immAt = 0;
+            unsigned destination = 0;
+
+            if (p[0] >= 0xB8 && p[0] <= 0xBF)
+            {
+                immAt = 1;
+                destination = p[0] - 0xB8u;
+            }
+            else if (p[0] == 0x41 && p[1] >= 0xB8 && p[1] <= 0xBF)
+            {
+                immAt = 2;
+                destination = 8u + (p[1] - 0xB8u);
+            }
+            else
+            {
+                continue;
+            }
+
+            if (*reinterpret_cast<const uint32_t*>(p + immAt) != 3)
+                continue;
+
+            const uint8_t* tail = p + immAt + 4;
+            bool compared = false;
+
+            for (const uint8_t* q = tail; q < tail + kClampWindow; ++q)
+            {
+                // cmp r/m32, r32 and cmp r32, r/m32.
+                if (q[0] == 0x39 || q[0] == 0x3B)
+                {
+                    compared = true;
+                    continue;
+                }
+
+                if (!compared || q[0] != 0x0F)
+                    continue;
+
+                if (q[1] != 0x42 && q[1] != 0x43 && q[1] != 0x46 && q[1] != 0x47)
+                    continue;
+
+                const unsigned rexR = ((q[-1] & 0xF0) == 0x40 && (q[-1] & 0x04) != 0) ? 8u : 0u;
+
+                if (rexR + ((q[2] >> 3) & 7u) != destination)
+                    continue;
+
+                found = reinterpret_cast<uintptr_t>(p + immAt);
+                ++*hits;
+                break;
+            }
+        }
+    }
+
+    return *hits == 1 ? found : 0;
+}
+
+// Raises the wrapper's own ceiling to match, so the min() keeps what nvngx published.
+bool PatchWrapperClamp(HMODULE module, const char* version)
+{
+    if (const auto address = scanner::GetAddress(module, kWrapperClampPattern); address != 0)
+    {
+        // The r8d immediate of the ceiling this clamps against.
+        const auto countAt = address + 2;
+        const uint8_t count[] = { kMaxGeneratedFrames };
+
+        LOG_INFO("MFG unlock: wrapper clamp at {:X} in sl.dlss_g.dll {}, count {} -> {}", address, version,
+                 *(const uint8_t*) countAt, kMaxGeneratedFrames);
+
+        return WriteBytes(countAt, count, sizeof(count));
+    }
+
+    unsigned hits = 0;
+    const auto countAt = FindClampImmediate(module, &hits);
+
+    if (countAt == 0)
+    {
+        LOG_WARN("MFG unlock: no clamp in sl.dlss_g.dll {} ({} candidate sites), left alone", version, hits);
         return false;
     }
 
-    // The r8d immediate of the ceiling this clamps against.
-    const auto countAt = address + 2;
     const uint8_t count[] = { kMaxGeneratedFrames };
 
-    LOG_INFO("MFG unlock: wrapper clamp at {:X}, count {} -> {}", address, *(const uint8_t*) countAt,
-             kMaxGeneratedFrames);
+    LOG_INFO("MFG unlock: wrapper clamp by scan at {:X} in sl.dlss_g.dll {}, count {} -> {}", countAt, version,
+             *(const uint8_t*) countAt, kMaxGeneratedFrames);
 
     return WriteBytes(countAt, count, sizeof(count));
+}
+
+// A module is patched once and, when nothing matched, rescanned a bounded number of times: a module
+// caught mid-load is worth revisiting, a build nobody has looked at is not worth a scan per frame.
+constexpr unsigned kWrapperAttemptLimit = 4;
+constexpr size_t kWrapperSlots = 4;
+
+struct WrapperSlot
+{
+    HMODULE Module;
+    unsigned Attempts;
+    bool Patched;
+};
+
+WrapperSlot g_wrapperSlots[kWrapperSlots] {};
+
+void ApplyWrapper(HMODULE module)
+{
+    if (module == nullptr || !Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default())
+        return;
+
+    WrapperSlot* slot = nullptr;
+
+    for (auto& candidate : g_wrapperSlots)
+    {
+        if (candidate.Module == module)
+        {
+            slot = &candidate;
+            break;
+        }
+    }
+
+    if (slot == nullptr)
+    {
+        for (auto& candidate : g_wrapperSlots)
+        {
+            if (candidate.Module == nullptr)
+            {
+                candidate.Module = module;
+                slot = &candidate;
+                break;
+            }
+        }
+    }
+
+    if (slot == nullptr || slot->Patched || slot->Attempts >= kWrapperAttemptLimit)
+        return;
+
+    ++slot->Attempts;
+
+    const auto version = ModuleVersion(module);
+    const char* label = version.empty() ? "version unknown" : version.c_str();
+
+    if (!g_status.WrapperMatched)
+        g_status.WrapperVersion = version;
+
+    if (PatchWrapperClamp(module, label))
+    {
+        slot->Patched = true;
+        g_status.WrapperMatched = true;
+        g_status.WrapperVersion = version;
+
+        LOG_INFO("MFG unlock: sl.dlss_g.dll {} ceiling raised to {}", label, kMaxGeneratedFrames);
+        return;
+    }
+
+    if (slot->Attempts >= kWrapperAttemptLimit)
+    {
+        g_status.WrapperExhausted = true;
+        LOG_WARN("MFG unlock: sl.dlss_g.dll {} left alone after {} attempts", label, kWrapperAttemptLimit);
+    }
+}
+
+// Nothing left for the sweep to find: something is patched, or every slot is spent.
+bool WrapperSettled()
+{
+    for (const auto& slot : g_wrapperSlots)
+    {
+        if (slot.Patched)
+            return true;
+
+        if (slot.Module == nullptr || slot.Attempts < kWrapperAttemptLimit)
+            return false;
+    }
+
+    return true;
 }
 } // namespace
 
@@ -358,7 +545,7 @@ void MfgUnlock::TryApply()
     // The two modules arrive at different times and each is latched on its own, so whichever is
     // present first is patched then rather than waiting for the other.
     static bool snippetDone = false;
-    static bool wrapperDone = false;
+    static bool wrapperSweepDone = false;
 
     if (!snippetDone)
     {
@@ -392,17 +579,15 @@ void MfgUnlock::TryApply()
         }
     }
 
-    if (!wrapperDone)
+    // Stands in for the load hooks when they do not report the wrapper: the base name resolves to one
+    // module of a possible several, so this is the fallback and TryApplyWrapper is the direct route.
+    if (!wrapperSweepDone)
     {
-        if (auto module = GetModuleHandleW(L"sl.dlss_g.dll"); module != nullptr)
-        {
-            wrapperDone = true;
-            g_status.WrapperMatched = PatchWrapperClamp(module);
-
-            if (g_status.WrapperMatched)
-                LOG_INFO("MFG unlock: sl.dlss_g.dll ceiling raised to {}", kMaxGeneratedFrames);
-        }
+        ApplyWrapper(GetModuleHandleW(L"sl.dlss_g.dll"));
+        wrapperSweepDone = WrapperSettled();
     }
 }
+
+void MfgUnlock::TryApplyWrapper(HMODULE module) { ApplyWrapper(module); }
 
 const MfgUnlock::Status& MfgUnlock::LastStatus() { return g_status; }

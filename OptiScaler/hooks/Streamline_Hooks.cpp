@@ -2095,6 +2095,10 @@ void StreamlineHooks::hookDlssg(HMODULE slDlssg)
         return;
     }
 
+    // Every path that hooks a wrapper passes through here, so the clamp is offered every instance
+    // rather than whichever one the base name resolves to.
+    MfgUnlock::TryApplyWrapper(slDlssg);
+
     if (o_dlssg_slGetPluginFunction)
         unhookDlssg();
 
@@ -2145,6 +2149,8 @@ void StreamlineHooks::hookLocalDlssg(HMODULE slDlssg)
         LOG_WARN("Dlssg module in NULL");
         return;
     }
+
+    MfgUnlock::TryApplyWrapper(slDlssg);
 
     if (o_local_dlssg_slGetPluginFunction)
         unhookLocalDlssg();

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <SysUtils.h>
+
 #include <string>
 
 // Multi Frame Generation on Ada.
@@ -38,9 +40,11 @@ struct Status
     bool ModuleFound = false; // nvngx_dlssg.dll was loaded
     bool AdvertiseMatched = false;
     bool ValidateMatched = false;
-    bool WrapperMatched = false; // Streamline's own min(count, 3) ceiling, absent after 2.7
+    bool WrapperMatched = false;   // Streamline's own min(count, 3) ceiling, absent after 2.7
+    bool WrapperExhausted = false; // a wrapper ran out of attempts with no clamp found
     unsigned int KernelsRewritten = 0;
     std::string SnippetVersion; // file version of nvngx_dlssg.dll, empty if it could not be read
+    std::string WrapperVersion; // file version of sl.dlss_g.dll, empty if it could not be read
 };
 
 const Status& LastStatus();
@@ -48,4 +52,9 @@ const Status& LastStatus();
 // Applies the patches once per process. Silent and harmless when the config option is off, when
 // nvngx_dlssg.dll is not loaded, or when a signature does not match exactly once.
 void TryApply();
+
+// The wrapper half, against a module by handle. Titles that carry Streamline under their own plugin
+// directory load sl.dlss_g.dll after the hooks run, and can hold a second copy that the base name
+// alone does not distinguish from the one that ends up running.
+void TryApplyWrapper(HMODULE module);
 } // namespace MfgUnlock

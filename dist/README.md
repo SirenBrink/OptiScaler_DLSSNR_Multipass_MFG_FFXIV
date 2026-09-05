@@ -1,0 +1,82 @@
+# OptiScaler, y4my4my4m fork
+
+## Step 1:
+
+Modify these to your OptiScaler.ini (read the comments, might not apply to you):
+
+```ini
+[NvApi]
+; x2~x6 MFG spacing is uneven without this (basically frame generation will feel laggy)
+DisableFlipMetering = true
+
+; ONLY IF YOURE ON LINUX? set this to true, otherwise keep to auto
+DisableReflexSync = true
+
+[DLSSG]
+; only needed if you have a 40XX card
+AdaMfgUnlock = true
+```
+
+## Step 2:
+
+Put all these files in your game folder (next to the actual .exe, not the launcher)
+
+## Step 3:
+
+Rename `OptiScaler.dll` to `dxgi.dll`
+
+For a Vulkan only game there is no DXGI to take over, so `dxgi.dll` never loads. Rename it to a
+DLL that game does import instead. `winmm.dll` and `version.dll` are the usual ones. Whatever name
+you pick is the one you override in Step 5.
+
+## Step 4:
+
+You need to put the `nvngx_dlssnr.dll` file (about 158mb) in the game's folder. Make sure to use
+the patched version if you have a card other than a 50XX.
+
+## Step 5 (proton only)
+
+You need to pass dxgi to the WINEDLLOVERRIDES
+
+```
+WINEDLLOVERRIDES="dxgi=n,b" %command%
+```
+
+Use whatever name you renamed the DLL to in Step 3.
+
+---
+
+For support, contact y4my4m in Harmony's town hall (https://har.mony.lol)
+
+---
+
+In case of emergency:
+- Copy all the sl.*.dll files in OptiScaler/streamline into the base game's folder, essentially
+  updating to streamline 2.14
+- Put nvngx_dlss.dll, nvngx_dlssd.dll, nvngx_dlssg.dll from DLSS 310.9 into the game's folder
+
+You shouldn't have to do this, but worth the shot if nothing else works.
+
+---
+
+## Changelog
+
+The DLL reports its own version in the overlay title bar, as `10.0.0-dev-fork-y4my4my4m-v4`.
+Versions before 4 are not recorded here.
+
+### Version 4
+
+- DLSS Neural Rendering can run inside the upscaler instead of after it, at render resolution
+  rather than display resolution. `[DlssNr] DualFeature = true`, with `DualEnlarger` choosing
+  which upscaler enlarges the frame afterwards. Measured 219.6 ms to 5.7 ms per frame at 1440p.
+  Does nothing at DLAA, where render resolution already equals display resolution.
+- The same arrangement on native Vulkan. Untested, no Vulkan title has run it.
+- Vulkan device creation no longer identifies the GPU through DXGI. Under Proton DXGI is dxvk,
+  whose adapter enumeration re-enters the same hook and hangs or crashes the game.
+- MFG unlock reports the detected DLSS-G version and which patches matched, so a bug report
+  carries a version number.
+- Per-pass Neural Rendering settings, and a pass ceiling that can be lifted.
+
+---
+
+Version 4
