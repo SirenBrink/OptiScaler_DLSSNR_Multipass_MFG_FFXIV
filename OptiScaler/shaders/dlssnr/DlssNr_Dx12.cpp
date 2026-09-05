@@ -3220,16 +3220,14 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     // distinct combination, so the next one is not another guess.
     if (Config::Instance()->DlssNrDualFeature.value_or_default())
     {
-        static int said = -1;
-        const int now = g_nr.stageEverRan ? 1 : 0;
+        // Every sixtieth, not once. Reported once it says only what was true the first time, and the
+        // question here is whether the stage ever starts working.
+        static unsigned long long seen = 0;
 
-        if (said != now)
-        {
-            said = now;
-            LOG_WARN("DLSS-NR after the upscale with the arrangement on: stage has ever run {}, its "
-                     "surface {}x{}",
-                     g_nr.stageEverRan, g_nr.preWidth, g_nr.preHeight);
-        }
+        if ((seen++ % 60) == 0)
+            LOG_WARN("DLSS-NR after the upscale with the arrangement on ({} of these): stage has ever "
+                     "run {}, its surface {}x{}",
+                     seen, g_nr.stageEverRan, g_nr.preWidth, g_nr.preHeight);
     }
 
     EvaluateAtSeam(cmdList, params, timingQueue, false);

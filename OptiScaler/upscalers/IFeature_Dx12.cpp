@@ -452,7 +452,22 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     UpscalerTime->End(InCommandList);
 
     if (!evalResult)
+    {
+        // Output still points at the first stage's buffer, which is this pipeline's and is render
+        // sized. Leaving it there hands the game's next reader a surface it does not own; every other
+        // exit from here restores it.
+        InParameters->Set(NVSDK_NGX_Parameter_Output, paramOutput);
+
+        static bool said = false;
+
+        if (!said)
+        {
+            said = true;
+            LOG_ERROR("Upscaler evaluate failed; {} pipeline stage(s) skipped this frame", pipeline.size());
+        }
+
         return false;
+    }
 
     // Iterate FORWARDS to execute the shaders in the defined order
     for (auto& pass : pipeline)
