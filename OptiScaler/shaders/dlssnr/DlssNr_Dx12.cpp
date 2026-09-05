@@ -265,9 +265,6 @@ struct NrState
     // arrangement is carrying the model there is nothing for it to do there.
     bool stageEverRan = false;
 
-    // Which entry point the dispatch in progress arrived through. Diagnostic.
-    const char* caller = "?";
-
     // The white point meter.
     //
     // A 64x64 grid of tile luminances, copied to a readback buffer and looked at a few frames later.
@@ -1959,12 +1956,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                  g_nr.guideMvScaleY, guideWidth, guideHeight, width, height);
     }
 
-    // Diagnostic. Every dispatch, with the entry point that produced it and both frames, so a run that
-    // should not be happening can be attributed rather than inferred.
-    if (cfg.DlssNrDualFeature.value_or_default())
-        LOG_WARN("DLSS-NR trace: via {}, source {:p} dest {:p}, {}x{}, split {}", g_nr.caller, (void*) source,
-                 (void*) target, width, height, split);
-
     if (cfg.DlssNrProxyProbe.value_or_default())
         ProbeProxyDispatch(cmdList);
 
@@ -3218,27 +3209,10 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     //
     // Checked here rather than at the call sites because there are four of them and only one carried
     // the check.
-    g_nr.caller = "after-upscale";
-
     if (StageCarriesTheModel())
     {
         ReportSkipOnce("the model runs inside the upscaler instead");
         return;
-    }
-
-    // Reached while the arrangement is meant to be carrying the model. Four guards have been argued
-    // from a log that showed only the outcome; this prints the inputs to the decision, once per
-    // distinct combination, so the next one is not another guess.
-    if (Config::Instance()->DlssNrDualFeature.value_or_default())
-    {
-        // Every sixtieth, not once. Reported once it says only what was true the first time, and the
-        // question here is whether the stage ever starts working.
-        static unsigned long long seen = 0;
-
-        if ((seen++ % 60) == 0)
-            LOG_WARN("DLSS-NR after the upscale with the arrangement on ({} of these): stage has ever "
-                     "run {}, its surface {}x{}",
-                     seen, g_nr.stageEverRan, g_nr.preWidth, g_nr.preHeight);
     }
 
     EvaluateAtSeam(cmdList, params, timingQueue, false);
@@ -3249,7 +3223,6 @@ void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramet
 {
     // Cleared here as well as inside the pass: this call can give up before the pass is reached.
     g_nr.wroteTarget = false;
-    g_nr.caller = "before-upscale";
     EvaluateAtSeam(cmdList, params, timingQueue, true);
 }
 
@@ -3262,7 +3235,6 @@ bool EvaluateStage(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* para
         return false;
 
     g_nr.wroteTarget = false;
-    g_nr.caller = "pipeline-stage";
 
     // Set on entry, not on the frame completing. What the pass after the upscale needs to know is
     // whether the arrangement carries the model at all, and reaching here answers it. Asking a frame's
