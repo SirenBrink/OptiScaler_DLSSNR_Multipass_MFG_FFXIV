@@ -265,6 +265,9 @@ struct NrState
     // arrangement is carrying the model there is nothing for it to do there.
     bool stageEverRan = false;
 
+    // Which entry point the dispatch in progress arrived through. Diagnostic.
+    const char* caller = "?";
+
     // The white point meter.
     //
     // A 64x64 grid of tile luminances, copied to a readback buffer and looked at a few frames later.
@@ -1956,6 +1959,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                  g_nr.guideMvScaleY, guideWidth, guideHeight, width, height);
     }
 
+    // Diagnostic. Every dispatch, with the entry point that produced it and both frames, so a run that
+    // should not be happening can be attributed rather than inferred.
+    if (cfg.DlssNrDualFeature.value_or_default())
+        LOG_WARN("DLSS-NR trace: via {}, source {:p} dest {:p}, {}x{}, split {}", g_nr.caller, (void*) source,
+                 (void*) target, width, height, split);
+
     if (cfg.DlssNrProxyProbe.value_or_default())
         ProbeProxyDispatch(cmdList);
 
@@ -3209,6 +3218,8 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     //
     // Checked here rather than at the call sites because there are four of them and only one carried
     // the check.
+    g_nr.caller = "after-upscale";
+
     if (StageCarriesTheModel())
     {
         ReportSkipOnce("the model runs inside the upscaler instead");
@@ -3238,6 +3249,7 @@ void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramet
 {
     // Cleared here as well as inside the pass: this call can give up before the pass is reached.
     g_nr.wroteTarget = false;
+    g_nr.caller = "before-upscale";
     EvaluateAtSeam(cmdList, params, timingQueue, true);
 }
 
@@ -3250,6 +3262,7 @@ bool EvaluateStage(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* para
         return false;
 
     g_nr.wroteTarget = false;
+    g_nr.caller = "pipeline-stage";
 
     // Both frames belong to the pipeline this stage sits in, where surfaces rest in UNORDERED_ACCESS
     // between stages. The stage that reads dest next transitions it itself and will do so from there.

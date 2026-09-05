@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <vector>
+#include <unordered_map>
 
 #include "IFeature_Dx12.h"
 #include "FeatureProvider_Dx12.h"
@@ -221,6 +222,20 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     ID3D12Resource* paramOutput = nullptr;
     ID3D12Resource* paramMotion = nullptr;
     ID3D12Resource* paramDepth = nullptr;
+
+    // Diagnostic. Everything the split decision is made from, per feature, every sixtieth evaluate.
+    if (Config::Instance()->DlssNrDualFeature.value_or_default())
+    {
+        static std::unordered_map<unsigned int, unsigned long long> seen;
+        auto& n = seen[Handle()->Id];
+
+        if ((n++ % 60) == 0)
+            LOG_WARN("Evaluate trace: handle {} {}, enlargement stage {}, render {}x{} target {}x{} "
+                     "display {}x{}, dual {}, upscalerEnlarger {}, outputScaling {}",
+                     Handle()->Id, Name(), _isEnlargementStage, RenderWidth(), RenderHeight(), TargetWidth(),
+                     TargetHeight(), DisplayWidth(), DisplayHeight(), useDualFeature, useUpscalerEnlarger,
+                     useOutputScaling);
+    }
 
     InParameters->Get(NVSDK_NGX_Parameter_Output, &paramOutput);
     InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, &paramMotion);
