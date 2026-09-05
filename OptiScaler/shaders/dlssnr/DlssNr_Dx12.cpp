@@ -3215,6 +3215,23 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
         return;
     }
 
+    // Reached while the arrangement is meant to be carrying the model. Four guards have been argued
+    // from a log that showed only the outcome; this prints the inputs to the decision, once per
+    // distinct combination, so the next one is not another guess.
+    if (Config::Instance()->DlssNrDualFeature.value_or_default())
+    {
+        static int said = -1;
+        const int now = g_nr.stageEverRan ? 1 : 0;
+
+        if (said != now)
+        {
+            said = now;
+            LOG_WARN("DLSS-NR after the upscale with the arrangement on: stage has ever run {}, its "
+                     "surface {}x{}",
+                     g_nr.stageEverRan, g_nr.preWidth, g_nr.preHeight);
+        }
+    }
+
     EvaluateAtSeam(cmdList, params, timingQueue, false);
 }
 
