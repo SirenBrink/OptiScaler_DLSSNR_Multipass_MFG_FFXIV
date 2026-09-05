@@ -107,10 +107,17 @@ class IFeature
 
     virtual void SetInit(bool InValue) { _isInited = InValue; }
 
+    // Set on a feature that is itself the enlargement half of another. Such a feature never splits in
+    // turn: it is the half that does the enlarging, and it writes at display resolution.
+    bool _isEnlargementStage = false;
+
   public:
     NVSDK_NGX_Handle* Handle() const { return _handle; };
     static unsigned int GetNextHandleId() { return handleCounter++; }
     int GetFeatureFlags() const { return _featureFlags; }
+
+    void MarkEnlargementStage() { _isEnlargementStage = true; }
+    bool IsEnlargementStage() const { return _isEnlargementStage; }
 
     virtual bool IsWithDx12() = 0;
     virtual feature_version Version() = 0;

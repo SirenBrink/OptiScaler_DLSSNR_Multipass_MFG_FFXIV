@@ -366,6 +366,15 @@ class Config
     // model cannot be told about has been resolved before it ever sees the picture.
     CustomOptional<bool> DlssNrDualFeature { false };
 
+    // Which upscaler performs the enlargement in that arrangement, or none for the spatial output
+    // scaler. Read through the same name table as every other upscaler choice, and resolved through
+    // the same provider -- so a machine without DLSS is handed FSR here exactly as it is anywhere else.
+    //
+    // Unset means the spatial scaler: it needs no motion vectors, no depth and no jitter, so it is the
+    // one option that cannot be wrong about them. The upscalers are sharper and answer to the jitter
+    // question, which the first half has already consumed.
+    CustomOptional<Upscaler, NoDefault> DlssNrDualEnlarger;
+
     // Ask the driver's own nvngx.dll whether it will dispatch Neural Rendering, once per session.
     //
     // Everything here drives the model's DLL directly through a forwarder, because the model refuses

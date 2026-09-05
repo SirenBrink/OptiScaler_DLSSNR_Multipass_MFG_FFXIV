@@ -160,7 +160,7 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         //
         // Only where there is something to split. At render == display the upscaler is already 1:1 and
         // the model would be run on the same frame it runs on today, for the same cost.
-        if (Config::Instance()->DlssNrDualFeature.value_or_default() &&
+        if (!_isEnlargementStage && Config::Instance()->DlssNrDualFeature.value_or_default() &&
             Config::Instance()->DlssNrEnabled.value_or_default() && _renderWidth < _displayWidth)
         {
             _targetWidth = _renderWidth;

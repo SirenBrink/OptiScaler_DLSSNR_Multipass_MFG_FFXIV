@@ -408,6 +408,45 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nDoes nothing when render resolution already equals display resolution -- at"
                        "\nDLAA there is no smaller frame to run on.");
 
+            if (dual)
+            {
+                // The same names the upscaler list uses, resolved through the same provider, so a
+                // machine without DLSS is handed FSR here exactly as it is anywhere else.
+                static const char* enlargerNames[] = { "Spatial (no motion vectors)", "DLSS", "FSR 2.2", "FSR 3.1",
+                                                       "XeSS" };
+                static const std::optional<Upscaler> enlargerValues[] = { std::nullopt, Upscaler::DLSS, Upscaler::FSR22,
+                                                                          Upscaler::FFX, Upscaler::XeSS };
+
+                const auto current = config->DlssNrDualEnlarger.value_for_config();
+
+                int index = 0;
+                for (int i = 1; i < IM_ARRAYSIZE(enlargerNames); ++i)
+                {
+                    if (current == enlargerValues[i])
+                    {
+                        index = i;
+                        break;
+                    }
+                }
+
+                if (ImGui::Combo("Enlarged by", &index, enlargerNames, IM_ARRAYSIZE(enlargerNames)))
+                {
+                    if (enlargerValues[index].has_value())
+                        config->DlssNrDualEnlarger = enlargerValues[index].value();
+                    else
+                        config->DlssNrDualEnlarger.reset();
+                }
+
+                HelpMarker("What enlarges the frame once the model has edited it."
+                           "\n\nSpatial needs no motion vectors, no depth and no jitter, so it cannot be"
+                           "\nwrong about any of them -- and it is the softest, having nothing temporal to"
+                           "\nwork from."
+                           "\n\nThe upscalers are sharper and use the game's own per-frame data. An"
+                           "\nupscaler this machine cannot run is replaced with one it can, the same way"
+                           "\nthe main upscaler list behaves."
+                           "\n\nTakes effect when the upscaler is next built.");
+            }
+
             bool preUpscale = config->DlssNrPreUpscale.value_or_default();
 
             if (dual)
