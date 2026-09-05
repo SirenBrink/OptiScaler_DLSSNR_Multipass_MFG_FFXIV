@@ -26,6 +26,10 @@
 //
 // Memory only. The file on disk carries an Authenticode signature and is left alone.
 //
+// A Streamline wrapper between the game and the snippet can carry a lower ceiling of its own. That
+// one is raised where the count crosses slDLSSGGetState. Advertise and validate have no such
+// boundary: nothing stands between sl.dlss_g.dll and nvngx_dlssg.dll to intercept.
+//
 // Ada also runs a different interpolation kernel: Kernel_EstimateIntermMvecsScatter reads three f32
 // fields of its parameter block on sm_120 and one on sm_89, so every generated frame lands at the
 // same point between the two real ones. The Blackwell image is retargeted in place to answer for Ada.
@@ -40,11 +44,8 @@ struct Status
     bool ModuleFound = false; // nvngx_dlssg.dll was loaded
     bool AdvertiseMatched = false;
     bool ValidateMatched = false;
-    bool WrapperMatched = false;   // Streamline's own min(count, 3) ceiling, absent after 2.7
-    bool WrapperExhausted = false; // a wrapper ran out of attempts with no clamp found
     unsigned int KernelsRewritten = 0;
     std::string SnippetVersion; // file version of nvngx_dlssg.dll, empty if it could not be read
-    std::string WrapperVersion; // file version of sl.dlss_g.dll, empty if it could not be read
 };
 
 const Status& LastStatus();
@@ -53,8 +54,6 @@ const Status& LastStatus();
 // nvngx_dlssg.dll is not loaded, or when a signature does not match exactly once.
 void TryApply();
 
-// The wrapper half, against a module by handle. Titles that carry Streamline under their own plugin
-// directory load sl.dlss_g.dll after the hooks run, and can hold a second copy that the base name
-// alone does not distinguish from the one that ends up running.
-void TryApplyWrapper(HMODULE module);
+// The generated frame ceiling the patches opened, or 0 when they did not land.
+unsigned int UnlockedMax();
 } // namespace MfgUnlock

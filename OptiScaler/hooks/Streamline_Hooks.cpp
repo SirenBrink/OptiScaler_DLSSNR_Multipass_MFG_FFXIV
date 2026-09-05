@@ -1153,16 +1153,24 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
             sl::DLSSGState localState {};
             sl::DLSSGOptions localOptions {};
-            if (o_slDLSSGGetState(viewport, localState, &localOptions) == sl::Result::eOk &&
-                localState.numFramesToGenerateMax > 0 && localState.numFramesToGenerateMax < 6)
+            if (o_slDLSSGGetState(viewport, localState, &localOptions) == sl::Result::eOk)
             {
-                state.dlssgMfgMax = localState.numFramesToGenerateMax;
-                LOG_TRACE("Saving original numFramesToGenerateMax: {}", state.dlssgMfgMax.value());
+                // A wrapper ahead of the snippet can answer a lower ceiling than the patched one.
+                if (auto unlockedMax = MfgUnlock::UnlockedMax(); unlockedMax > localState.numFramesToGenerateMax)
+                    localState.numFramesToGenerateMax = unlockedMax;
 
-                if (Config::Instance()->FGDLSSGOverrideInterpolationCount.has_value() &&
-                    Config::Instance()->FGDLSSGOverrideInterpolationCount.value() > state.dlssgMfgMax.value())
+                if (localState.numFramesToGenerateMax > 0 && localState.numFramesToGenerateMax < 6)
                 {
-                    Config::Instance()->FGDLSSGOverrideInterpolationCount = state.dlssgMfgMax.value();
+                    state.dlssgMfgMax = localState.numFramesToGenerateMax;
+                    LOG_TRACE("Saving original numFramesToGenerateMax: {}", state.dlssgMfgMax.value());
+
+                    // Volatile: the clamp holds for this run and leaves the ini setting alone.
+                    if (Config::Instance()->FGDLSSGOverrideInterpolationCount.has_value() &&
+                        Config::Instance()->FGDLSSGOverrideInterpolationCount.value() > state.dlssgMfgMax.value())
+                    {
+                        Config::Instance()->FGDLSSGOverrideInterpolationCount.set_volatile_value(
+                            state.dlssgMfgMax.value());
+                    }
                 }
             }
         }
@@ -1175,6 +1183,20 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
                 newOptions.numFramesToGenerate = overrideCount;
             else if (!enableDynamicMode)
                 newOptions.mode = sl::DLSSGMode::eOff;
+        }
+    }
+    else if (dlssgPotentiallyActive && Config::Instance()->FGDLSSGOverrideInterpolationCount.has_value() &&
+             Config::Instance()->FGDLSSGOverrideInterpolationCount.value() != 0)
+    {
+        // Once. slDLSSGSetOptions runs per frame.
+        static bool warnedNoMfg = false;
+
+        if (!warnedNoMfg)
+        {
+            warnedNoMfg = true;
+            LOG_WARN("Interpolation count override ignored: Streamline {}.{}.{}, multi frame generation "
+                     "needs 2.7.1",
+                     state.streamlineVersion.major, state.streamlineVersion.minor, state.streamlineVersion.patch);
         }
     }
 
@@ -1208,6 +1230,12 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
             state.numFramesToGenerateMax = newState.numFramesToGenerateMax;
             state.bReserved4 = newState.bReserved4;
             state.bIsVsyncSupportAvailable = newState.bIsVsyncSupportAvailable;
+
+            // nvngx_dlssg.dll answers the real ceiling, but a Streamline wrapper between here and the
+            // snippet can carry a lower one of its own. Publish the unlocked count. Struct version 1
+            // ends ahead of this field, so the raise stays inside this branch.
+            if (auto unlockedMax = MfgUnlock::UnlockedMax(); unlockedMax > state.numFramesToGenerateMax)
+                state.numFramesToGenerateMax = unlockedMax;
         }
 
         if (originalStructVersion >= 3)
@@ -1223,6 +1251,10 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
     {
         result = o_slDLSSGGetState(viewport, state, options);
         State::Instance().dlssgGameDMFGSupported = state.bIsDynamicMFGSupported == sl::eTrue;
+
+        // The wrapper's ceiling, replaced by the unlocked count.
+        if (auto unlockedMax = MfgUnlock::UnlockedMax(); unlockedMax > state.numFramesToGenerateMax)
+            state.numFramesToGenerateMax = unlockedMax;
     }
 
     if (!State::Instance().dlssgGameDMFGSupported)
@@ -1238,16 +1270,24 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
         {
             sl::DLSSGState localState {};
             sl::DLSSGOptions localOptions {};
-            if (o_slDLSSGGetState(viewport, localState, &localOptions) == sl::Result::eOk &&
-                localState.numFramesToGenerateMax > 0 && localState.numFramesToGenerateMax < 6)
+            if (o_slDLSSGGetState(viewport, localState, &localOptions) == sl::Result::eOk)
             {
-                optiState.dlssgMfgMax = localState.numFramesToGenerateMax;
-                LOG_TRACE("Saving original numFramesToGenerateMax: {}", optiState.dlssgMfgMax.value());
+                // A wrapper ahead of the snippet can answer a lower ceiling than the patched one.
+                if (auto unlockedMax = MfgUnlock::UnlockedMax(); unlockedMax > localState.numFramesToGenerateMax)
+                    localState.numFramesToGenerateMax = unlockedMax;
 
-                if (Config::Instance()->FGDLSSGOverrideInterpolationCount.has_value() &&
-                    Config::Instance()->FGDLSSGOverrideInterpolationCount.value() > optiState.dlssgMfgMax.value())
+                if (localState.numFramesToGenerateMax > 0 && localState.numFramesToGenerateMax < 6)
                 {
-                    Config::Instance()->FGDLSSGOverrideInterpolationCount = optiState.dlssgMfgMax.value();
+                    optiState.dlssgMfgMax = localState.numFramesToGenerateMax;
+                    LOG_TRACE("Saving original numFramesToGenerateMax: {}", optiState.dlssgMfgMax.value());
+
+                    // Volatile: the clamp holds for this run and leaves the ini setting alone.
+                    if (Config::Instance()->FGDLSSGOverrideInterpolationCount.has_value() &&
+                        Config::Instance()->FGDLSSGOverrideInterpolationCount.value() > optiState.dlssgMfgMax.value())
+                    {
+                        Config::Instance()->FGDLSSGOverrideInterpolationCount.set_volatile_value(
+                            optiState.dlssgMfgMax.value());
+                    }
                 }
             }
         }
@@ -1276,7 +1316,9 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
             state.numFramesActuallyPresented = 1;
         }
 
-        state.numFramesToGenerateMax = 1;
+        // Struct version 1 ends at 56 bytes, ahead of this field.
+        if (originalStructVersion >= 2)
+            state.numFramesToGenerateMax = 1;
 
         LOG_DEBUG("Status: {}, numFramesActuallyPresented: {}", magic_enum::enum_name(state.status),
                   state.numFramesActuallyPresented);
@@ -2095,10 +2137,6 @@ void StreamlineHooks::hookDlssg(HMODULE slDlssg)
         return;
     }
 
-    // Every path that hooks a wrapper passes through here, so the clamp is offered every instance
-    // rather than whichever one the base name resolves to.
-    MfgUnlock::TryApplyWrapper(slDlssg);
-
     if (o_dlssg_slGetPluginFunction)
         unhookDlssg();
 
@@ -2149,8 +2187,6 @@ void StreamlineHooks::hookLocalDlssg(HMODULE slDlssg)
         LOG_WARN("Dlssg module in NULL");
         return;
     }
-
-    MfgUnlock::TryApplyWrapper(slDlssg);
 
     if (o_local_dlssg_slGetPluginFunction)
         unhookLocalDlssg();

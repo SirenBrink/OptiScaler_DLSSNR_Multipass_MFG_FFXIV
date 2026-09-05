@@ -3535,26 +3535,14 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                                            version, mfg.AdvertiseMatched ? "ok" : "no",
                                            mfg.ValidateMatched ? "ok" : "no");
 
-                    // Streamline dropped its own min(count, 3) after 2.7, so on a current wrapper there
-                    // is nothing to match and no clamp is the expected reading. It is also what a
-                    // build the scan does not recognise looks like, hence the version and the ratio.
-                    const char* wrapper = mfg.WrapperVersion.empty() ? "version unknown" : mfg.WrapperVersion.c_str();
-
-                    if (mfg.WrapperMatched)
-                        ImGui::TextColored(good, "sl.dlss_g %s: ceiling raised.", wrapper);
-                    else if (mfg.WrapperExhausted)
-                        ImGui::TextDisabled("sl.dlss_g %s: no clamp found. Expected after Streamline 2.7."
-                                            " Report this version if the ratio stops at 4X.",
-                                            wrapper);
-
                     if (mfg.KernelsRewritten > 0)
                         ImGui::TextColored(good, "%u kernel containers run the Blackwell image.", mfg.KernelsRewritten);
                 }
             }
 
-            ShowHelpMarker("Raises the generated frame maximum in nvngx_dlssg.dll and in sl.dlss_g.dll's own "
-                           "ceiling, so the ratio above offers up to 6X on pre-Blackwell cards. Patched in "
-                           "memory; neither file on disk is touched. Takes effect on the next game start.\n\n"
+            ShowHelpMarker("Raises the generated frame maximum in nvngx_dlssg.dll and in the count Streamline "
+                           "reports, so the ratio above offers up to 6X on pre-Blackwell cards. Patched in "
+                           "memory; the file on disk is not touched. Takes effect on the next game start.\n\n"
                            "Pacing above 2X is uneven -- the module expects Blackwell's flip metering hardware. "
                            "Try DisableFlipMetering under [NvApi] alongside it.\n\n"
                            "Undocumented and unsupported by NVIDIA.");
