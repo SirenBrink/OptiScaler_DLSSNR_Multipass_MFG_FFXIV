@@ -1144,13 +1144,19 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     if (dlssgPotentiallyActive && state.streamlineVersion >= feature_version { 2, 7, 1 })
     {
-        // Populate dlssgMfgMax once
-        if (!state.dlssgMfgMax.has_value())
-        {
-            // Before the read, so the count this captures is the patched one. Five stays under the
-            // sanity bound below.
-            MfgUnlock::TryApply();
+        // Before the read, so the count this captures is the patched one. Five stays under the
+        // sanity bound below.
+        MfgUnlock::TryApply();
 
+        // nvngx_dlssg.dll can load after this runs, and the ceiling read before it does is Ada's
+        // 1. Caching that holds it for the session and clamps the override to it. ModuleFound
+        // means the patches have been attempted, so from there the answer is final either way.
+        const bool unlockPending =
+            Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default() && !MfgUnlock::LastStatus().ModuleFound;
+
+        // Populate dlssgMfgMax once
+        if (!state.dlssgMfgMax.has_value() && !unlockPending)
+        {
             sl::DLSSGState localState {};
             sl::DLSSGOptions localOptions {};
             if (o_slDLSSGGetState(viewport, localState, &localOptions) == sl::Result::eOk)
@@ -1266,7 +1272,11 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
 
     if (optiState.streamlineVersion >= feature_version { 2, 7, 1 })
     {
-        if (!optiState.dlssgMfgMax.has_value())
+        // Provisional until the snippet has been seen. See the note in hkslDLSSGSetOptions.
+        const bool unlockPending =
+            Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default() && !MfgUnlock::LastStatus().ModuleFound;
+
+        if (!optiState.dlssgMfgMax.has_value() && !unlockPending)
         {
             sl::DLSSGState localState {};
             sl::DLSSGOptions localOptions {};
