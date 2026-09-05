@@ -256,6 +256,11 @@ struct NrState
     // surface for the frame needs this: without it a skipped pass hands over last frame's picture.
     bool wroteTarget = false;
 
+    // Whether the pass ran as a stage of an upscaler's pipeline this frame. Read and cleared by the
+    // call site that would otherwise run the pass after the upscale, so a stage that did not fire --
+    // an unsplit feature, a frame the pass declined -- leaves the model running rather than silent.
+    bool stageRan = false;
+
     // The white point meter.
     //
     // A 64x64 grid of tile luminances, copied to a readback buffer and looked at a few frames later.
@@ -3217,7 +3222,17 @@ bool EvaluateStage(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* para
     // Both frames belong to the pipeline this stage sits in, where surfaces rest in UNORDERED_ACCESS
     // between stages. The stage that reads dest next transitions it itself and will do so from there.
     EvaluateAtSeam(cmdList, params, timingQueue, true, source, dest, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    g_nr.stageRan = g_nr.wroteTarget;
+
     return g_nr.wroteTarget;
+}
+
+bool StageRanThisFrame()
+{
+    const bool ran = g_nr.stageRan;
+    g_nr.stageRan = false;
+    return ran;
 }
 
 ID3D12Resource* StageInputSurface(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* like)

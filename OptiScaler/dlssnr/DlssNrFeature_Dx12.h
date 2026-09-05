@@ -89,6 +89,13 @@ bool EvaluateStage(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* para
 // Rebuilt when that frame changes size or format. Owned here, so the caller holds a borrowed pointer.
 ID3D12Resource* StageInputSurface(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* like);
 
+// Whether EvaluateStage edited a frame since this was last asked, and clears the answer.
+//
+// The call site after the upscale asks before running the pass there. Answering from what happened
+// rather than from what was configured is the difference between the two placements being exclusive
+// and the model going silent whenever the stage does not fire.
+bool StageRanThisFrame();
+
 // Frame generation titles tag their UI layer through Streamline; a copy of it makes the HUD mask
 // exact at the finished frame. Called at tag time.
 

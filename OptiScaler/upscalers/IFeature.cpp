@@ -8,6 +8,20 @@ void IFeature::SetHandle(unsigned int InHandleId)
     LOG_INFO("Handle: {0}", _handle->Id);
 }
 
+// Neural Rendering between the halves of the upscaler: the upscaler writes at render resolution and
+// the enlargement to display resolution becomes a later stage, with the model between the two. For ray
+// reconstruction that makes the feature a denoiser and nothing else, which is the point -- the frame
+// handed to the model is clean, temporally settled, and a ninth of the pixels at Ultra Performance.
+//
+// Only where there is something to split. At render == display the upscaler is already 1:1 and the
+// model would run on the frame it runs on today, at the cost it costs today.
+bool IFeature::DualFeatureSplit() const
+{
+    return !_isEnlargementStage && _renderWidth > 0 && _renderWidth < _displayWidth &&
+           Config::Instance()->DlssNrDualFeature.value_or_default() &&
+           Config::Instance()->DlssNrEnabled.value_or_default();
+}
+
 bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
 {
     unsigned int width = 0;
@@ -151,24 +165,9 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
 
         _perfQualityValue = (NVSDK_NGX_PerfQuality_Value) pqValue;
 
-        // Neural Rendering between the halves of the upscaler.
-        //
-        // The upscaler is built to write at render resolution; the enlargement to display resolution
-        // becomes a later stage, and the model runs between the two. For ray reconstruction this makes
-        // the feature a denoiser and nothing else, which is the point -- the frame handed to the model
-        // is clean and temporally settled, and a quarter of the pixels at Performance.
-        //
-        // Only where there is something to split. At render == display the upscaler is already 1:1 and
-        // the model would be run on the same frame it runs on today, for the same cost.
-        if (!_isEnlargementStage && Config::Instance()->DlssNrDualFeature.value_or_default() &&
-            Config::Instance()->DlssNrEnabled.value_or_default() && _renderWidth < _displayWidth)
-        {
-            _targetWidth = _renderWidth;
-            _targetHeight = _renderHeight;
-
+        if (DualFeatureSplit())
             LOG_INFO("DLSS-NR dual feature: upscaler targets {}x{}, enlargement to {}x{} runs after the model",
-                     _targetWidth, _targetHeight, _displayWidth, _displayHeight);
-        }
+                     _renderWidth, _renderHeight, _displayWidth, _displayHeight);
 
         LOG_INFO("Render Resolution: {0}x{1}, Display Resolution {2}x{3}, Quality: {4}", _renderWidth, _renderHeight,
                  _displayWidth, _displayHeight, pqValue);

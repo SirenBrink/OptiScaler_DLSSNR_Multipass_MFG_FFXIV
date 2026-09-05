@@ -190,9 +190,7 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     // The model between the halves of the upscaler. SetInitParameters has already pointed the upscaler
     // at render resolution, so the enlargement is not optional here -- without it the frame reaching
     // the game would be the small one.
-    const bool useDualFeature = !_isEnlargementStage && Config::Instance()->DlssNrDualFeature.value_or_default() &&
-                                Config::Instance()->DlssNrEnabled.value_or_default() &&
-                                TargetWidth() == RenderWidth() && RenderWidth() < DisplayWidth();
+    const bool useDualFeature = DualFeatureSplit();
 
     // Asked for and not taken. The split is decided from three numbers settled when the feature was
     // built, so a mismatch here is silent and looks exactly like the option doing nothing.
