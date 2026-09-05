@@ -1251,13 +1251,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
     // resolution. Running it here as well runs it a second time on the enlarged frame, at exactly the
     // full cost the arrangement exists to avoid.
     //
-    // Asked of the pass rather than of the config: the arrangement can be switched on and still not
-    // apply -- an unsplit feature, a frame the pass declined -- and reading the setting instead turns
-    // every one of those into the model silently not running at all.
-    const bool ranInPipeline = DlssNr::StageRanThisFrame();
-
-    if (optiResult == NVSDK_NGX_Result_Success && feature != NVSDK_NGX_Feature_FrameGeneration && !preNr.substituted &&
-        !ranInPipeline)
+    // EvaluateAfterUpscale declines by itself on a frame the pipeline stage already handled, so every
+    // call site is covered rather than this one.
+    if (optiResult == NVSDK_NGX_Result_Success && feature != NVSDK_NGX_Feature_FrameGeneration && !preNr.substituted)
         DlssNr::EvaluateAfterUpscale(InCmdList, InParameters);
 
     return optiResult;

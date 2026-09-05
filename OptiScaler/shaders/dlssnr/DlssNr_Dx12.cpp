@@ -256,10 +256,11 @@ struct NrState
     // surface for the frame needs this: without it a skipped pass hands over last frame's picture.
     bool wroteTarget = false;
 
-    // Whether the pass ran as a stage of an upscaler's pipeline this frame. Read and cleared by the
-    // call site that would otherwise run the pass after the upscale, so a stage that did not fire --
-    // an unsplit feature, a frame the pass declined -- leaves the model running rather than silent.
-    bool stageRan = false;
+    // The present this pass last ran on as a stage of an upscaler's own pipeline, +1 so that zero
+    // means never. Scoped to the present rather than latched and cleared because the pass after the
+    // upscale is reached several times per frame -- a game evaluating a native feature four times
+    // over gets four of them -- and a one-shot latch would stop only the first.
+    unsigned long long stageRanAtPresent = 0;
 
     // The white point meter.
     //
@@ -3198,6 +3199,19 @@ void EvaluateAtSeam(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* par
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                           ID3D12CommandQueue* timingQueue)
 {
+    // The model has already run on this frame, inside an upscaler's own pipeline and at render
+    // resolution. Running it again here runs it on the enlarged frame at full cost, which is what the
+    // arrangement exists to avoid -- and a game that evaluates a native feature several times over
+    // arrives here once per evaluate, so this is several of them.
+    //
+    // Checked here rather than at the call sites because there are four of them and only one carried
+    // the check.
+    if (StageRanThisFrame())
+    {
+        ReportSkipOnce("the model already ran inside the upscaler this frame");
+        return;
+    }
+
     EvaluateAtSeam(cmdList, params, timingQueue, false);
 }
 
@@ -3223,17 +3237,13 @@ bool EvaluateStage(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* para
     // between stages. The stage that reads dest next transitions it itself and will do so from there.
     EvaluateAtSeam(cmdList, params, timingQueue, true, source, dest, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    g_nr.stageRan = g_nr.wroteTarget;
+    if (g_nr.wroteTarget)
+        g_nr.stageRanAtPresent = State::Instance().frameCount + 1;
 
     return g_nr.wroteTarget;
 }
 
-bool StageRanThisFrame()
-{
-    const bool ran = g_nr.stageRan;
-    g_nr.stageRan = false;
-    return ran;
-}
+bool StageRanThisFrame() { return g_nr.stageRanAtPresent == State::Instance().frameCount + 1; }
 
 ID3D12Resource* StageInputSurface(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* like)
 {
