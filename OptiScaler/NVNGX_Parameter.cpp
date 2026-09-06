@@ -388,6 +388,52 @@ template <typename T> NVSDK_NGX_Result NVNGX_Parameters::getT(const char* key, T
     return NVSDK_NGX_Result_Success;
 }
 
+/// @brief The preset the game asked for, or the one the user chose in its place.
+///
+/// Everything downstream of the optimal-settings query is indexed by the preset: the ratio lookup
+/// above, the render resolution handed back, and the dynamic-resolution window the game is then
+/// allowed to move inside. A game that exposes no preset selector decides all of that for itself, and
+/// the per-preset ratios become unreachable -- the user's setting lands in a slot the game never asks
+/// for.
+///
+/// Answering with a different preset here is the one substitution that leaves nothing inconsistent:
+/// the game receives it as the reply to its own question and allocates to match, rather than being
+/// told after the fact that the size it already chose was wrong.
+static NVSDK_NGX_PerfQuality_Value EffectivePerfQuality(const NVSDK_NGX_PerfQuality_Value asked)
+{
+    const int forced = Config::Instance()->ForcePerfQuality.value_or_default();
+
+    if (forced < 0)
+        return asked;
+
+    // DLAA is the last value in the enum. Anything past it is a typo in the ini, not a preset, and
+    // silently clamping it would hide that.
+    if (forced > (int) NVSDK_NGX_PerfQuality_Value_DLAA)
+    {
+        LOG_WARN("ForcePerfQuality is {}, which is not a quality value -- leaving the game's choice alone", forced);
+        return asked;
+    }
+
+    const auto chosen = (NVSDK_NGX_PerfQuality_Value) forced;
+
+    if (chosen != asked)
+        LOG_DEBUG("ForcePerfQuality: answering {} where the game asked for {}", (int) chosen, (int) asked);
+
+    return chosen;
+}
+
+/// @brief Whether a forced preset is in effect, and so whether the DRS window has to be closed.
+///
+/// Forcing a preset without pinning both ends leaves the game a legal range between the forced render
+/// size and native, which a dynamic-resolution title will wander inside -- and every evaluate that
+/// lands on a size the feature was not created for fails. The pins are not a separate preference when
+/// the preset is being forced; they are part of the same decision.
+static bool ForcedPerfQualityActive()
+{
+    const int forced = Config::Instance()->ForcePerfQuality.value_or_default();
+    return forced >= 0 && forced <= (int) NVSDK_NGX_PerfQuality_Value_DLAA;
+}
+
 NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_Parameter* InParams)
 {
     unsigned int Width;
@@ -402,7 +448,8 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_
         InParams->Get(NVSDK_NGX_Parameter_PerfQualityValue, &PerfQualityValue) != NVSDK_NGX_Result_Success)
         return NVSDK_NGX_Result_Fail;
 
-    auto enumPQValue = (NVSDK_NGX_PerfQuality_Value) PerfQualityValue;
+    auto enumPQValue = EffectivePerfQuality((NVSDK_NGX_PerfQuality_Value) PerfQualityValue);
+    PerfQualityValue = (int) enumPQValue;
 
     LOG_DEBUG("Display Resolution: {0}x{1}", Width, Height);
 
@@ -477,7 +524,8 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_
     InParams->Set(NVSDK_NGX_Parameter_OutHeight, OutHeight);
 
     // DRS minimum resolution
-    if (Config::Instance()->DrsMinOverrideEnabled.value_or_default() || enumPQValue == NVSDK_NGX_PerfQuality_Value_DLAA)
+    if (Config::Instance()->DrsMinOverrideEnabled.value_or_default() || ForcedPerfQualityActive() ||
+        enumPQValue == NVSDK_NGX_PerfQuality_Value_DLAA)
     {
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, OutWidth);
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, OutHeight);
@@ -510,7 +558,7 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_
 
     // DRS maximum resolution
 
-    if (Config::Instance()->DrsMaxOverrideEnabled.value_or_default())
+    if (Config::Instance()->DrsMaxOverrideEnabled.value_or_default() || ForcedPerfQualityActive())
     {
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, OutWidth);
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height, OutHeight);
@@ -558,7 +606,8 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSSD_GetOptimalSettingsCallback(NVSDK_NGX
         InParams->Get(NVSDK_NGX_Parameter_PerfQualityValue, &PerfQualityValue) != NVSDK_NGX_Result_Success)
         return NVSDK_NGX_Result_Fail;
 
-    auto enumPQValue = (NVSDK_NGX_PerfQuality_Value) PerfQualityValue;
+    auto enumPQValue = EffectivePerfQuality((NVSDK_NGX_PerfQuality_Value) PerfQualityValue);
+    PerfQualityValue = (int) enumPQValue;
 
     LOG_DEBUG("Display Resolution: {0}x{1}", Width, Height);
 
@@ -632,7 +681,7 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSSD_GetOptimalSettingsCallback(NVSDK_NGX
     InParams->Set(NVSDK_NGX_Parameter_OutHeight, OutHeight);
 
     // DRS minimum resolution
-    if (Config::Instance()->DrsMinOverrideEnabled.value_or_default())
+    if (Config::Instance()->DrsMinOverrideEnabled.value_or_default() || ForcedPerfQualityActive())
     {
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, OutWidth);
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, OutHeight);
@@ -661,7 +710,7 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSSD_GetOptimalSettingsCallback(NVSDK_NGX
     }
 
     // DRS maximum resolution
-    if (Config::Instance()->DrsMaxOverrideEnabled.value_or_default())
+    if (Config::Instance()->DrsMaxOverrideEnabled.value_or_default() || ForcedPerfQualityActive())
     {
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, OutWidth);
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height, OutHeight);

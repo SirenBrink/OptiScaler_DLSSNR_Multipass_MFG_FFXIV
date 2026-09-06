@@ -110,6 +110,21 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         InParameters->Get(NVSDK_NGX_Parameter_Height, &height);
         InParameters->Get(NVSDK_NGX_Parameter_PerfQualityValue, &pqValue);
 
+        // The same substitution the optimal-settings query made, repeated where the feature is
+        // actually built.
+        //
+        // The query moved the render resolution; this moves the label that travels with it. Leaving
+        // them apart creates a feature that declares DLAA while being handed a Balanced-sized render
+        // target, and a mismatched pair is what the runtime rejects -- so the two have to agree, and
+        // they agree here because both read the same setting.
+        if (const int forcedPq = Config::Instance()->ForcePerfQuality.value_or_default();
+            forcedPq >= 0 && forcedPq <= (int) NVSDK_NGX_PerfQuality_Value_DLAA && forcedPq != pqValue)
+        {
+            LOG_INFO("PerfQualityValue overrided by user: {} (game asked for {})", forcedPq, pqValue);
+            pqValue = forcedPq;
+            InParameters->Set(NVSDK_NGX_Parameter_PerfQualityValue, pqValue);
+        }
+
         GetDynamicOutputResolution(InParameters, &outWidth, &outHeight);
 
         // Thanks to Crytek added these checks
