@@ -33,6 +33,27 @@ constexpr uint32_t InternPersistent = 4;
 
 // inline static std::optional<float> GetQualityOverrideRatio(const NVSDK_NGX_PerfQuality_Value input);
 
+/// @brief What the last optimal-settings query was answered with, for the menu.
+///
+/// The render resolution is settled when the game asks this question, and a game that asks once and
+/// then keeps its answer cannot be moved afterwards -- the buffers are already allocated. The menu
+/// needs to be able to say so rather than offering a control that quietly does half its job, so the
+/// answer is recorded here as it goes out.
+struct ForcedQualityStatus
+{
+    // Queries answered this session. Zero means the game has not asked yet.
+    unsigned long long queries = 0;
+
+    // The preset the last answer was computed for, and the resolution that came out of it.
+    int quality = -1;
+    unsigned int renderWidth = 0;
+    unsigned int renderHeight = 0;
+    unsigned int displayWidth = 0;
+    unsigned int displayHeight = 0;
+};
+
+ForcedQualityStatus LastQualityAnswer();
+
 /// @brief Callback invoked by the game/SDK to calculate optimal DLSS render settings (resolution, scaling) based on
 /// inputs.
 /// @param InParams The parameter object containing input width/height and output destinations.

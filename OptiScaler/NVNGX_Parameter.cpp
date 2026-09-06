@@ -434,6 +434,30 @@ static bool ForcedPerfQualityActive()
     return forced >= 0 && forced <= (int) NVSDK_NGX_PerfQuality_Value_DLAA;
 }
 
+// The last answer given, so the menu can report what is actually in force rather than what is
+// selected. Written from the render thread and read from the overlay, so a mutex rather than a
+// scatter of atomics -- it is touched a handful of times per session.
+static std::mutex g_qualityAnswerMutex;
+static ForcedQualityStatus g_qualityAnswer;
+
+static void RecordQualityAnswer(NVSDK_NGX_PerfQuality_Value answered, unsigned int renderWidth,
+                                unsigned int renderHeight, unsigned int displayWidth, unsigned int displayHeight)
+{
+    const std::lock_guard<std::mutex> lock(g_qualityAnswerMutex);
+    ++g_qualityAnswer.queries;
+    g_qualityAnswer.quality = (int) answered;
+    g_qualityAnswer.renderWidth = renderWidth;
+    g_qualityAnswer.renderHeight = renderHeight;
+    g_qualityAnswer.displayWidth = displayWidth;
+    g_qualityAnswer.displayHeight = displayHeight;
+}
+
+ForcedQualityStatus LastQualityAnswer()
+{
+    const std::lock_guard<std::mutex> lock(g_qualityAnswerMutex);
+    return g_qualityAnswer;
+}
+
 NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_Parameter* InParams)
 {
     unsigned int Width;
@@ -588,6 +612,9 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_
 
     LOG_DEBUG("NVSDK_NGX_DLSS_GetOptimalSettingsCallback: Display Resolution: {0}x{1} Render Resolution: {2}x{3}",
               Width, Height, OutWidth, OutHeight);
+
+    RecordQualityAnswer(enumPQValue, OutWidth, OutHeight, Width, Height);
+
     return NVSDK_NGX_Result_Success;
 }
 
@@ -731,6 +758,9 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSSD_GetOptimalSettingsCallback(NVSDK_NGX
     InParams->Set(NVSDK_NGX_EParameter_DLSSMode, NVSDK_NGX_DLSS_Mode_DLSS_DLISP);
 
     LOG_DEBUG("Display Resolution: {0}x{1} Render Resolution: {2}x{3}", Width, Height, OutWidth, OutHeight);
+
+    RecordQualityAnswer(enumPQValue, OutWidth, OutHeight, Width, Height);
+
     return NVSDK_NGX_Result_Success;
 }
 

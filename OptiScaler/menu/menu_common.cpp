@@ -1,6 +1,7 @@
 ﻿#include "pch.h"
 #include "menu_common.h"
 #include <framegen/dlssg/MfgUnlock.h>
+#include <NVNGX_Parameter.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
 
 #include <algorithm>
@@ -5600,11 +5601,58 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
             ImGui::TextDisabled("(%sx)", forcedQualityRatios[forcedIndex]);
         }
 
+        // What is actually in force, as opposed to what is selected.
+        //
+        // The render resolution is decided when the game asks for optimal settings, and a game that
+        // asks once and keeps the answer cannot be moved afterwards -- its buffers are already that
+        // size. Changing the setting then relabels the feature and nothing else, which looks broken
+        // and is worse than broken: it reads as working. So the last answer is reported here, and the
+        // reader is told plainly when the selection has moved past it.
+        const ForcedQualityStatus answered = LastQualityAnswer();
+
+        if (answered.queries == 0)
+        {
+            ImGui::TextDisabled("The game has not asked for a resolution yet.");
+        }
+        else
+        {
+            int answeredIndex = 0;
+            for (int i = 0; i < IM_ARRAYSIZE(forcedQualityValues); ++i)
+            {
+                if (forcedQualityValues[i] == answered.quality)
+                {
+                    answeredIndex = i;
+                    break;
+                }
+            }
+
+            ImGui::TextDisabled("In force: %s, %ux%u -> %ux%u (%llu quer%s)", forcedQualityNames[answeredIndex],
+                                answered.renderWidth, answered.renderHeight, answered.displayWidth,
+                                answered.displayHeight, answered.queries, answered.queries == 1 ? "y" : "ies");
+        }
+
+        // Only meaningful while a preset is actually being forced. With the override off the game's
+        // own choice is the right answer by definition, and "ahead of what is in force" would fire on
+        // every preset the game picks for itself.
+        const bool selectionAhead = answered.queries > 0 && currentForced >= 0 &&
+                                    currentForced != answered.quality;
+
         if (ImGui::Button("Apply preset"))
             MARK_ALL_BACKENDS_CHANGED();
 
         ShowHelpMarker("Rebuilds the upscaler so the new preset is picked up without waiting for the\n"
-                       "game to do it on its own.");
+                       "game to do it on its own.\n\n"
+                       "Whether that is enough depends on the game. The render resolution is settled when\n"
+                       "the game asks for optimal settings; if it only asks at startup, a rebuild relabels\n"
+                       "the feature and leaves the resolution where it was. Watch the line above -- if it\n"
+                       "does not change, this game needs a restart.");
+
+        if (selectionAhead)
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
+                               "Selected preset is ahead of the one in force. Press Apply; if the line above\n"
+                               "does not follow, this game only asks at startup and needs a restart.");
+        }
 
         ImGui::SeparatorText("Upscale Ratio Override");
 
