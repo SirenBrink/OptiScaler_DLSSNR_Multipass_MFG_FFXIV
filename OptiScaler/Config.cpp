@@ -646,6 +646,7 @@ bool Config::Reload(std::filesystem::path iniPath)
 
         // Quality Overrides
         {
+            ForcePerfQuality.set_from_config(readInt("QualityOverrides", "ForcePerfQuality"));
             QualityRatioOverrideEnabled.set_from_config(readBool("QualityOverrides", "QualityRatioOverrideEnabled"));
             QualityRatio_DLAA.set_from_config(readFloat("QualityOverrides", "QualityRatioDLAA"));
             QualityRatio_UltraQuality.set_from_config(readFloat("QualityOverrides", "QualityRatioUltraQuality"));
@@ -1449,6 +1450,8 @@ bool Config::SaveIni()
 
     // Quality Overrides
     {
+        ini.SetValue("QualityOverrides", "ForcePerfQuality",
+                     GetIntValue(Instance()->ForcePerfQuality.value_for_config()).c_str());
         ini.SetValue("QualityOverrides", "QualityRatioOverrideEnabled",
                      GetBoolValue(Instance()->QualityRatioOverrideEnabled.value_for_config()).c_str());
         ini.SetValue("QualityOverrides", "QualityRatioDLAA",

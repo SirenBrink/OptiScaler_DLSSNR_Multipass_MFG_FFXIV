@@ -5686,6 +5686,59 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
         auto minSliderLimit = config->ExtendedLimits.value_or_default() ? 0.1f : 1.0f;
         auto maxSliderLimit = config->ExtendedLimits.value_or_default() ? 6.0f : 3.0f;
 
+        ImGui::SeparatorText("Quality Preset");
+
+        // The preset the game is answered with.
+        //
+        // Kept separate from the ratio overrides below because it is a different kind of control: those
+        // change what a preset means, this changes which preset is asked about. In a game that never
+        // offers the choice, the ratios below are indexed by a slot the user cannot reach, and this is
+        // the only way in.
+        //
+        // Values are NVSDK_NGX_PerfQuality_Value. Written out rather than including the NGX header for
+        // six integers, and ordered best-first for the reader rather than in enum order.
+        static const char* forcedQualityNames[] = { "Game's choice", "Native / DLAA", "Ultra Quality",
+                                                    "Quality",       "Balanced",      "Performance" };
+        static const int forcedQualityValues[] = { -1, 5, 4, 2, 1, 0 };
+        static const char* forcedQualityRatios[] = { "", "1.0", "1.3", "1.5", "1.7", "2.0" };
+
+        const int currentForced = config->ForcePerfQuality.value_or_default();
+
+        int forcedIndex = 0;
+        for (int i = 0; i < IM_ARRAYSIZE(forcedQualityValues); ++i)
+        {
+            if (forcedQualityValues[i] == currentForced)
+            {
+                forcedIndex = i;
+                break;
+            }
+        }
+
+        if (ImGui::Combo("Preset", &forcedIndex, forcedQualityNames, IM_ARRAYSIZE(forcedQualityNames)))
+            config->ForcePerfQuality = forcedQualityValues[forcedIndex];
+
+        ShowHelpMarker("Which quality preset the game is answered with, whichever one it asks for.\n\n"
+                       "Some games never expose the choice -- Final Fantasy XIV offers only DLSS or FSR\n"
+                       "and picks the preset itself -- which leaves the per-preset ratios below indexed\n"
+                       "by a slot you cannot reach. This replaces the answer at the point the game asks,\n"
+                       "so it allocates its own buffers to your choice.\n\n"
+                       "Dynamic resolution is pinned shut while this is set: a forced preset with an open\n"
+                       "DRS range lets the game wander to a size the upscaler was not built for.\n\n"
+                       "Takes effect when the upscaler is next created. Apply does that now; otherwise it\n"
+                       "lands on the next zone change or resolution change.");
+
+        if (forcedIndex != 0)
+        {
+            ImGui::SameLine(0.0f, 6.0f);
+            ImGui::TextDisabled("(%sx)", forcedQualityRatios[forcedIndex]);
+        }
+
+        if (ImGui::Button("Apply preset"))
+            MARK_ALL_BACKENDS_CHANGED();
+
+        ShowHelpMarker("Rebuilds the upscaler so the new preset is picked up without waiting for the\n"
+                       "game to do it on its own.");
+
         ImGui::SeparatorText("Upscale Ratio Override");
 
         if (bool upOverride = config->UpscaleRatioOverrideEnabled.value_or_default();

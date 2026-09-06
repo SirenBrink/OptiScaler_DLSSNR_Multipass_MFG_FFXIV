@@ -635,6 +635,31 @@ class Config
     CustomOptional<bool> UpscaleRatioOverrideEnabled { false };
     CustomOptional<float> UpscaleRatioOverrideValue { 1.3f };
 
+    // Which quality preset the game is answered with, whichever one it asked for.
+    //
+    // The preset is normally the game's to choose, and everything below is indexed by that choice:
+    // the per-preset ratios, the render resolution returned from the optimal-settings query, and the
+    // DRS window the game is then allowed to move inside. A title that exposes no selector -- Final
+    // Fantasy XIV offers only "DLSS or FSR" and picks for itself, DLAA at launch and Balanced after a
+    // zone change -- leaves the user with no way in at all, because the slot their setting lands in is
+    // not the slot the game reads.
+    //
+    // Substituting at the point the question is asked means the game allocates its own buffers to the
+    // answer. Telling it afterwards that the size it chose was wrong is what the ratio overrides do,
+    // and why they need both DRS pins to be survivable.
+    //
+    //  -1  leave the game's choice alone (default)
+    //   0  Max Performance     2.0
+    //   1  Balanced            1.7
+    //   2  Max Quality         1.5
+    //   3  Ultra Performance   3.0
+    //   4  Ultra Quality       1.3
+    //   5  DLAA / native       1.0
+    //
+    // The numbers are NVSDK_NGX_PerfQuality_Value itself rather than a tidier ordering of it, so the
+    // ini and the NGX enum cannot drift apart.
+    CustomOptional<int> ForcePerfQuality { -1 };
+
     // DRS
     CustomOptional<bool> DrsMinOverrideEnabled { false };
     CustomOptional<bool> DrsMaxOverrideEnabled { false };
