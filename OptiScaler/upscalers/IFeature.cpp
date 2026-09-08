@@ -1,5 +1,6 @@
 #include <pch.h>
 #include <Config.h>
+#include <NVNGX_Parameter.h>
 #include "IFeature.h"
 
 void IFeature::SetHandle(unsigned int InHandleId)
@@ -115,14 +116,47 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         //
         // The query moved the render resolution; this moves the label that travels with it. Leaving
         // them apart creates a feature that declares DLAA while being handed a Balanced-sized render
-        // target, and a mismatched pair is what the runtime rejects -- so the two have to agree, and
-        // they agree here because both read the same setting.
+        // target, and a mismatched pair is what the runtime rejects -- so the two have to agree.
+        //
+        // They only agree when this create descends from that query, which is not every create. A
+        // game may rebuild the feature from dimensions it decided earlier, without asking again:
+        // FFXIV recomputes its per-quality table only when the display size changes, yet recreates
+        // the feature at several other moments -- leaving group pose, changing a character's
+        // appearance. Those recreates carry the previous table's dimensions. Forcing a different
+        // quality into one of them hands the runtime a render target sized for one preset and a
+        // PerfQualityValue naming another; it answers BAD00005, the feature is gone for the rest of
+        // the session, and all the overlay can report is that the upscaler is not in use.
+        //
+        // So the override applies to a create the last answer accounts for, and otherwise stands
+        // down. Standing down costs a preset change that lands late -- it takes effect the next time
+        // the game asks -- which is the smaller loss by a wide margin.
         if (const int forcedPq = Config::Instance()->ForcePerfQuality.value_or_default();
             forcedPq >= 0 && forcedPq <= (int) NVSDK_NGX_PerfQuality_Value_DLAA && forcedPq != pqValue)
         {
-            LOG_INFO("PerfQualityValue overrided by user: {} (game asked for {})", forcedPq, pqValue);
-            pqValue = forcedPq;
-            InParameters->Set(NVSDK_NGX_Parameter_PerfQualityValue, pqValue);
+            const auto answer = LastQualityAnswer();
+
+            // No query yet means no answer to contradict. Games that never ask for optimal settings
+            // reach this path with nothing else setting the quality, so the override is all there is.
+            const bool nothingToCheck = answer.queries == 0;
+
+            const bool matchesLastAnswer = answer.renderWidth == width && answer.renderHeight == height &&
+                                           answer.displayWidth == outWidth && answer.displayHeight == outHeight;
+
+            if (nothingToCheck || matchesLastAnswer)
+            {
+                LOG_INFO("PerfQualityValue overrided by user: {} (game asked for {})", forcedPq, pqValue);
+                pqValue = forcedPq;
+                InParameters->Set(NVSDK_NGX_Parameter_PerfQualityValue, pqValue);
+            }
+            else
+            {
+                LOG_WARN("Leaving PerfQualityValue at the game's {}: this feature is being built for "
+                         "{}x{} -> {}x{}, but the last optimal-settings answer was {}x{} -> {}x{} for "
+                         "quality {}. Forcing {} onto dimensions it did not produce is what the runtime "
+                         "rejects. The override applies again once the game asks.",
+                         pqValue, width, height, outWidth, outHeight, answer.renderWidth, answer.renderHeight,
+                         answer.displayWidth, answer.displayHeight, answer.quality, forcedPq);
+            }
         }
 
         GetDynamicOutputResolution(InParameters, &outWidth, &outHeight);
