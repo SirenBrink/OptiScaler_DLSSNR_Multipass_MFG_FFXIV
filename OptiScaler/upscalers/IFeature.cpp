@@ -171,8 +171,24 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
             // reach this path with nothing else setting the quality, so the override is all there is.
             const bool nothingToCheck = answer.queries == 0;
 
-            const bool matchesLastAnswer = answer.renderWidth == width && answer.renderHeight == height &&
-                                           answer.displayWidth == outWidth && answer.displayHeight == outHeight;
+            // Near, not equal.
+            //
+            // Exact equality assumes the game creates the feature at precisely the size we answered.
+            // Plenty round it first, to a multiple of 8 or 16, and the answer is far more often odd
+            // than 16:9 testing suggests: at 3440x1440 three of the six presets land on an odd width,
+            // at 5120x1440 the same, and even 4K is odd at Ultra Quality. A game that rounds 2023 to
+            // 2024 would fail an exact match, the override would quietly never apply, and the setting
+            // would look broken on exactly the displays least likely to be tested.
+            //
+            // The mismatch this guard exists to catch is a stale render size -- a whole preset away,
+            // hundreds of pixels. Thirty-two absorbs any rounding without coming close to that.
+            constexpr unsigned int kRoundingSlack = 32;
+
+            const auto near = [](unsigned int a, unsigned int b)
+            { return (a > b ? a - b : b - a) <= kRoundingSlack; };
+
+            const bool matchesLastAnswer = near(answer.renderWidth, width) && near(answer.renderHeight, height) &&
+                                           near(answer.displayWidth, outWidth) && near(answer.displayHeight, outHeight);
 
             if (nothingToCheck || matchesLastAnswer)
             {
@@ -333,13 +349,20 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
         InParameters->Get(NVSDK_NGX_Parameter_Height, &paramHeight) == NVSDK_NGX_Result_Success &&
         paramWidth > 0 && paramHeight > 0 && (paramWidth < *OutWidth || paramHeight < *OutHeight))
     {
-        if (_renderWidth != paramWidth || _renderHeight != paramHeight || !_reportedEvaluateGeometry)
+        // Per axis, not both together. Letterboxing and pillarboxing scale one axis and not the other,
+        // so a game can legitimately report a smaller width beside an equal height. Replacing the pair
+        // whenever either shrank would take the larger of the two on the other axis and hand the
+        // runtime a frame taller or wider than the one that exists.
+        const unsigned int resolvedWidth = paramWidth < *OutWidth ? paramWidth : *OutWidth;
+        const unsigned int resolvedHeight = paramHeight < *OutHeight ? paramHeight : *OutHeight;
+
+        if (_renderWidth != resolvedWidth || _renderHeight != resolvedHeight || !_reportedEvaluateGeometry)
             LOG_INFO("Evaluate geometry: the game reports a {}x{} subrect but Width/Height of {}x{}. Taking "
                      "{}x{} as the render size -- the subrect is this game's buffer, not its frame.",
-                     *OutWidth, *OutHeight, paramWidth, paramHeight, paramWidth, paramHeight);
+                     *OutWidth, *OutHeight, paramWidth, paramHeight, resolvedWidth, resolvedHeight);
 
-        *OutWidth = paramWidth;
-        *OutHeight = paramHeight;
+        *OutWidth = resolvedWidth;
+        *OutHeight = resolvedHeight;
     }
 
     // Once per distinct answer, not per frame -- the run that found this produced 9156 identical lines.
