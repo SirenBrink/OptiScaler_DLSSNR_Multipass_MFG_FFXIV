@@ -950,6 +950,21 @@
     <ClInclude Include="shaders\magnifier\precompile\Magnifier_Shader_Vk.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="framegen\dlssg\MfgUnlock.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\dlssnr\DlssNr_Vk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dlssnr\DlssNrFeature_Vk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dlssnr\DlssNr_ExposureScan.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="upscalers\dlss\DLSSFeature_VkOn12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Config.cpp">
@@ -1530,6 +1545,33 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="shaders\magnifier\Magnifier_Vk.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="framegen\dlssg\MfgUnlock.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="upscalers\dlss\DLSSFeature_Dx11On12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="upscalers\dlss\DLSSFeature_VkOn12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="shaders\dlssnr\DlssNr_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="shaders\dlssnr\DlssNr_Vk.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dlssnr\DlssNrFeature_Vk.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dlssnr\DlssNr_ExposureScan.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dlssnr\DlssNr_Proxy.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dlssnr\DlssNr_Menu.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
