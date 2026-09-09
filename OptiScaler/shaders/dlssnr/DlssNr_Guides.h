@@ -11,6 +11,11 @@ struct GuideRegion
 };
 struct GuideRegions { GuideRegion depth, motion; };
 
+inline GuideExtent GuideRenderExtent(GuideExtent reportedRender, GuideExtent syntheticSource)
+{
+    return syntheticSource.width != 0 && syntheticSource.height != 0 ? syntheticSource : reportedRender;
+}
+
 inline GuideRegion GuideSubrect(GuideExtent allocation, GuideExtent wanted, unsigned int x, unsigned int y)
 {
     x = std::min(x, allocation.width);

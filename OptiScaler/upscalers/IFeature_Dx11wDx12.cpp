@@ -28,8 +28,15 @@ void IFeature_Dx11wDx12::ResourceBarrier(ID3D12GraphicsCommandList* commandList,
 
 ID3D12Resource* IFeature_Dx11wDx12::PrepareForcedQualityColor(ID3D12GraphicsCommandList* commandList,
                                                               NVSDK_NGX_Parameter* parameters,
-                                                              ID3D12Resource* color)
+                                                              ID3D12Resource* color,
+                                                              unsigned int* guideSourceWidth,
+                                                              unsigned int* guideSourceHeight)
 {
+    if (guideSourceWidth != nullptr)
+        *guideSourceWidth = 0;
+    if (guideSourceHeight != nullptr)
+        *guideSourceHeight = 0;
+
     if (commandList == nullptr || parameters == nullptr || color == nullptr || dx12Feature == nullptr ||
         !(State::Instance().gameQuirks & GameQuirk::ScaleDisplayColorForForcedQuality) ||
         Config::Instance()->ForcePerfQuality.value_or_default() < 0)
@@ -94,6 +101,14 @@ ID3D12Resource* IFeature_Dx11wDx12::PrepareForcedQualityColor(ID3D12GraphicsComm
                  "the game's render subrect describes the allocation, not a crop",
                  desc.Width, desc.Height, renderWidth, renderHeight);
     }
+
+    // The color is now a synthetic compact frame, not the active top-left part of a padded
+    // allocation. Depth and motion still describe the complete source frame. Preserve that extent
+    // for NR before CorrectRenderSubrect replaces the game's allocation-sized subrect below.
+    if (guideSourceWidth != nullptr)
+        *guideSourceWidth = (unsigned int) desc.Width;
+    if (guideSourceHeight != nullptr)
+        *guideSourceHeight = desc.Height;
 
     return ForcedQualityColorScaler->Buffer();
 }
@@ -516,7 +531,10 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
 
         commandListRecording = true;
 
-        auto upscalerColor = PrepareForcedQualityColor(cmdList, InParameters, dx11Color.Dx12Resource);
+        unsigned int nrGuideSourceWidth = 0;
+        unsigned int nrGuideSourceHeight = 0;
+        auto upscalerColor = PrepareForcedQualityColor(cmdList, InParameters, dx11Color.Dx12Resource,
+                                                       &nrGuideSourceWidth, &nrGuideSourceHeight);
         if (upscalerColor == nullptr)
         {
             LOG_ERROR("Can't prepare the forced-quality color input");
@@ -541,7 +559,8 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
             dx12Feature->CorrectRenderSubrect(InParameters);
 
         DlssNr::EvaluateBeforeUpscale(cmdList, InParameters, Dx12CommandQueue, _frameCount,
-                                      upscaler == Upscaler::DLSSD);
+                                      upscaler == Upscaler::DLSSD, nrGuideSourceWidth,
+                                      nrGuideSourceHeight);
         dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters);
 
         // DLSS 5 Neural Rendering rides the bridge: at this moment the block carries the D3D12 copies
@@ -562,7 +581,7 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
         {
             DlssNr::EvaluateAfterUpscale(cmdList, InParameters, Dx12CommandQueue,
                                          dx12Feature->GetUpscalerType() == Upscaler::DLSSD,
-                                         _frameCount);
+                                         _frameCount, nrGuideSourceWidth, nrGuideSourceHeight);
 
             // Asked only after the D3D12 path has had its turn. Probing first would have made a D3D11
             // init the very first thing to ever touch the snippet, and if that had left its core

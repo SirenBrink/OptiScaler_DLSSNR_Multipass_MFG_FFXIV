@@ -268,7 +268,8 @@ bool PrepareHalfRate(Generation& g, ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Pa
 
 void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
             unsigned long long epoch, unsigned long long submittedEpoch,
-            ID3D12CommandQueue* queue, bool privateJob = false)
+            ID3D12CommandQueue* queue, bool privateJob = false,
+            unsigned int guideSourceWidth = 0, unsigned int guideSourceHeight = 0)
 {
     if (pending.cmd && current)
     {
@@ -465,6 +466,7 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
     frame.IndependentCommands = privateJob;
     frame.SubmissionEpoch = submittedEpoch;
     frame.RenderSubrectWidth = g.w; frame.RenderSubrectHeight = g.h;
+    frame.GuideSourceWidth = guideSourceWidth; frame.GuideSourceHeight = guideSourceHeight;
     frame.DepthInverted = (flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
     frame.ColourIsLinearHdr = (UInt(source, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags) &
         NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0 && FormatCanHoldLinearHdr(outDesc.Format);

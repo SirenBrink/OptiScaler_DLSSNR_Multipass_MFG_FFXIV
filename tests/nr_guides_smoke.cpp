@@ -22,6 +22,16 @@ int main()
                             true, 16, 8, 64, 32);
     assert(g.depth.width == 1904 && g.depth.height == 1072);
     assert(g.motion.width == 1920 && g.motion.height == 1080);
+    // FFXIV's bridge synthesizes a compact 1920x910 Color from a complete 3840x1820 frame. The
+    // rewritten render subrect belongs to Color only; both untouched guides must retain the complete
+    // source-frame extent, even when the game's feature labels motion vectors low resolution.
+    const auto synthetic = GuideRenderExtent({1920, 910}, {3840, 1820});
+    g = ResolveGuideRegions({3840, 1820}, {3840, 1820}, synthetic, {3840, 1820},
+                            true, 0, 0, 0, 0);
+    assert(g.depth.width == 3840 && g.depth.height == 1820);
+    assert(g.motion.width == 3840 && g.motion.height == 1820);
+    const auto ordinary = GuideRenderExtent({1920, 910}, {0, 0});
+    assert(ordinary.width == 1920 && ordinary.height == 910);
     // Missing dimensions use each resource's available region; no unsigned underflow.
     g = ResolveGuideRegions({1920, 1080}, {3840, 2160}, {0, 0}, {0, 0}, false, 0, 0, 8, 4);
     assert(g.motion.width == 3832 && g.motion.height == 2156);

@@ -56,7 +56,9 @@ class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
     bool CopyBackOutput();
     ID3D12Resource* PrepareForcedQualityColor(ID3D12GraphicsCommandList* commandList,
                                                NVSDK_NGX_Parameter* parameters,
-                                               ID3D12Resource* color);
+                                               ID3D12Resource* color,
+                                               unsigned int* guideSourceWidth,
+                                               unsigned int* guideSourceHeight);
 
     void ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
                          D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState);

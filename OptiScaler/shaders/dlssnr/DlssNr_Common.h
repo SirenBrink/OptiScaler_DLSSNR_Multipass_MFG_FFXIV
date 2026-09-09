@@ -131,6 +131,13 @@ struct DlssNrFrameInfo
     unsigned int RenderSubrectWidth = 0;
     unsigned int RenderSubrectHeight = 0;
 
+    // A bridge may synthesize a compact Color image from a complete larger frame. In that case the
+    // rewritten render subrect describes Color, while depth and motion still cover this source
+    // extent. Keeping the two meanings separate prevents NR from treating the top-left part of the
+    // full-size guides as though it represented the complete compact frame.
+    unsigned int GuideSourceWidth = 0;
+    unsigned int GuideSourceHeight = 0;
+
     unsigned int DepthSubrectBaseX = 0;
     unsigned int DepthSubrectBaseY = 0;
     unsigned int MotionSubrectBaseX = 0;

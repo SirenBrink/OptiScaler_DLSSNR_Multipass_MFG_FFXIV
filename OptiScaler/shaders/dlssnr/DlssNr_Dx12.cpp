@@ -1635,10 +1635,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     const auto guideDesc = depth->GetDesc();
     const auto motionDesc = motion->GetDesc();
+    const auto guideRender = DlssNr::GuideRenderExtent(
+        { frame.RenderSubrectWidth, frame.RenderSubrectHeight },
+        { frame.GuideSourceWidth, frame.GuideSourceHeight });
     const auto guides = DlssNr::ResolveGuideRegions(
         { (unsigned int) guideDesc.Width, guideDesc.Height },
         { (unsigned int) motionDesc.Width, motionDesc.Height },
-        { frame.RenderSubrectWidth, frame.RenderSubrectHeight },
+        guideRender,
         { frame.OutputWidth, frame.OutputHeight }, frame.MotionVectorsLowResolution,
         frame.DepthSubrectBaseX, frame.DepthSubrectBaseY,
         frame.MotionSubrectBaseX, frame.MotionSubrectBaseY);
@@ -1689,25 +1692,40 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         float mvScaleY;
         unsigned int guideW;
         unsigned int guideH;
+        unsigned int motionW;
+        unsigned int motionH;
         unsigned int frameW;
         unsigned int frameH;
+        bool syntheticGuides;
     };
 
     static GuideReport loggedGuides {};
 
-    const GuideReport guidesNow { true,       g_nr.guideDepthInverted, g_nr.guideMvScaleX,
-                                  g_nr.guideMvScaleY, guideWidth,      guideHeight,
-                                  width,      (unsigned int) height };
+    const GuideReport guidesNow { true,
+                                  g_nr.guideDepthInverted,
+                                  g_nr.guideMvScaleX,
+                                  g_nr.guideMvScaleY,
+                                  guideWidth,
+                                  guideHeight,
+                                  motionWidth,
+                                  motionHeight,
+                                  width,
+                                  (unsigned int) height,
+                                  frame.GuideSourceWidth != 0 && frame.GuideSourceHeight != 0 };
 
     if (!loggedGuides.valid || loggedGuides.depthInverted != guidesNow.depthInverted ||
         loggedGuides.mvScaleX != guidesNow.mvScaleX || loggedGuides.mvScaleY != guidesNow.mvScaleY ||
         loggedGuides.guideW != guidesNow.guideW || loggedGuides.guideH != guidesNow.guideH ||
-        loggedGuides.frameW != guidesNow.frameW || loggedGuides.frameH != guidesNow.frameH)
+        loggedGuides.motionW != guidesNow.motionW || loggedGuides.motionH != guidesNow.motionH ||
+        loggedGuides.frameW != guidesNow.frameW || loggedGuides.frameH != guidesNow.frameH ||
+        loggedGuides.syntheticGuides != guidesNow.syntheticGuides)
     {
         loggedGuides = guidesNow;
-        LOG_INFO("DLSS-NR guides: depth {}, motion vector scale {} x {}, guides {}x{} for a {}x{} frame",
+        LOG_INFO("DLSS-NR guides: depth {}, motion vector scale {} x {}, depth {}x{}, motion {}x{} for a "
+                 "{}x{} frame{}",
                  g_nr.guideDepthInverted ? "inverted" : "not inverted", g_nr.guideMvScaleX,
-                 g_nr.guideMvScaleY, guideWidth, guideHeight, width, height);
+                 g_nr.guideMvScaleY, guideWidth, guideHeight, motionWidth, motionHeight, width, height,
+                 guidesNow.syntheticGuides ? " (synthetic compact color; full-frame guides)" : "");
     }
 
     if (cfg.DlssNrProxyProbe.value_or_default())
@@ -2885,8 +2903,9 @@ void RetryAfterFailure()
 // reprojection stage, a frame generation path, anything that is not the upscaler seam -- calls
 // RunPass directly and never touches an NGX parameter block.
 void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
-                      bool beforeUpscale, ID3D12CommandQueue* timingQueue, bool rayReconstruction,
-                      unsigned long long submissionEpoch)
+                       bool beforeUpscale, ID3D12CommandQueue* timingQueue, bool rayReconstruction,
+                       unsigned long long submissionEpoch, unsigned int guideSourceWidth,
+                       unsigned int guideSourceHeight)
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     const Config& cfg = *Config::Instance();
@@ -2908,7 +2927,8 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
             const auto submitted = timingQueue != nullptr ? submissionEpoch : State::Instance().frameCount;
             const auto epoch = g_nrSeamClock.AtSeam(beforeUpscale, timingQueue != nullptr, submitted);
             if (beforeUpscale)
-                DeferredSr::Before(cmdList, params, epoch, submitted, timingQueue);
+                DeferredSr::Before(cmdList, params, epoch, submitted, timingQueue, false,
+                                   guideSourceWidth, guideSourceHeight);
             else
                 DeferredSr::After(cmdList, params, epoch);
         }
@@ -3042,6 +3062,8 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     frame.BeforeUpscale = beforeUpscale;
     frame.RayReconstruction = rayReconstruction;
     frame.SubmissionEpoch = timingQueue != nullptr ? submissionEpoch : State::Instance().frameCount;
+    frame.GuideSourceWidth = guideSourceWidth;
+    frame.GuideSourceHeight = guideSourceHeight;
 
     // Color and Output may use different formats even though DLSS treats them as the same frame colour
     // space. Output is the stable authority across injection points; target is only a fallback for a
@@ -3208,16 +3230,20 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
 
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                           ID3D12CommandQueue* timingQueue, bool rayReconstruction,
-                          unsigned long long submissionEpoch)
+                          unsigned long long submissionEpoch, unsigned int guideSourceWidth,
+                          unsigned int guideSourceHeight)
 {
-    EvaluateInternal(cmdList, params, false, timingQueue, rayReconstruction, submissionEpoch);
+    EvaluateInternal(cmdList, params, false, timingQueue, rayReconstruction, submissionEpoch,
+                     guideSourceWidth, guideSourceHeight);
 }
 
 void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
-                           ID3D12CommandQueue* timingQueue, unsigned long long submissionEpoch,
-                           bool rayReconstruction)
+                            ID3D12CommandQueue* timingQueue, unsigned long long submissionEpoch,
+                            bool rayReconstruction, unsigned int guideSourceWidth,
+                            unsigned int guideSourceHeight)
 {
-    EvaluateInternal(cmdList, params, true, timingQueue, rayReconstruction, submissionEpoch);
+    EvaluateInternal(cmdList, params, true, timingQueue, rayReconstruction, submissionEpoch,
+                     guideSourceWidth, guideSourceHeight);
 }
 
 // The pass. Resources in, nothing read from anywhere the caller cannot see.

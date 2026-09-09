@@ -38,13 +38,15 @@ inline constexpr unsigned int DefaultMaxPassCount = 3;
 // Placement and model cost controls are shared by SR and RR+SR.
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                           ID3D12CommandQueue* timingQueue = nullptr, bool rayReconstruction = false,
-                          unsigned long long submissionEpoch = 0);
+                          unsigned long long submissionEpoch = 0,
+                          unsigned int guideSourceWidth = 0, unsigned int guideSourceHeight = 0);
 
 // Runs the same pass over Color immediately before SR or RR+SR consumes it. The call is a no-op
 // unless RunBeforeSR is enabled. Color is returned in its original readable state.
 void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                            ID3D12CommandQueue* timingQueue = nullptr,
-                           unsigned long long submissionEpoch = 0, bool rayReconstruction = false);
+                           unsigned long long submissionEpoch = 0, bool rayReconstruction = false,
+                           unsigned int guideSourceWidth = 0, unsigned int guideSourceHeight = 0);
 
 
 
