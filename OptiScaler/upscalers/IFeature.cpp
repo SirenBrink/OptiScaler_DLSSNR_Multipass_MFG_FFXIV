@@ -152,11 +152,15 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
             // hundreds of pixels. Thirty-two absorbs any rounding without coming close to that.
             constexpr unsigned int kRoundingSlack = 32;
 
-            const auto near = [](unsigned int a, unsigned int b)
+            // Not named "near": windef.h still defines that away to nothing for the 16-bit memory
+            // models, so the declaration becomes "const auto = ..." and the compiler asks what
+            // variable you meant.
+            const auto withinSlack = [](unsigned int a, unsigned int b)
             { return (a > b ? a - b : b - a) <= kRoundingSlack; };
 
-            const bool matchesLastAnswer = near(answer.renderWidth, width) && near(answer.renderHeight, height) &&
-                                           near(answer.displayWidth, outWidth) && near(answer.displayHeight, outHeight);
+            const bool matchesLastAnswer =
+                withinSlack(answer.renderWidth, width) && withinSlack(answer.renderHeight, height) &&
+                withinSlack(answer.displayWidth, outWidth) && withinSlack(answer.displayHeight, outHeight);
 
             if (nothingToCheck || matchesLastAnswer)
             {
