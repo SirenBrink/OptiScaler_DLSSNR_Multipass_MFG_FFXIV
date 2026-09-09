@@ -422,18 +422,6 @@ static NVSDK_NGX_PerfQuality_Value EffectivePerfQuality(const NVSDK_NGX_PerfQual
     return chosen;
 }
 
-/// @brief Whether a forced preset is in effect, and so whether the DRS window has to be closed.
-///
-/// Forcing a preset without pinning both ends leaves the game a legal range between the forced render
-/// size and native, which a dynamic-resolution title will wander inside -- and every evaluate that
-/// lands on a size the feature was not created for fails. The pins are not a separate preference when
-/// the preset is being forced; they are part of the same decision.
-static bool ForcedPerfQualityActive()
-{
-    const int forced = Config::Instance()->ForcePerfQuality.value_or_default();
-    return forced >= 0 && forced <= (int) NVSDK_NGX_PerfQuality_Value_DLAA;
-}
-
 // The last answer given, so the menu can report what is actually in force rather than what is
 // selected. Written from the render thread and read from the overlay, so a mutex rather than a
 // scatter of atomics -- it is touched a handful of times per session.
@@ -548,7 +536,7 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_
     InParams->Set(NVSDK_NGX_Parameter_OutHeight, OutHeight);
 
     // DRS minimum resolution
-    if (Config::Instance()->DrsMinOverrideEnabled.value_or_default() || ForcedPerfQualityActive() ||
+    if (Config::Instance()->DrsMinOverrideEnabled.value_or_default() ||
         enumPQValue == NVSDK_NGX_PerfQuality_Value_DLAA)
     {
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, OutWidth);
@@ -582,7 +570,18 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_
 
     // DRS maximum resolution
 
-    if (Config::Instance()->DrsMaxOverrideEnabled.value_or_default() || ForcedPerfQualityActive())
+    // Deliberately not widened when a quality is forced.
+    //
+    // Forcing a preset changes the answer to "what would this quality render at". It does not change
+    // what the game renders -- that is the game's decision and OptiScaler never sees it until evaluate.
+    // FFXIV settles the point: it builds a Balanced feature and then submits a 3840x2160 subrect every
+    // frame regardless. Pinning the maximum to the forced optimal puts the game's own render size
+    // outside the legal window, and the runtime answers BAD00005 on every frame from then on.
+    //
+    // So the window has to contain both the forced optimal and whatever the game may actually submit,
+    // and the default arm already does that: maximum at display resolution, minimum at the usual half.
+    // Clamping is still available to anyone who asks for it explicitly.
+    if (Config::Instance()->DrsMaxOverrideEnabled.value_or_default())
     {
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, OutWidth);
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height, OutHeight);
@@ -708,7 +707,7 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSSD_GetOptimalSettingsCallback(NVSDK_NGX
     InParams->Set(NVSDK_NGX_Parameter_OutHeight, OutHeight);
 
     // DRS minimum resolution
-    if (Config::Instance()->DrsMinOverrideEnabled.value_or_default() || ForcedPerfQualityActive())
+    if (Config::Instance()->DrsMinOverrideEnabled.value_or_default())
     {
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, OutWidth);
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, OutHeight);
@@ -737,7 +736,18 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSSD_GetOptimalSettingsCallback(NVSDK_NGX
     }
 
     // DRS maximum resolution
-    if (Config::Instance()->DrsMaxOverrideEnabled.value_or_default() || ForcedPerfQualityActive())
+    // Deliberately not widened when a quality is forced.
+    //
+    // Forcing a preset changes the answer to "what would this quality render at". It does not change
+    // what the game renders -- that is the game's decision and OptiScaler never sees it until evaluate.
+    // FFXIV settles the point: it builds a Balanced feature and then submits a 3840x2160 subrect every
+    // frame regardless. Pinning the maximum to the forced optimal puts the game's own render size
+    // outside the legal window, and the runtime answers BAD00005 on every frame from then on.
+    //
+    // So the window has to contain both the forced optimal and whatever the game may actually submit,
+    // and the default arm already does that: maximum at display resolution, minimum at the usual half.
+    // Clamping is still available to anyone who asks for it explicitly.
+    if (Config::Instance()->DrsMaxOverrideEnabled.value_or_default())
     {
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, OutWidth);
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Height, OutHeight);
