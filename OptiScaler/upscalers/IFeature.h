@@ -111,6 +111,12 @@ class IFeature
     // turn: it is the half that does the enlarging, and it writes at display resolution.
     bool _isEnlargementStage = false;
 
+    // Throttle for the "asked for, not taken" warning, per feature rather than per process. It was a
+    // function-level static, which several features share: with a bridge there are at least two live
+    // objects and the first one to reach a given target silenced the rest, which is precisely the
+    // information the message exists to carry.
+    unsigned int _saidNotTakenForTarget = 0;
+
   public:
     NVSDK_NGX_Handle* Handle() const { return _handle; };
     static unsigned int GetNextHandleId() { return handleCounter++; }
@@ -124,6 +130,13 @@ class IFeature
     virtual Upscaler GetUpscalerType() const = 0;
     virtual API Api() const = 0;
     std::string Name() const { return UpscalerDisplayName(GetUpscalerType()); };
+
+    /// @brief Who this feature is and what it thinks its resolutions are.
+    ///
+    /// A bridged upscaler is two feature objects, and a dual-feature split adds a third. They log
+    /// through the same call sites, so a line saying the split was declined does not say which object
+    /// declined it -- and that is the one thing worth knowing. Every dual-feature message carries this.
+    std::string FeatureIdentity();
     std::string ShortName() const { return UpscalerShortName(GetUpscalerType()); }; // Without the version
     virtual std::optional<double> ReadUpscalerTime(void* commandQueue) { return std::nullopt; }
     virtual void ReadDetailedGpuTimes(void* commandQueue, std::vector<DetailedGpuTime>& detailedGpuTimes) {};

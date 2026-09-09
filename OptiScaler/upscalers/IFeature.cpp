@@ -23,6 +23,14 @@ bool IFeature::DualFeatureSplit() const
            Config::Instance()->DlssNrEnabled.value_or_default();
 }
 
+std::string IFeature::FeatureIdentity()
+{
+    return std::format("{} #{} [{}] render {}x{} display {}x{} target {}x{}", Name(),
+                       _handle != nullptr ? _handle->Id : 0u,
+                       _isEnlargementStage ? "enlargement half" : "upscaler", _renderWidth, _renderHeight,
+                       _displayWidth, _displayHeight, TargetWidth(), TargetHeight());
+}
+
 bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
 {
     unsigned int width = 0;
@@ -217,6 +225,13 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         if (DualFeatureSplit())
             LOG_INFO("DLSS-NR dual feature: upscaler targets {}x{}, enlargement to {}x{} runs after the model",
                      _renderWidth, _renderHeight, _displayWidth, _displayHeight);
+
+        // Every feature that is initialised, split or not, says who it is and what it was handed. With a
+        // bridge this is the only place the inner and outer objects can be told apart, and the question
+        // the dual-feature failure keeps raising is which of them received which resolutions.
+        LOG_DEBUG("Feature initialised: {} (asked for {}x{} -> {}x{}, quality {}, dual feature setting {})",
+                  FeatureIdentity(), width, height, outWidth, outHeight, pqValue,
+                  Config::Instance()->DlssNrDualFeature.value_or_default());
 
         LOG_INFO("Render Resolution: {0}x{1}, Display Resolution {2}x{3}, Quality: {4}", _renderWidth, _renderHeight,
                  _displayWidth, _displayHeight, pqValue);

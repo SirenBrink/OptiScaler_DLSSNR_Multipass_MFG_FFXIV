@@ -114,15 +114,16 @@ bool IFeature_Dx12::EnsureEnlarger(ID3D12GraphicsCommandList* InCommandList, NVS
 
     if (!ok)
     {
-        LOG_ERROR("DLSS-NR dual feature: {} would not build for the enlargement, falling back to the output scaler",
-                  UpscalerDisplayName(wanted.value()));
+        LOG_ERROR("DLSS-NR dual feature: {} would not build the enlargement half for {}, falling back to the "
+                  "output scaler",
+                  UpscalerDisplayName(wanted.value()), FeatureIdentity());
         return false;
     }
 
     Enlarger = std::move(built);
 
-    LOG_INFO("DLSS-NR dual feature: {} enlarges {}x{} to {}x{} after the model", Enlarger->Name(), RenderWidth(),
-             RenderHeight(), DisplayWidth(), DisplayHeight());
+    LOG_INFO("DLSS-NR dual feature: enlargement half {} built for {}", Enlarger->FeatureIdentity(),
+             FeatureIdentity());
 
     return true;
 }
@@ -197,13 +198,12 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     if (!useDualFeature && !_isEnlargementStage && Config::Instance()->DlssNrDualFeature.value_or_default() &&
         Config::Instance()->DlssNrEnabled.value_or_default())
     {
-        static unsigned int saidTarget = 0;
-
-        if (saidTarget != TargetWidth())
+        if (_saidNotTakenForTarget != TargetWidth())
         {
-            saidTarget = TargetWidth();
-            LOG_WARN("DLSS-NR dual feature: asked for, not taken -- target {}x{}, render {}x{}, display {}x{}",
-                     TargetWidth(), TargetHeight(), RenderWidth(), RenderHeight(), DisplayWidth(), DisplayHeight());
+            _saidNotTakenForTarget = TargetWidth();
+            LOG_WARN("DLSS-NR dual feature: asked for, not taken by {} -- the split needs render < display, and "
+                     "this feature was built with them equal",
+                     FeatureIdentity());
         }
     }
 
