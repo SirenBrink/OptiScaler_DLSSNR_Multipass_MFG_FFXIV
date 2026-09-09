@@ -97,41 +97,67 @@ const char* FfxivQualityName(unsigned char value)
 
 void ReportFfxivQualitySetting()
 {
-    static bool resolved = false;
+    // Retried until it resolves, not decided once.
+    //
+    // The first version cached its own failure: the pointer read zero on the very first feature init
+    // and the probe never looked again, so fourteen further inits over three minutes went unexamined.
+    // The block is allocated during config load, so reading zero means too early, not wrong -- and the
+    // only way to tell "too early" from "wrong address" is to keep asking.
     static const unsigned char* settings = nullptr;
+    static unsigned int attempts = 0;
+    static bool gaveUp = false;
 
-    if (!resolved)
+    // Called per evaluate as well as per init, so this is roughly twenty seconds of frames.
+    constexpr unsigned int kMaxAttempts = 1200;
+
+    if (settings == nullptr && !gaveUp)
     {
-        resolved = true;
-
         if (State::Instance().gameExe != "ffxiv_dx11.exe")
+        {
+            gaveUp = true;
             return;
+        }
+
+        ++attempts;
 
         const auto base = (uintptr_t) GetModuleHandleW(nullptr);
-
-        if (base == 0)
-            return;
-
         const auto slot = (const unsigned char* const*) (base + kFfxivSettingsPointerRva);
 
-        if (!ReadableAt(slot, sizeof(void*)))
+        if (base == 0 || !ReadableAt(slot, sizeof(void*)))
         {
-            LOG_WARN("FFXIV probe: the settings pointer at base+{:#x} is not readable; the offset is wrong for "
-                     "this game build",
+            LOG_WARN("FFXIV probe: base+{:#x} is not readable -- the offset is wrong for this build",
                      kFfxivSettingsPointerRva);
+            gaveUp = true;
             return;
         }
 
         const unsigned char* block = *slot;
 
-        if (block == nullptr || !ReadableAt(block, 0x80))
+        // Sanity, so a stale or wrong pointer is not mistaken for the settings block: the two gate
+        // bytes and the quality selector are all small enumerations in this build.
+        const bool plausible = block != nullptr && ReadableAt(block, 0xd8) && block[0x54] <= 8 &&
+                               block[0x55] <= 8 && block[0x44] <= 1 && block[0x45] <= 1;
+
+        if (!plausible)
         {
-            LOG_WARN("FFXIV probe: settings pointer reads {:#x}, which is not a readable block", (uintptr_t) block);
+            if (attempts == 1 || attempts == kMaxAttempts)
+                LOG_WARN("FFXIV probe: attempt {} of {} -- pointer at base+{:#x} reads {:#x}{}", attempts,
+                         kMaxAttempts, kFfxivSettingsPointerRva, (uintptr_t) block,
+                         block == nullptr ? " (not populated yet)" : " (does not look like the settings block)");
+
+            if (attempts >= kMaxAttempts)
+            {
+                LOG_WARN("FFXIV probe: giving up after {} attempts; the address is wrong for this game build",
+                         attempts);
+                gaveUp = true;
+            }
+
             return;
         }
 
         settings = block;
-        LOG_INFO("FFXIV probe: graphics settings block at {:#x} (module base {:#x})", (uintptr_t) block, base);
+        LOG_INFO("FFXIV probe: graphics settings block at {:#x} after {} attempt(s), module base {:#x}",
+                 (uintptr_t) block, attempts, base);
     }
 
     if (settings == nullptr)
@@ -424,6 +450,8 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
 void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsigned int* OutWidth,
                                    unsigned int* OutHeight)
 {
+    ReportFfxivQualitySetting();
+
     if (InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, OutWidth) !=
             NVSDK_NGX_Result_Success ||
         InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, OutHeight) !=
