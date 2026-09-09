@@ -703,6 +703,18 @@ class Config
 
     CustomOptional<int, NoDefault> RoundInternalResolution; // disabled by default
 
+    // Take the render size from Width/Height rather than the render subrect.
+    //
+    // NGX means DLSS_Render_Subrect_Dimensions to be the region of the colour buffer holding this
+    // frame. A game that renders its 3D scene smaller than its UI may allocate that buffer at display
+    // size and report the allocation here, with the frame's real size in Width/Height -- FFXIV does
+    // exactly that, and reading the subrect then makes render look equal to display: no dual-feature
+    // split, and an evaluate the runtime refuses because the feature was created smaller.
+    //
+    // Off by default and deliberately so. It rewrites geometry every game passes through, and a wrong
+    // reading of it is a wrong picture rather than an error, so it is opt-in per title.
+    CustomOptional<bool> RenderSizeFromWidthHeight { false };
+
     CustomOptional<int, NoDefault> SkipFirstFrames; // disabled by default
     CustomOptional<bool> RestoreComputeSignature { false };
     CustomOptional<bool> RestoreGraphicSignature { false };

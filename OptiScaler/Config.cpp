@@ -702,6 +702,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             SimulateWaitableObject.set_from_config(readBool("Hotfix", "SimulateWaitableObject"));
 
             RoundInternalResolution.set_from_config(readInt("Hotfix", "RoundInternalResolution"));
+            RenderSizeFromWidthHeight.set_from_config(readBool("Hotfix", "RenderSizeFromWidthHeight"));
 
             RestoreComputeSignature.set_from_config(readBool("Hotfix", "RestoreComputeSignature"));
             RestoreGraphicSignature.set_from_config(readBool("Hotfix", "RestoreGraphicSignature"));
@@ -1511,6 +1512,8 @@ bool Config::SaveIni()
 
         ini.SetValue("Hotfix", "RoundInternalResolution",
                      GetIntValue(Instance()->RoundInternalResolution.value_for_config()).c_str());
+    ini.SetValue("Hotfix", "RenderSizeFromWidthHeight",
+                 GetBoolValue(Instance()->RenderSizeFromWidthHeight.value_for_config()).c_str());
 
         ini.SetValue("Hotfix", "RestoreComputeSignature",
                      GetBoolValue(Instance()->RestoreComputeSignature.value_for_config()).c_str());

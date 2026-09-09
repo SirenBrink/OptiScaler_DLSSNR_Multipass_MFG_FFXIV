@@ -336,28 +336,33 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
         } while (false);
     }
 
-    // Report what the game set, and change nothing.
+    // The render subrect, or Width/Height -- see Config's RenderSizeFromWidthHeight.
     //
-    // I read a 3840x2160 subrect beside Width/Height of 2258x1270 as FFXIV mislabelling a small
-    // render inside a big buffer, and took the smaller pair as the truth. That silenced the
-    // InvalidParameter storm -- and produced a 2258x1270 image in the corner of a 3840x2160 screen,
-    // on this machine and on an untouched configuration belonging to someone else. The subrect was
-    // right; Width and Height are what the game left over from creation.
-    //
-    // The InvalidParameter storm is real and still unexplained: FFXIV creates the feature at the size
-    // its chosen quality implies and then renders at display resolution. That is worth solving, but
-    // not by rewriting geometry underneath every game on the strength of one reading of one title.
-    unsigned int reportWidth = 0, reportHeight = 0;
+    // Off, this only reports a disagreement. On, it takes the smaller value per axis: neither
+    // parameter can exceed the frame's real size under either convention, and per axis rather than as
+    // a pair because letterboxing scales one axis and not the other.
+    unsigned int paramWidth = 0, paramHeight = 0;
 
-    if (InParameters->Get(NVSDK_NGX_Parameter_Width, &reportWidth) == NVSDK_NGX_Result_Success &&
-        InParameters->Get(NVSDK_NGX_Parameter_Height, &reportHeight) == NVSDK_NGX_Result_Success &&
-        (reportWidth != *OutWidth || reportHeight != *OutHeight) &&
-        (_renderWidth != *OutWidth || _renderHeight != *OutHeight || !_reportedEvaluateGeometry))
+    const bool haveParams = InParameters->Get(NVSDK_NGX_Parameter_Width, &paramWidth) == NVSDK_NGX_Result_Success &&
+                            InParameters->Get(NVSDK_NGX_Parameter_Height, &paramHeight) == NVSDK_NGX_Result_Success &&
+                            paramWidth > 0 && paramHeight > 0;
+
+    if (haveParams && (paramWidth != *OutWidth || paramHeight != *OutHeight))
     {
-        LOG_INFO("Evaluate geometry: the game reports a {}x{} subrect beside Width/Height of {}x{}. Using the "
-                 "subrect, as NGX documents it. This feature was created for render {}x{} display {}x{}.",
-                 *OutWidth, *OutHeight, reportWidth, reportHeight, _renderWidth, _renderHeight, _displayWidth,
-                 _displayHeight);
+        const bool trustParams = Config::Instance()->RenderSizeFromWidthHeight.value_or_default();
+
+        const unsigned int resolvedWidth = trustParams && paramWidth < *OutWidth ? paramWidth : *OutWidth;
+        const unsigned int resolvedHeight = trustParams && paramHeight < *OutHeight ? paramHeight : *OutHeight;
+
+        if (_renderWidth != resolvedWidth || _renderHeight != resolvedHeight || !_reportedEvaluateGeometry)
+            LOG_INFO("Evaluate geometry: the game reports a {}x{} subrect beside Width/Height of {}x{}. Using "
+                     "{}x{} ({}). This feature was created for render {}x{} display {}x{}.",
+                     *OutWidth, *OutHeight, paramWidth, paramHeight, resolvedWidth, resolvedHeight,
+                     trustParams ? "Hotfix.RenderSizeFromWidthHeight is on" : "the subrect, as NGX documents it",
+                     _renderWidth, _renderHeight, _displayWidth, _displayHeight);
+
+        *OutWidth = resolvedWidth;
+        *OutHeight = resolvedHeight;
     }
 
     _reportedEvaluateGeometry = true;

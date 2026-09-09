@@ -29,6 +29,26 @@ void DLSSDFeature::ProcessEvaluateParams(NVSDK_NGX_Parameter* InParameters)
     unsigned int height;
     GetRenderResolution(InParameters, &width, &height);
 
+    // The runtime reads the subrect for itself and validates it against the size the feature was
+    // created for, so correcting our own bookkeeping is not enough -- the parameter has to agree too.
+    // Only when the setting that produced the correction is on.
+    if (Config::Instance()->RenderSizeFromWidthHeight.value_or_default())
+    {
+        unsigned int subrectWidth = 0, subrectHeight = 0;
+
+        if (InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &subrectWidth) ==
+                NVSDK_NGX_Result_Success &&
+            InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &subrectHeight) ==
+                NVSDK_NGX_Result_Success &&
+            (subrectWidth != width || subrectHeight != height))
+        {
+            LOG_DEBUG("Correcting the render subrect the game set: {}x{} -> {}x{}", subrectWidth, subrectHeight,
+                      width, height);
+            InParameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, width);
+            InParameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, height);
+        }
+    }
+
 }
 
 void DLSSDFeature::ProcessInitParams(NVSDK_NGX_Parameter* InParameters)
