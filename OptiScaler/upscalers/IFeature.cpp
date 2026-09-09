@@ -273,6 +273,36 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
         } while (false);
     }
 
+    // Whose number is this?
+    //
+    // FFXIV builds its feature for one size and then evaluates at another, and no log so far can say
+    // whether the game is genuinely rendering at display resolution or mislabelling a smaller render
+    // inside a display-sized buffer. The difference decides everything: a mislabel can be corrected
+    // here, a real native render cannot be shrunk from inside NGX.
+    //
+    // So report the raw parameters exactly as the game left them, once per distinct answer -- not per
+    // frame, or it is nine thousand identical lines again.
+    if (_renderWidth != *OutWidth || _renderHeight != *OutHeight || !_reportedEvaluateGeometry)
+    {
+        _reportedEvaluateGeometry = true;
+
+        unsigned int rawSubW = 0, rawSubH = 0, rawW = 0, rawH = 0, rawOutW = 0, rawOutH = 0;
+        const bool haveSub =
+            InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &rawSubW) ==
+                NVSDK_NGX_Result_Success &&
+            InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &rawSubH) ==
+                NVSDK_NGX_Result_Success;
+        InParameters->Get(NVSDK_NGX_Parameter_Width, &rawW);
+        InParameters->Get(NVSDK_NGX_Parameter_Height, &rawH);
+        InParameters->Get(NVSDK_NGX_Parameter_OutWidth, &rawOutW);
+        InParameters->Get(NVSDK_NGX_Parameter_OutHeight, &rawOutH);
+
+        LOG_INFO("Evaluate geometry from the game: subrect {} {}x{}, Width/Height {}x{}, "
+                 "OutWidth/OutHeight {}x{}. This feature was created for render {}x{} display {}x{}.",
+                 haveSub ? "present" : "ABSENT", rawSubW, rawSubH, rawW, rawH, rawOutW, rawOutH, _renderWidth,
+                 _renderHeight, _displayWidth, _displayHeight);
+    }
+
     _renderWidth = *OutWidth;
     _renderHeight = *OutHeight;
 
