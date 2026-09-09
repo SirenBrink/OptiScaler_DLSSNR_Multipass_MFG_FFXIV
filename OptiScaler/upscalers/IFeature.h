@@ -163,6 +163,10 @@ class IFeature
 
     virtual bool CallsUpscalerEndByItself() { return false; }
 
+    // Resolve games such as FFXIV that report the allocation as the DLSS render subrect.
+    // Bridge paths call this before pre-SR NR so NR and the upscaler consume the same active extent.
+    void CorrectRenderSubrect(NVSDK_NGX_Parameter* InParameters);
+
     IFeature(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters) { SetHandle(InHandleId); }
 
     virtual ~IFeature() {}

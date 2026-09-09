@@ -24,11 +24,6 @@ void DLSSDFeature::ProcessEvaluateParams(NVSDK_NGX_Parameter* InParameters)
     InParameters->Get("DLSS.Use.HW.Depth", &hwDepth);
     _depthLinear = hwDepth == 0;
 
-    // Read render resolution
-    unsigned int width;
-    unsigned int height;
-    GetRenderResolution(InParameters, &width, &height);
-
     // Hand the resolved render size back before the evaluate.
     //
     // The runtime reads the subrect itself and validates it against the size the feature was created
@@ -37,19 +32,7 @@ void DLSSDFeature::ProcessEvaluateParams(NVSDK_NGX_Parameter* InParameters)
     // GetRenderResolution has already worked out the real size from Width/Height; correcting our own
     // bookkeeping and leaving the parameter alone fixes nothing, because the runtime never reads our
     // bookkeeping.
-    unsigned int subrectWidth = 0, subrectHeight = 0;
-
-    if (InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &subrectWidth) ==
-            NVSDK_NGX_Result_Success &&
-        InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &subrectHeight) ==
-            NVSDK_NGX_Result_Success &&
-        (subrectWidth != width || subrectHeight != height))
-    {
-        LOG_DEBUG("Correcting the render subrect the game set: {}x{} -> {}x{}", subrectWidth, subrectHeight, width,
-                  height);
-        InParameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, width);
-        InParameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, height);
-    }
+    CorrectRenderSubrect(InParameters);
 }
 
 void DLSSDFeature::ProcessInitParams(NVSDK_NGX_Parameter* InParameters)

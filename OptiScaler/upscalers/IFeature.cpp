@@ -357,6 +357,27 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
     }
 }
 
+void IFeature::CorrectRenderSubrect(NVSDK_NGX_Parameter* InParameters)
+{
+    unsigned int width = 0;
+    unsigned int height = 0;
+    GetRenderResolution(InParameters, &width, &height);
+
+    unsigned int subrectWidth = 0;
+    unsigned int subrectHeight = 0;
+    if (InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &subrectWidth) ==
+            NVSDK_NGX_Result_Success &&
+        InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &subrectHeight) ==
+            NVSDK_NGX_Result_Success &&
+        (subrectWidth != width || subrectHeight != height))
+    {
+        LOG_DEBUG("Correcting the render subrect the game set: {}x{} -> {}x{}", subrectWidth, subrectHeight, width,
+                  height);
+        InParameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, width);
+        InParameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, height);
+    }
+}
+
 float IFeature::GetSharpness(const NVSDK_NGX_Parameter* InParameters)
 {
     if (Config::Instance()->OverrideSharpness.value_or_default())
