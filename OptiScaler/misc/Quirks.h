@@ -64,6 +64,7 @@ enum class GameQuirk : uint64_t
     IgnoreTagsWithoutHudlessForFG,
     ForceFGRenderSizeMVs,
     CreateSLOnThe2ndDevice,
+    ScaleDisplayColorForForcedQuality,
     // Don't forget to add the new entry to printQuirks
     _
 };
@@ -273,7 +274,8 @@ static const QuirkEntry quirkTable[] = {
     QUIRK_ENTRY("project_plague-win64-shipping.exe", GameQuirk::SkipFirst10Frames),
 
     // Final Fantasy XIV
-    QUIRK_ENTRY("ffxiv_dx11.exe", GameQuirk::DisableVsyncOverride),
+    QUIRK_ENTRY("ffxiv_dx11.exe", GameQuirk::DisableVsyncOverride,
+                GameQuirk::ScaleDisplayColorForForcedQuality),
     QUIRK_ENTRY("graphadapterdesc.exe", GameQuirk::SkipD3D11FeatureLevelElevation),
 
     // Prey 2017

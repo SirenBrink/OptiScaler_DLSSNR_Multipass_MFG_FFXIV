@@ -4,6 +4,7 @@
 #include "IFeature_Dx12.h"
 
 #include <with_dx12/dx11_with_dx12.h>
+#include <shaders/output_scaling/OS_Dx12.h>
 
 #include <d3d12.h>
 #include <d3d11_4.h>
@@ -45,11 +46,17 @@ class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
     Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Exp = {};
     Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Out = {};
 
+    std::unique_ptr<OS_Dx12> ForcedQualityColorScaler = nullptr;
+    bool ReportedForcedQualityColorScale = false;
+
     ID3D11Resource* paramOutput[DX11WDX12_NUM_OF_BUFFERS] = {};
 
     bool CreateD3D12Objects();
     bool ProcessDx11Textures(const NVSDK_NGX_Parameter* InParameters);
     bool CopyBackOutput();
+    ID3D12Resource* PrepareForcedQualityColor(ID3D12GraphicsCommandList* commandList,
+                                               NVSDK_NGX_Parameter* parameters,
+                                               ID3D12Resource* color);
 
     void ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
                          D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState);

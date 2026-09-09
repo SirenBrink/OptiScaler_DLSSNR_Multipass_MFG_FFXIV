@@ -26,6 +26,78 @@ void IFeature_Dx11wDx12::ResourceBarrier(ID3D12GraphicsCommandList* commandList,
     commandList->ResourceBarrier(1, &barrier);
 }
 
+ID3D12Resource* IFeature_Dx11wDx12::PrepareForcedQualityColor(ID3D12GraphicsCommandList* commandList,
+                                                              NVSDK_NGX_Parameter* parameters,
+                                                              ID3D12Resource* color)
+{
+    if (commandList == nullptr || parameters == nullptr || color == nullptr || dx12Feature == nullptr ||
+        !(State::Instance().gameQuirks & GameQuirk::ScaleDisplayColorForForcedQuality) ||
+        Config::Instance()->ForcePerfQuality.value_or_default() < 0)
+    {
+        return color;
+    }
+
+    const auto desc = color->GetDesc();
+    const auto renderWidth = dx12Feature->RenderWidth();
+    const auto renderHeight = dx12Feature->RenderHeight();
+    if (renderWidth == 0 || renderHeight == 0 || renderWidth > desc.Width || renderHeight > desc.Height ||
+        (renderWidth == desc.Width && renderHeight == desc.Height))
+    {
+        return color;
+    }
+
+    unsigned int subrectWidth = 0;
+    unsigned int subrectHeight = 0;
+    const bool fullAllocationSubrect =
+        parameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &subrectWidth) ==
+            NVSDK_NGX_Result_Success &&
+        parameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &subrectHeight) ==
+            NVSDK_NGX_Result_Success &&
+        subrectWidth == desc.Width && subrectHeight == desc.Height;
+    if (!fullAllocationSubrect)
+        return color;
+
+    if (ForcedQualityColorScaler == nullptr)
+    {
+        ForcedQualityColorScaler =
+            std::make_unique<OS_Dx12>("Forced quality color input", _dx11on12Device, false, Scaler::Lanczos3);
+    }
+
+    if (!ForcedQualityColorScaler->CreateBufferResource(_dx11on12Device, color, renderWidth, renderHeight,
+                                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+    {
+        LOG_ERROR("Forced quality color input: could not create the {}x{} staging texture", renderWidth,
+                  renderHeight);
+        return nullptr;
+    }
+
+    ForcedQualityColorScaler->SetBufferState(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    ResourceBarrier(commandList, color, D3D12_RESOURCE_STATE_COMMON,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    const bool scaled = ForcedQualityColorScaler->Dispatch(commandList, color, ForcedQualityColorScaler->Buffer());
+    ResourceBarrier(commandList, color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COMMON);
+
+    if (!scaled)
+    {
+        LOG_ERROR("Forced quality color input: scaling {}x{} to {}x{} failed", desc.Width, desc.Height,
+                  renderWidth, renderHeight);
+        return nullptr;
+    }
+
+    ForcedQualityColorScaler->SetBufferState(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    if (!ReportedForcedQualityColorScale)
+    {
+        ReportedForcedQualityColorScale = true;
+        LOG_INFO("Forced quality color input: scaling the complete {}x{} frame to {}x{} before the upscaler; "
+                 "the game's render subrect describes the allocation, not a crop",
+                 desc.Width, desc.Height, renderWidth, renderHeight);
+    }
+
+    return ForcedQualityColorScaler->Buffer();
+}
+
 bool IFeature_Dx11wDx12::CreateD3D12Objects()
 {
     HRESULT result;
@@ -444,7 +516,14 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
 
         commandListRecording = true;
 
-        InParameters->Set(NVSDK_NGX_Parameter_Color, (void*) dx11Color.Dx12Resource);
+        auto upscalerColor = PrepareForcedQualityColor(cmdList, InParameters, dx11Color.Dx12Resource);
+        if (upscalerColor == nullptr)
+        {
+            LOG_ERROR("Can't prepare the forced-quality color input");
+            break;
+        }
+
+        InParameters->Set(NVSDK_NGX_Parameter_Color, (void*) upscalerColor);
         InParameters->Set(NVSDK_NGX_Parameter_MotionVectors, (void*) dx11Mv.Dx12Resource);
         InParameters->Set(NVSDK_NGX_Parameter_Output, (void*) dx11Out.Dx12Resource);
         InParameters->Set(NVSDK_NGX_Parameter_Depth, (void*) dx11Depth.Dx12Resource);
