@@ -114,16 +114,16 @@ bool IFeature_Dx12::EnsureEnlarger(ID3D12GraphicsCommandList* InCommandList, NVS
 
     if (!ok)
     {
-        LOG_ERROR("DLSS-NR dual feature: {} would not build the enlargement half for {}, falling back to the "
+        LOG_ERROR("DLSS-NR dual feature: {} would not build the enlargement half for {} {}, falling back to the "
                   "output scaler",
-                  UpscalerDisplayName(wanted.value()), FeatureIdentity());
+                  UpscalerDisplayName(wanted.value()), Name(), FeatureIdentity());
         return false;
     }
 
     Enlarger = std::move(built);
 
-    LOG_INFO("DLSS-NR dual feature: enlargement half {} built for {}", Enlarger->FeatureIdentity(),
-             FeatureIdentity());
+    LOG_INFO("DLSS-NR dual feature: enlargement half {} {} built for {} {}", Enlarger->Name(),
+             Enlarger->FeatureIdentity(), Name(), FeatureIdentity());
 
     return true;
 }
@@ -134,6 +134,10 @@ bool IFeature_Dx12::Init(ID3D12Device* InDevice, ID3D12GraphicsCommandList* InCo
     Device = InDevice;
 
     auto result = InitInternal(InCommandList, InParameters);
+
+    // Safe here in a way it is not inside SetInitParameters: construction has finished, so Name() can
+    // reach the leaf that defines GetUpscalerType().
+    LOG_DEBUG("Feature {}: {} {}", result ? "ready" : "FAILED to initialise", Name(), FeatureIdentity());
 
     if (result)
     {
@@ -201,9 +205,9 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
         if (_saidNotTakenForTarget != TargetWidth())
         {
             _saidNotTakenForTarget = TargetWidth();
-            LOG_WARN("DLSS-NR dual feature: asked for, not taken by {} -- the split needs render < display, and "
-                     "this feature was built with them equal",
-                     FeatureIdentity());
+            LOG_WARN("DLSS-NR dual feature: asked for, not taken by {} {} -- the split needs render < display, "
+                     "and this feature was built with them equal",
+                     Name(), FeatureIdentity());
         }
     }
 

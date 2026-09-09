@@ -23,12 +23,22 @@ bool IFeature::DualFeatureSplit() const
            Config::Instance()->DlssNrEnabled.value_or_default();
 }
 
-std::string IFeature::FeatureIdentity()
+// Not one virtual call in here, deliberately.
+//
+// Several upscalers call SetInitParameters from a constructor -- XeSSFeature, FFXFeature and
+// FSR31Feature all do -- and at that moment the object is only built as far as that class. Name() goes
+// through GetUpscalerType(), which those classes leave pure and only their leaves define, so calling it
+// there is a pure virtual call and the process is gone. DLSSFeature happens to define its own, which is
+// why an identity built this way survived DLSS and killed XeSS the moment it was used as an enlarger.
+//
+// So this reads members only. The name is logged separately from Init, where the object is whole.
+std::string IFeature::FeatureIdentity() const
 {
-    return std::format("{} #{} [{}] render {}x{} display {}x{} target {}x{}", Name(),
+    return std::format("#{} [{}] render {}x{} display {}x{} target {}x{}{}",
                        _handle != nullptr ? _handle->Id : 0u,
                        _isEnlargementStage ? "enlargement half" : "upscaler", _renderWidth, _renderHeight,
-                       _displayWidth, _displayHeight, TargetWidth(), TargetHeight());
+                       _displayWidth, _displayHeight, _targetWidth, _targetHeight,
+                       DualFeatureSplit() ? " split" : "");
 }
 
 bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)

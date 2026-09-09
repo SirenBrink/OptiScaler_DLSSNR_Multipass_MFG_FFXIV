@@ -131,12 +131,16 @@ class IFeature
     virtual API Api() const = 0;
     std::string Name() const { return UpscalerDisplayName(GetUpscalerType()); };
 
-    /// @brief Who this feature is and what it thinks its resolutions are.
+    /// @brief What this feature thinks its resolutions are, safe to call from a constructor.
     ///
     /// A bridged upscaler is two feature objects, and a dual-feature split adds a third. They log
     /// through the same call sites, so a line saying the split was declined does not say which object
     /// declined it -- and that is the one thing worth knowing. Every dual-feature message carries this.
-    std::string FeatureIdentity();
+    ///
+    /// Members only, no virtual calls: SetInitParameters runs inside several upscalers' constructors,
+    /// where a virtual belonging to a class not yet constructed ends the process. Pair it with Name()
+    /// at call sites that run after construction; those are the ones that can say who this is.
+    std::string FeatureIdentity() const;
     std::string ShortName() const { return UpscalerShortName(GetUpscalerType()); }; // Without the version
     virtual std::optional<double> ReadUpscalerTime(void* commandQueue) { return std::nullopt; }
     virtual void ReadDetailedGpuTimes(void* commandQueue, std::vector<DetailedGpuTime>& detailedGpuTimes) {};
