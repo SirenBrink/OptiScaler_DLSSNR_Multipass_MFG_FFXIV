@@ -32,6 +32,143 @@ bool IFeature::DualFeatureSplit() const
 // why an identity built this way survived DLSS and killed XeSS the moment it was used as an enlarger.
 //
 // So this reads members only. The name is logged separately from Init, where the object is whole.
+// ---------------------------------------------------------------------------------------------
+// FFXIV probe -- read only, and only in FINAL FANTASY XIV.
+//
+// FUN_140375180 in ffxiv_dx11.exe is the one function that writes the DLSS render size, the
+// PerfQualityValue and the render preset hint. It takes the quality from a single byte in the game's
+// graphics settings block:
+//
+//     if (((*(char *)(SETTINGS + 0x54) == 2) || (*(char *)(SETTINGS + 0x44) != 0)) &&
+//         (*(char *)(SETTINGS + 0x45) != 0))
+//         switch (*(byte *)(SETTINGS + 0x55)) { ... }        // else DLAA
+//
+// and the render size from either the quality table or, when a flag on the DLSS context is set,
+// display multiplied by the float at SETTINGS + 0x4c -- the manual 3D resolution scale.
+//
+// SETTINGS is a pointer held in a global at image base + 0x28f8470.
+//
+// This reads those five fields and reports them when they change. Nothing is written. The point is to
+// confirm the mapping against what the in-game dropdown says before trusting any of it: if the byte
+// reads 1 while the game's Graphics Upscaling quality shows DLAA, the addresses are right.
+// ---------------------------------------------------------------------------------------------
+namespace
+{
+constexpr uintptr_t kFfxivSettingsPointerRva = 0x28f8470;
+
+bool ReadableAt(const void* address, size_t bytes)
+{
+    MEMORY_BASIC_INFORMATION info {};
+
+    if (VirtualQuery(address, &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT)
+        return false;
+
+    constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+                               PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+
+    if ((info.Protect & readable) == 0 || (info.Protect & PAGE_GUARD) != 0)
+        return false;
+
+    return (uintptr_t) address + bytes <= (uintptr_t) info.BaseAddress + info.RegionSize;
+}
+
+const char* FfxivQualityName(unsigned char value)
+{
+    switch (value)
+    {
+    case 0:
+        return "Auto (chosen from pixel count)";
+    case 1:
+        return "DLAA -> NGX 5";
+    case 2:
+        return "Ultra Quality -> NGX 4";
+    case 3:
+        return "Quality -> NGX 2";
+    case 4:
+        return "Balanced -> NGX 1";
+    case 5:
+        return "Performance -> NGX 0";
+    case 6:
+        return "Ultra Performance -> NGX 3";
+    default:
+        return "not a value this build maps";
+    }
+}
+
+void ReportFfxivQualitySetting()
+{
+    static bool resolved = false;
+    static const unsigned char* settings = nullptr;
+
+    if (!resolved)
+    {
+        resolved = true;
+
+        if (State::Instance().gameExe != "ffxiv_dx11.exe")
+            return;
+
+        const auto base = (uintptr_t) GetModuleHandleW(nullptr);
+
+        if (base == 0)
+            return;
+
+        const auto slot = (const unsigned char* const*) (base + kFfxivSettingsPointerRva);
+
+        if (!ReadableAt(slot, sizeof(void*)))
+        {
+            LOG_WARN("FFXIV probe: the settings pointer at base+{:#x} is not readable; the offset is wrong for "
+                     "this game build",
+                     kFfxivSettingsPointerRva);
+            return;
+        }
+
+        const unsigned char* block = *slot;
+
+        if (block == nullptr || !ReadableAt(block, 0x80))
+        {
+            LOG_WARN("FFXIV probe: settings pointer reads {:#x}, which is not a readable block", (uintptr_t) block);
+            return;
+        }
+
+        settings = block;
+        LOG_INFO("FFXIV probe: graphics settings block at {:#x} (module base {:#x})", (uintptr_t) block, base);
+    }
+
+    if (settings == nullptr)
+        return;
+
+    const unsigned char gateA = settings[0x54];
+    const unsigned char gateB = settings[0x44];
+    const unsigned char gateC = settings[0x45];
+    const unsigned char quality = settings[0x55];
+
+    float scale = 0.0f;
+    memcpy(&scale, settings + 0x4c, sizeof(scale));
+
+    static bool everReported = false;
+    static unsigned char lastGateA = 0, lastGateB = 0, lastGateC = 0, lastQuality = 0;
+    static float lastScale = 0.0f;
+
+    if (everReported && gateA == lastGateA && gateB == lastGateB && gateC == lastGateC && quality == lastQuality &&
+        scale == lastScale)
+        return;
+
+    everReported = true;
+    lastGateA = gateA;
+    lastGateB = gateB;
+    lastGateC = gateC;
+    lastQuality = quality;
+    lastScale = scale;
+
+    const bool gatePasses = (gateA == 2 || gateB != 0) && gateC != 0;
+
+    LOG_INFO("FFXIV probe: quality byte +0x55 = {} ({}), 3D resolution scale +0x4c = {:.4f}, gates +0x54={} "
+             "+0x44={} +0x45={} -> {}",
+             quality, FfxivQualityName(quality), scale, gateA, gateB, gateC,
+             gatePasses ? "the game reads the quality byte" : "the game forces DLAA");
+}
+} // namespace
+
 std::string IFeature::FeatureIdentity() const
 {
     return std::format("#{} [{}] render {}x{} display {}x{} target {}x{}{}",
@@ -43,6 +180,8 @@ std::string IFeature::FeatureIdentity() const
 
 bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
 {
+    ReportFfxivQualitySetting();
+
     unsigned int width = 0;
     unsigned int outWidth = 0;
     unsigned int height = 0;
