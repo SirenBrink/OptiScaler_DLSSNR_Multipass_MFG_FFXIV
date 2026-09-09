@@ -336,48 +336,31 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
         } while (false);
     }
 
-    // A subrect bigger than Width/Height is describing the buffer, not the render.
+    // Report what the game set, and change nothing.
     //
-    // NGX means DLSS_Render_Subrect_Dimensions to be the part of the colour buffer that holds this
-    // frame -- the render size. FFXIV instead reports the buffer's own dimensions there: 3840x2160
-    // subrect alongside Width/Height of 2258x1270, which is what it genuinely rendered. Taking the
-    // subrect at face value made the render size look equal to the display size, which declined every
-    // dual-feature split and then handed DLSS a 3840x2160 frame that the feature had been created at
-    // 2258x1270 to receive. That is the BAD00005 on every frame.
+    // I read a 3840x2160 subrect beside Width/Height of 2258x1270 as FFXIV mislabelling a small
+    // render inside a big buffer, and took the smaller pair as the truth. That silenced the
+    // InvalidParameter storm -- and produced a 2258x1270 image in the corner of a 3840x2160 screen,
+    // on this machine and on an untouched configuration belonging to someone else. The subrect was
+    // right; Width and Height are what the game left over from creation.
     //
-    // Width/Height cannot be larger than the render, so the smaller of the two is the render whichever
-    // convention a game follows, and this is a no-op wherever they agree.
-    unsigned int paramWidth = 0, paramHeight = 0;
+    // The InvalidParameter storm is real and still unexplained: FFXIV creates the feature at the size
+    // its chosen quality implies and then renders at display resolution. That is worth solving, but
+    // not by rewriting geometry underneath every game on the strength of one reading of one title.
+    unsigned int reportWidth = 0, reportHeight = 0;
 
-    if (InParameters->Get(NVSDK_NGX_Parameter_Width, &paramWidth) == NVSDK_NGX_Result_Success &&
-        InParameters->Get(NVSDK_NGX_Parameter_Height, &paramHeight) == NVSDK_NGX_Result_Success &&
-        paramWidth > 0 && paramHeight > 0 && (paramWidth < *OutWidth || paramHeight < *OutHeight))
+    if (InParameters->Get(NVSDK_NGX_Parameter_Width, &reportWidth) == NVSDK_NGX_Result_Success &&
+        InParameters->Get(NVSDK_NGX_Parameter_Height, &reportHeight) == NVSDK_NGX_Result_Success &&
+        (reportWidth != *OutWidth || reportHeight != *OutHeight) &&
+        (_renderWidth != *OutWidth || _renderHeight != *OutHeight || !_reportedEvaluateGeometry))
     {
-        // Per axis, not both together. Letterboxing and pillarboxing scale one axis and not the other,
-        // so a game can legitimately report a smaller width beside an equal height. Replacing the pair
-        // whenever either shrank would take the larger of the two on the other axis and hand the
-        // runtime a frame taller or wider than the one that exists.
-        const unsigned int resolvedWidth = paramWidth < *OutWidth ? paramWidth : *OutWidth;
-        const unsigned int resolvedHeight = paramHeight < *OutHeight ? paramHeight : *OutHeight;
-
-        if (_renderWidth != resolvedWidth || _renderHeight != resolvedHeight || !_reportedEvaluateGeometry)
-            LOG_INFO("Evaluate geometry: the game reports a {}x{} subrect but Width/Height of {}x{}. Taking "
-                     "{}x{} as the render size -- the subrect is this game's buffer, not its frame.",
-                     *OutWidth, *OutHeight, paramWidth, paramHeight, resolvedWidth, resolvedHeight);
-
-        *OutWidth = resolvedWidth;
-        *OutHeight = resolvedHeight;
+        LOG_INFO("Evaluate geometry: the game reports a {}x{} subrect beside Width/Height of {}x{}. Using the "
+                 "subrect, as NGX documents it. This feature was created for render {}x{} display {}x{}.",
+                 *OutWidth, *OutHeight, reportWidth, reportHeight, _renderWidth, _renderHeight, _displayWidth,
+                 _displayHeight);
     }
 
-    // Once per distinct answer, not per frame -- the run that found this produced 9156 identical lines.
-    if (_renderWidth != *OutWidth || _renderHeight != *OutHeight || !_reportedEvaluateGeometry)
-    {
-        _reportedEvaluateGeometry = true;
-
-        LOG_INFO("Evaluate geometry from the game: render {}x{}. This feature was created for render {}x{} "
-                 "display {}x{}.",
-                 *OutWidth, *OutHeight, _renderWidth, _renderHeight, _displayWidth, _displayHeight);
-    }
+    _reportedEvaluateGeometry = true;
 
     _renderWidth = *OutWidth;
     _renderHeight = *OutHeight;
