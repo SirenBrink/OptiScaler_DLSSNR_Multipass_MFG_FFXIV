@@ -273,34 +273,40 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
         } while (false);
     }
 
-    // Whose number is this?
+    // A subrect bigger than Width/Height is describing the buffer, not the render.
     //
-    // FFXIV builds its feature for one size and then evaluates at another, and no log so far can say
-    // whether the game is genuinely rendering at display resolution or mislabelling a smaller render
-    // inside a display-sized buffer. The difference decides everything: a mislabel can be corrected
-    // here, a real native render cannot be shrunk from inside NGX.
+    // NGX means DLSS_Render_Subrect_Dimensions to be the part of the colour buffer that holds this
+    // frame -- the render size. FFXIV instead reports the buffer's own dimensions there: 3840x2160
+    // subrect alongside Width/Height of 2258x1270, which is what it genuinely rendered. Taking the
+    // subrect at face value made the render size look equal to the display size, which declined every
+    // dual-feature split and then handed DLSS a 3840x2160 frame that the feature had been created at
+    // 2258x1270 to receive. That is the BAD00005 on every frame.
     //
-    // So report the raw parameters exactly as the game left them, once per distinct answer -- not per
-    // frame, or it is nine thousand identical lines again.
+    // Width/Height cannot be larger than the render, so the smaller of the two is the render whichever
+    // convention a game follows, and this is a no-op wherever they agree.
+    unsigned int paramWidth = 0, paramHeight = 0;
+
+    if (InParameters->Get(NVSDK_NGX_Parameter_Width, &paramWidth) == NVSDK_NGX_Result_Success &&
+        InParameters->Get(NVSDK_NGX_Parameter_Height, &paramHeight) == NVSDK_NGX_Result_Success &&
+        paramWidth > 0 && paramHeight > 0 && (paramWidth < *OutWidth || paramHeight < *OutHeight))
+    {
+        if (_renderWidth != paramWidth || _renderHeight != paramHeight || !_reportedEvaluateGeometry)
+            LOG_INFO("Evaluate geometry: the game reports a {}x{} subrect but Width/Height of {}x{}. Taking "
+                     "{}x{} as the render size -- the subrect is this game's buffer, not its frame.",
+                     *OutWidth, *OutHeight, paramWidth, paramHeight, paramWidth, paramHeight);
+
+        *OutWidth = paramWidth;
+        *OutHeight = paramHeight;
+    }
+
+    // Once per distinct answer, not per frame -- the run that found this produced 9156 identical lines.
     if (_renderWidth != *OutWidth || _renderHeight != *OutHeight || !_reportedEvaluateGeometry)
     {
         _reportedEvaluateGeometry = true;
 
-        unsigned int rawSubW = 0, rawSubH = 0, rawW = 0, rawH = 0, rawOutW = 0, rawOutH = 0;
-        const bool haveSub =
-            InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &rawSubW) ==
-                NVSDK_NGX_Result_Success &&
-            InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &rawSubH) ==
-                NVSDK_NGX_Result_Success;
-        InParameters->Get(NVSDK_NGX_Parameter_Width, &rawW);
-        InParameters->Get(NVSDK_NGX_Parameter_Height, &rawH);
-        InParameters->Get(NVSDK_NGX_Parameter_OutWidth, &rawOutW);
-        InParameters->Get(NVSDK_NGX_Parameter_OutHeight, &rawOutH);
-
-        LOG_INFO("Evaluate geometry from the game: subrect {} {}x{}, Width/Height {}x{}, "
-                 "OutWidth/OutHeight {}x{}. This feature was created for render {}x{} display {}x{}.",
-                 haveSub ? "present" : "ABSENT", rawSubW, rawSubH, rawW, rawH, rawOutW, rawOutH, _renderWidth,
-                 _renderHeight, _displayWidth, _displayHeight);
+        LOG_INFO("Evaluate geometry from the game: render {}x{}. This feature was created for render {}x{} "
+                 "display {}x{}.",
+                 *OutWidth, *OutHeight, _renderWidth, _renderHeight, _displayWidth, _displayHeight);
     }
 
     _renderWidth = *OutWidth;
