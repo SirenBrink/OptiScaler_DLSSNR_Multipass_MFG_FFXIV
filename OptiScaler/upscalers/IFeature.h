@@ -117,6 +117,9 @@ class IFeature
     // information the message exists to carry.
     unsigned int _saidNotTakenForTarget = 0;
 
+    // Whether this feature has reported the game's raw evaluate geometry at least once.
+    bool _reportedEvaluateGeometry = false;
+
   public:
     NVSDK_NGX_Handle* Handle() const { return _handle; };
     static unsigned int GetNextHandleId() { return handleCounter++; }
