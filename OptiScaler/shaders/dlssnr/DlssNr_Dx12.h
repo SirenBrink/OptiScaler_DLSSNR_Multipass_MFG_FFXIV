@@ -20,6 +20,7 @@
 #include "DlssNr_Common.h"
 
 #include <d3d12.h>
+#include <optional>
 #include <d3dx/d3dx12.h>
 #include <shaders/Shader_Dx12.h>
 #include <shaders/Shader_Dx12Utils.h>
@@ -71,9 +72,14 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // Sizes come from the resources. Everything the pass cannot work out for itself is in
     // DlssNrFrameInfo; everything the user chose stays in Config. colour and output may be the same
     // resource. timingQueue is the queue this list will be executed on, when the caller knows it.
+    // outputArrival is the state output is found in and left in, for an output this pass does not also
+    // read. Unset means the output is the frame itself, arriving as the game's OutputResourceBarrier
+    // describes it. A caller placing this pass inside its own pipeline sets it to whatever the next
+    // stage there expects, because nothing else in the chain knows this pass ran.
     void Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
                   ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
-                  ID3D12CommandQueue* timingQueue = nullptr);
+                  ID3D12CommandQueue* timingQueue = nullptr,
+                  std::optional<D3D12_RESOURCE_STATES> outputArrival = std::nullopt);
 
     // Records one pass. Resources that a given mode does not read may be null; a stand-in is bound in
     // their place so every descriptor in the table is valid.

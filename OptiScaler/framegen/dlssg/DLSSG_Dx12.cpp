@@ -10,6 +10,7 @@
 #include <hooks/Streamline_Hooks.h>
 #include "MfgUnlock.h"
 #include <hooks/DxgiFactory_Hooks.h>
+#include <hooks/Streamline_Hooks.h>
 
 #include <magic_enum.hpp>
 

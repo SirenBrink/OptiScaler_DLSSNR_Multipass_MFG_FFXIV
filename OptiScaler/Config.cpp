@@ -245,6 +245,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGDLSSGFramerateTargetDMFG.set_from_config(readFloat("DLSSG", "FramerateTargetDMFG"));
             FGDLSSGOverrideForceDMFG.set_from_config(readBool("DLSSG", "OverrideForceDMFG"));
             FGDLSSGForceDMFG.set_from_config(readBool("DLSSG", "ForceDMFG"));
+            FGDLSSGAdaMfgUnlock.set_from_config(readBool("DLSSG", "AdaMfgUnlock"));
+            FGDLSSGAdaBlackwellKernels.set_from_config(readBool("DLSSG", "AdaBlackwellKernels"));
         }
 
         // FSR FG Inputs
@@ -366,6 +368,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrScanInverted.set_from_config(readBool("DlssNr", "ScanInverted"));
             DlssNrWhitePointTrim.set_from_config(readFloat("DlssNr", "WhitePointTrim"));
             DlssNrAutoCapture.set_from_config(readBool("DlssNr", "AutoCapture"));
+            DlssNrPassOverrides.set_from_config(readString("DlssNr", "PassOverrides"));
+            DlssNrUnlockPasses.set_from_config(readBool("DlssNr", "UnlockPasses"));
             DlssNrWhitePointScale.set_from_config(readFloat("DlssNr", "WhitePointScale"));
             DlssNrPreset.set_from_config(readUInt("DlssNr", "Preset"));
             DlssNrIntensity.set_from_config(readFloat("DlssNr", "Intensity"));
@@ -770,6 +774,7 @@ bool Config::Reload(std::filesystem::path iniPath)
         // NvApi
         {
             DisableFlipMetering.set_from_config(readBool("NvApi", "DisableFlipMetering"));
+            DisableReflexSync.set_from_config(readBool("NvApi", "DisableReflexSync"));
         }
 
         // Spoofing
@@ -1116,6 +1121,10 @@ bool Config::SaveIni()
         ini.SetValue("DLSSG", "OverrideForceDMFG",
                      GetBoolValue(Instance()->FGDLSSGOverrideForceDMFG.value_for_config()).c_str());
         ini.SetValue("DLSSG", "ForceDMFG", GetBoolValue(Instance()->FGDLSSGForceDMFG.value_for_config()).c_str());
+        ini.SetValue("DLSSG", "AdaMfgUnlock",
+                     GetBoolValue(Instance()->FGDLSSGAdaMfgUnlock.value_for_config()).c_str());
+        ini.SetValue("DLSSG", "AdaBlackwellKernels",
+                     GetBoolValue(Instance()->FGDLSSGAdaBlackwellKernels.value_for_config()).c_str());
     }
 
     // OptiFG
@@ -1290,6 +1299,9 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "ScanAnchorValue", GetFloatValue(Instance()->DlssNrScanAnchorValue.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanAnchorWhitePoint", GetFloatValue(Instance()->DlssNrScanAnchorWhitePoint.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanAnchors", Instance()->DlssNrScanAnchors.value_for_config_or("").c_str());
+    ini.SetValue("DlssNr", "PassOverrides", Instance()->DlssNrPassOverrides.value_for_config_or("").c_str());
+    ini.SetValue("DlssNr", "UnlockPasses",
+                 GetBoolValue(Instance()->DlssNrUnlockPasses.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanInverted", GetBoolValue(Instance()->DlssNrScanInverted.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanMeter", GetBoolValue(Instance()->DlssNrScanMeter.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Passes", GetIntValue(Instance()->DlssNrPasses.value_for_config()).c_str());
@@ -1646,6 +1658,8 @@ bool Config::SaveIni()
     {
         ini.SetValue("NvApi", "DisableFlipMetering",
                      GetBoolValue(Instance()->DisableFlipMetering.value_for_config()).c_str());
+        ini.SetValue("NvApi", "DisableReflexSync",
+                     GetBoolValue(Instance()->DisableReflexSync.value_for_config()).c_str());
     }
 
     // DRS

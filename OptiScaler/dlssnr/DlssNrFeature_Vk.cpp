@@ -18,6 +18,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 
 namespace DlssNr
@@ -493,6 +494,17 @@ unsigned int GameCreateFlags(NVSDK_NGX_Parameter* params)
     return flags;
 }
 
+// Every way out of the pass before it does anything is silent on purpose -- an evaluate that carries
+// no depth is normal and would otherwise print every frame forever. Each distinct reason is reported
+// once. Once, not once per frame. Mirrors ReportSkipOnce on the D3D12 path.
+void ReportSkipOnceVk(const char* reason)
+{
+    static std::set<std::string> seen;
+
+    if (seen.insert(reason).second)
+        LOG_INFO("DLSS-NR Vulkan did not run: {}", reason);
+}
+
 std::optional<std::filesystem::path> FindSnippet()
 {
     auto snippet = Util::FindFilePath(Util::DllPath().remove_filename(), "nvngx_dlssnr.dll");
@@ -537,20 +549,25 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     }
 
     if (!cfg.DlssNrEnabled.value_or_default())
-        return;
+    {
+        ReportSkipOnceVk("it is switched off");
+        return false;
+    }
 
     if (cmdBuffer == VK_NULL_HANDLE || params == nullptr || device == VK_NULL_HANDLE ||
         physicalDevice == VK_NULL_HANDLE)
-        return;
+    {
+        ReportSkipOnceVk("no command buffer, no parameter block or no device");
+        return false;
+    }
 
     std::lock_guard<std::mutex> lock(g_vkMutex);
 
     if (g_vk.failed)
-        return;
+        return false;
 
     // The game's own resources, already wrapped: NGX hands Vulkan resources over as
     // NVSDK_NGX_Resource_VK, so only this pass's own images need building.
-    NVSDK_NGX_Resource_VK* colour = nullptr;
     NVSDK_NGX_Resource_VK* depth = nullptr;
     NVSDK_NGX_Resource_VK* motion = nullptr;
 
@@ -625,7 +642,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                  g_vk.gameExposure, g_vk.gamePreExposure, g_vk.gamePreExposure / g_vk.gameExposure);
     }
 
-    if (colour == nullptr || depth == nullptr || motion == nullptr)
+    if (sourceView == VK_NULL_HANDLE || destView == VK_NULL_HANDLE || depth == nullptr || motion == nullptr)
     {
         static bool said = false;
 
@@ -633,10 +650,12 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         {
             said = true;
             LOG_INFO("DLSS-NR Vulkan: the parameter block carried no {}",
-                     colour == nullptr ? "output" : (depth == nullptr ? "depth" : "motion vectors"));
+                     sourceView == VK_NULL_HANDLE || destView == VK_NULL_HANDLE ? "output"
+                     : depth == nullptr                                         ? "depth"
+                                                                                : "motion vectors");
         }
 
-        return;
+        return false;
     }
 
     if (colour->Type != NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW ||
@@ -730,7 +749,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     }
 
     if (!LoadForwarder())
-        return;
+        return false;
 
     // Initialise NGX on this device, once. The snippet path is the model itself; the forwarder loads
     // it so the caller gate sees a module named nvngx.dll.
@@ -750,7 +769,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         if (!snippet.has_value())
         {
             Fail("nvngx_dlssnr.dll was not found beside OptiScaler or the game");
-            return;
+            return false;
         }
 
         const int probe = g_vk.probe != nullptr ? g_vk.probe(snippet->wstring().c_str()) : 0;
@@ -761,7 +780,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         {
             LOG_ERROR("DLSS-NR Vulkan: the model's Vulkan surface is incomplete (probe {})", probe);
             Fail("the model does not expose a complete Vulkan surface");
-            return;
+            return false;
         }
 
         const int result =
@@ -772,7 +791,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         {
             LOG_ERROR("DLSS-NR Vulkan: NVSDK_NGX_VULKAN_Init_Ext returned {}", result);
             Fail("the model would not initialise on this Vulkan device");
-            return;
+            return false;
         }
 
         g_vk.ngxInitialised = true;
@@ -785,7 +804,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
             g_vk.capabilityParams == nullptr)
         {
             Fail("a parameter block could not be allocated");
-            return;
+            return false;
         }
     }
 
@@ -822,7 +841,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         {
             g_vk.pass.reset();
             Fail("the composition pass could not be created");
-            return;
+            return false;
         }
     }
 
@@ -888,7 +907,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         if (!ok)
         {
             Fail("the pass could not allocate its own surfaces");
-            return;
+            return false;
         }
 
         g_vk.width = width;
@@ -921,7 +940,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         if (!feature)
         {
             Fail("the model would not build a feature on this device");
-            return;
+            return false;
         }
 
         LOG_INFO("DLSS-NR Vulkan: pass {} built at {}x{} (frame {}x{}, {} SR)", pass + 1,
@@ -977,7 +996,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
     // Both have to agree. A game can set the HDR flag on a buffer that cannot hold open-ended light,
     // and encoding an already tone-mapped frame a second time looks washed out and banded.
-    const bool linearHdr = gameSaysHdr && FormatCanHoldLinearHdr(colour->Resource.ImageViewInfo.Format);
+    const bool linearHdr = gameSaysHdr && FormatCanHoldLinearHdr(frameFormat);
 
     // The same rule as the D3D12 path, deliberately spelled the same way: the game divides its frame
     // by preExposure and multiplies by exposure, so undoing that is the divisor this pass wants, and
@@ -1001,8 +1020,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     {
         saidEncoding = true;
         LOG_INFO("DLSS-NR Vulkan: the game's buffer is {} (flag {}, format {}), depth {}",
-                 linearHdr ? "linear HDR" : "already tone-mapped", gameSaysHdr ? "set" : "clear",
-                 (int) colour->Resource.ImageViewInfo.Format, depthInverted ? "inverted" : "normal");
+                 linearHdr ? "linear HDR" : "already tone-mapped", gameSaysHdr ? "set" : "clear", (int) frameFormat,
+                 depthInverted ? "inverted" : "normal");
     }
 
     DlssNrConstants encode {};
@@ -1028,8 +1047,6 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     encode.GuideWidth = guideWidth;
     encode.GuideHeight = guideHeight;
 
-    const VkImageSubresourceRange colourRange = colour->Resource.ImageViewInfo.SubresourceRange;
-
     // Open the measurement. Reset immediately before writing: a query pool slot must be reset before
     // it is written again, and doing it here rather than at the end keeps the two in one place.
     const uint32_t timingSlot = (uint32_t) (g_vk.timedFrames % kTimingSlots);
@@ -1040,12 +1057,12 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         vkCmdWriteTimestamp(cmdBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_vk.queryPool, timingSlot * 2);
     }
 
-    // The game's colour is read here and written at the end. Its layout on arrival is GENERAL, which
-    // is what NGX requires of a resource it is handed, so it is left alone.
+    // Unsplit, the game's colour is read here and written at the end. Its layout on arrival is
+    // GENERAL, which is what NGX requires of a resource it is handed, so it is left alone.
     Transition(cmdBuffer, g_vk.proxy, VK_IMAGE_LAYOUT_GENERAL);
     Transition(cmdBuffer, g_vk.keep, VK_IMAGE_LAYOUT_GENERAL);
 
-    // Read in GENERAL, which is the layout it is actually in.
+    // Where the encode reads the source.
     //
     // This slot used to take the default and declare SHADER_READ_ONLY_OPTIMAL, which disagreed with
     // the comment four lines up and with the resolve below -- the resolve writes this same image as a
@@ -1057,7 +1074,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                              beforeSr ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL))
     {
         Fail("the encode dispatch failed");
-        return;
+        return false;
     }
 
     // The model's input: the full proxy, or a downsampled copy of it when the working scale is below
@@ -1241,7 +1258,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
     {
         LOG_ERROR("DLSS-NR Vulkan: evaluate returned {}", evaluated);
         Fail("the model refused to evaluate");
-        return;
+        return false;
     }
 
     // -----------------------------------------------------------------------------------------
@@ -1285,7 +1302,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
                              VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
     {
         Fail("the resolve dispatch failed");
-        return;
+        return false;
     }
 
     if (beforeSr)
@@ -1327,6 +1344,8 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
         LOG_INFO("DLSS-NR Vulkan: running {} SR at {}x{}, guides {}x{}", beforeSr ? "before" : "after",
                  width, height, guideWidth, guideHeight);
     }
+
+    return true;
 }
 
 NVSDK_NGX_Resource_VK* EvaluateBeforeUpscaleVk(VkCommandBuffer cmd, NVSDK_NGX_Parameter* params,
