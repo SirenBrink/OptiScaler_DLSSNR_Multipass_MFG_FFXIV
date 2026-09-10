@@ -947,17 +947,7 @@ static void CheckWorkingMode()
 
     // NVAPI
     // Doesn't seem to like GetModuleHandle for some reason, so call our load to make sure
-    //
-    // Also loaded when it is not present yet and an interface is meant to be withheld. Streamline
-    // resolves its nvapi entry points as it initialises, and a detour installed after that resolve
-    // is never consulted -- the module is hooked, the caller holds addresses from before the hook.
-    // Loading it here puts the detour in first. Only on Nvidia, and only when something asks for it,
-    // so no process gains nvapi that would not have had it.
-    const bool withholdingAnInterface = Config::Instance()->DisableReflexSync.value_or_default() ||
-                                        Config::Instance()->DisableFlipMetering.value_or_default();
-
-    if (GetDllNameWModule(&nvapiNamesW) != nullptr ||
-        (withholdingAnInterface && IdentifyGpu::getPrimaryGpu().vendorId == VendorId::Nvidia))
+    if (GetDllNameWModule(&nvapiNamesW) != nullptr)
     {
         // This hooks nvapi as well when possible
         auto nvapi64 = LibraryLoadHooks::LoadNvApi();
@@ -1325,6 +1315,9 @@ static void printQuirks(flag_set<GameQuirk>& quirks)
 
     if (quirks & GameQuirk::CreateSLOnThe2ndDevice)
         stringQuirks.push_back("Create SL on the 2nd device");
+
+    if (quirks & GameQuirk::ScaleDisplayColorForForcedQuality)
+        stringQuirks.push_back("Scale display-sized color to the forced upscaler input size");
 
     state->detectedQuirks.append_range(stringQuirks);
     for (auto& stringQuirk : stringQuirks)
@@ -1869,6 +1862,21 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 #endif
 
         // Initial state of FG
+        State::Instance().externalFrameGeneration = Config::Instance()->ExternalFrameGeneration.value_or_default();
+        if (State::Instance().externalFrameGeneration)
+        {
+            // Only runtime overrides: preserve the user's OptiFG configuration for the next
+            // startup with External=false. Do not load a second FG provider or change Reflex.
+            auto* cfg = Config::Instance();
+            cfg->FGInput.set_volatile_value(FGInput::NoFG);
+            cfg->FGOutput.set_volatile_value(FGOutput::NoFG);
+            cfg->FGNvngxReplacement.set_volatile_value(FGNvngxReplacement::None);
+            cfg->FGEnabled.set_volatile_value(false);
+            cfg->ForceXeLL.set_volatile_value(false);
+            cfg->UseFakenvapi.set_volatile_value(false);
+            cfg->FN_ForceReflex.set_volatile_value(ForceReflex::InGame);
+            LOG_INFO("External frame generation: leaving Streamline/Reflex and MFG control to the game or unlocker; NR/SR remain available");
+        }
         State::Instance().activeFgInput = Config::Instance()->FGInput.value_or_default();
         State::Instance().activeFgOutput = Config::Instance()->FGOutput.value_or_default();
         State::Instance().activeFgNvngx = Config::Instance()->FGNvngxReplacement.value_or_default();

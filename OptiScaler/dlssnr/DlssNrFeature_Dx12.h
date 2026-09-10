@@ -1,9 +1,6 @@
 #pragma once
 
 #include <d3d12.h>
-
-#include <array>
-#include <optional>
 #include <string>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
@@ -23,30 +20,8 @@ class Config;
 
 namespace DlssNr
 {
-// The ceiling on how many times the model runs over one frame. The array of extra features, the
-// pass-side clamp, the slider's bounds and the slider's own clamp all read this one number.
-// What the arrays are sized for, and the ceiling the unlocked slider reaches.
-constexpr unsigned int kMaxPasses = 30;
-
-// What the slider offers unless the ceiling is lifted. Cost is exactly linear and the model is nearly
-// all of it, so five is already several times the frame budget of the pass at one.
-constexpr unsigned int kDefaultMaxPasses = 5;
-
-// Per-pass model settings, sparse: a field with no value follows the global setting. Serialised as
-// "2:intensity=0.5,style=1;3:intensity=0.3" -- one-based, so "1" is the first pass.
-struct PassTuning
-{
-    std::optional<float> Intensity;
-    std::optional<float> LocalStructure;
-    std::optional<float> LocalTone;
-    std::optional<float> SkinStructure;
-    std::optional<uint32_t> Style;
-    std::optional<uint32_t> Preset;
-    std::optional<bool> AutoMask;
-};
-
-std::array<PassTuning, kMaxPasses> ParsePassOverridesForMenu(const std::string& text);
-std::string SerializePassOverrides(const std::array<PassTuning, kMaxPasses>& passes);
+inline constexpr unsigned int MaxPassCount = 30;
+inline constexpr unsigned int DefaultMaxPassCount = 3;
 
 // The model runs immediately after the game's upscaler, before the interface is drawn. It is shown a
 // display-referred proxy of that frame -- the sort of picture it was trained on -- and its answer is
@@ -59,42 +34,21 @@ std::string SerializePassOverrides(const std::array<PassTuning, kMaxPasses>& pas
 // timingQueue is the queue this command list will be executed on, when the caller knows it.
 // State::currentCommandQueue only exists once a D3D12 swapchain has been created, which a Vulkan
 // game never does -- so without this the pass runs and never reports what it cost.
+// rayReconstruction identifies the feature for history reset and the SR-only deferred experiment.
+// Placement and model cost controls are shared by SR and RR+SR.
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
-                          ID3D12CommandQueue* timingQueue = nullptr);
+                          ID3D12CommandQueue* timingQueue = nullptr, bool rayReconstruction = false,
+                          unsigned long long submissionEpoch = 0,
+                          unsigned int guideSourceWidth = 0, unsigned int guideSourceHeight = 0);
 
-// The same pass, run on the frame the upscaler is about to read rather than on the one it wrote.
-//
-// Experimental. The model is shown the game's render-resolution colour buffer, so it costs what that
-// resolution costs rather than what the display resolution costs, and it sees rendered samples
-// instead of the upscaler's reconstruction. Against that: colour arriving here is jittered per frame
-// and the model takes no jitter offset, so its history reprojects against an offset it cannot see.
-//
-// The edit lands on a surface of ours. The caller substitutes it for the upscale and puts the game's
-// own buffer back afterwards.
+// Runs the same pass over Color immediately before SR or RR+SR consumes it. The call is a no-op
+// unless RunBeforeSR is enabled. Color is returned in its original readable state.
 void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
-                           ID3D12CommandQueue* timingQueue = nullptr);
+                           ID3D12CommandQueue* timingQueue = nullptr,
+                           unsigned long long submissionEpoch = 0, bool rayReconstruction = false,
+                           unsigned int guideSourceWidth = 0, unsigned int guideSourceHeight = 0);
 
-// The surface EvaluateBeforeUpscale wrote, or null when this frame's pass did not run.
-ID3D12Resource* PreUpscaleResult();
 
-// The pass as one stage of an upscaler's own pipeline, on two frames the caller already holds.
-//
-// Everything the model needs beyond the two frames -- depth, motion vectors, the create flags, the
-// reset -- still comes from the parameter block, because those are the game's and unchanged by where
-// the stage sits. Answers whether the edit reached dest; false leaves dest untouched.
-bool EvaluateStage(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params, ID3D12Resource* source,
-                   ID3D12Resource* dest, ID3D12CommandQueue* timingQueue = nullptr);
-
-// The surface the stage before this one should write, matched to the frame this one will write.
-// Rebuilt when that frame changes size or format. Owned here, so the caller holds a borrowed pointer.
-ID3D12Resource* StageInputSurface(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* like);
-
-// Whether the model is being carried by an upscaler's own pipeline: the arrangement is switched on
-// and has been seen to work. EvaluateAfterUpscale asks this and declines when it answers yes.
-//
-// Both halves matter. Asking only the setting made the model silent whenever the split did not apply;
-// asking only what happened would keep declining after the setting was turned off.
-bool StageCarriesTheModel();
 
 // Frame generation titles tag their UI layer through Streamline; a copy of it makes the HUD mask
 // exact at the finished frame. Called at tag time.
@@ -147,6 +101,8 @@ CalibrationReading Calibration();
 
 // Whether the model is loaded and running, for the overlay.
 bool IsRunning();
+// Private residual-upscaler status; separate from the NR model's own running status/time.
+std::string DeferredDlssStatus();
 
 // Why it is not, if it is not. Empty while it is running or has not been tried yet.
 const char* FailureReason();

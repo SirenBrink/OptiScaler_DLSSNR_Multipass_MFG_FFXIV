@@ -4,33 +4,7 @@
 #include <vector>
 
 #include "IFeature_Dx12.h"
-#include "FeatureProvider_Dx12.h"
 #include "State.h"
-#include <dlssnr/DlssNr.h>
-
-namespace
-{
-ID3D12Resource* PipelineResource(NVSDK_NGX_Parameter* params, const char* key)
-{
-    ID3D12Resource* typed = nullptr;
-    if (params->Get(key, &typed) == NVSDK_NGX_Result_Success && typed != nullptr)
-        return typed;
-    void* plain = nullptr;
-    if (params->Get(key, &plain) == NVSDK_NGX_Result_Success)
-        return static_cast<ID3D12Resource*>(plain);
-    return nullptr;
-}
-void SetPipelineResource(NVSDK_NGX_Parameter* params, const char* key, ID3D12Resource* value)
-{
-    // Preserve the resource representation used by this caller. The bridge uses void* slots;
-    // native DX12 callers use typed slots. Writing a different slot can leave the old one stale.
-    ID3D12Resource* typed = nullptr;
-    if (params->Get(key, &typed) == NVSDK_NGX_Result_Success && typed != nullptr)
-        params->Set(key, value);
-    else
-        params->Set(key, static_cast<void*>(value));
-}
-}
 
 void IFeature_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
                                     D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState) const
@@ -47,121 +21,12 @@ void IFeature_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID
     InCommandList->ResourceBarrier(1, &barrier);
 }
 
-// A render-resolution surface carrying the format of the frame it will become.
-//
-// Shader_Dx12 has a helper for this and keeps it protected, so the pipeline builds its own. Rebuilt
-// when the size or the format moves under it, which a resolution change does.
-static bool EnsureIntermediate(ID3D12Device* device, ID3D12Resource* like, unsigned int width, unsigned int height,
-                               ID3D12Resource** out)
-{
-    if (device == nullptr || like == nullptr || out == nullptr || width == 0 || height == 0)
-        return false;
-
-    const D3D12_RESOURCE_DESC likeDesc = like->GetDesc();
-
-    if (*out != nullptr)
-    {
-        const D3D12_RESOURCE_DESC have = (*out)->GetDesc();
-
-        if (have.Width == width && have.Height == height && have.Format == likeDesc.Format)
-            return true;
-
-        (*out)->Release();
-        *out = nullptr;
-    }
-
-    D3D12_HEAP_PROPERTIES heap {};
-    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-    D3D12_RESOURCE_DESC desc {};
-    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    desc.Width = width;
-    desc.Height = height;
-    desc.DepthOrArraySize = 1;
-    desc.MipLevels = 1;
-    desc.Format = likeDesc.Format;
-    desc.SampleDesc.Count = 1;
-    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-
-    return SUCCEEDED(device->CreateCommittedResource(
-        &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(out)));
-}
-
-// The upscaler that enlarges what the model edited, built once on first use.
-//
-// Created through the same provider as any other upscaler in this tree, so the choice degrades the way
-// every other upscaler choice does -- ask for DLSS on a machine without it and FSR arrives instead.
-//
-// The provider reads the resolutions from the parameter block, and this feature's own half of the
-// split has already lowered them. They are put back exactly as found: the block is the game's.
-bool IFeature_Dx12::EnsureEnlarger(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
-{
-    const auto wanted = Config::Instance()->DlssNrDualEnlarger.value_for_config();
-
-    if (!wanted.has_value())
-        return false;
-
-    if (Enlarger != nullptr)
-        return EnlargerType == wanted;
-
-    if (EnlargerType.has_value())
-        return false; // a build already failed for this choice; do not retry every frame
-
-    EnlargerType = wanted;
-
-    unsigned int width = 0, height = 0, outWidth = 0, outHeight = 0;
-    InParameters->Get(NVSDK_NGX_Parameter_Width, &width);
-    InParameters->Get(NVSDK_NGX_Parameter_Height, &height);
-    InParameters->Get(NVSDK_NGX_Parameter_OutWidth, &outWidth);
-    InParameters->Get(NVSDK_NGX_Parameter_OutHeight, &outHeight);
-
-    InParameters->Set(NVSDK_NGX_Parameter_Width, TargetWidth());
-    InParameters->Set(NVSDK_NGX_Parameter_Height, TargetHeight());
-    InParameters->Set(NVSDK_NGX_Parameter_OutWidth, DisplayWidth());
-    InParameters->Set(NVSDK_NGX_Parameter_OutHeight, DisplayHeight());
-
-    std::unique_ptr<IFeature_Dx12> built = nullptr;
-    bool ok = FeatureProvider_Dx12::GetFeature(wanted.value(), IFeature::GetNextHandleId(), InParameters, &built) &&
-              built != nullptr;
-
-    if (ok)
-    {
-        built->MarkEnlargementStage();
-        ok = built->Init(Device, InCommandList, InParameters);
-    }
-
-    InParameters->Set(NVSDK_NGX_Parameter_Width, width);
-    InParameters->Set(NVSDK_NGX_Parameter_Height, height);
-    InParameters->Set(NVSDK_NGX_Parameter_OutWidth, outWidth);
-    InParameters->Set(NVSDK_NGX_Parameter_OutHeight, outHeight);
-
-    if (!ok)
-    {
-        LOG_ERROR("DLSS-NR dual feature: {} would not build the enlargement half for {} {}, falling back to the "
-                  "output scaler",
-                  UpscalerDisplayName(wanted.value()), Name(), FeatureIdentity());
-        return false;
-    }
-
-    Enlarger = std::move(built);
-
-    LOG_INFO("DLSS-NR dual feature: enlargement half {} {} built for {} {}", Enlarger->Name(),
-             Enlarger->FeatureIdentity(), Name(), FeatureIdentity());
-
-    return true;
-}
-
 bool IFeature_Dx12::Init(ID3D12Device* InDevice, ID3D12GraphicsCommandList* InCommandList,
                          NVSDK_NGX_Parameter* InParameters)
 {
     Device = InDevice;
 
     auto result = InitInternal(InCommandList, InParameters);
-
-    // Safe here in a way it is not inside SetInitParameters: construction has finished, so Name() can
-    // reach the leaf that defines GetUpscalerType().
-    LOG_DEBUG("Feature {}: {} {}", result ? "ready" : "FAILED to initialise", Name(), FeatureIdentity());
 
     if (result)
     {
@@ -216,32 +81,8 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     if (!RCAS->IsInit())
         useRcas = false;
 
-    // The model between the halves of the upscaler. SetInitParameters has already pointed the upscaler
-    // at render resolution, so the enlargement is not optional here -- without it the frame reaching
-    // the game would be the small one.
-    const bool useDualFeature = DualFeatureSplit();
-
-    // Asked for and not taken. The split is decided from three numbers settled when the feature was
-    // built, so a mismatch here is silent and looks exactly like the option doing nothing.
-    if (!useDualFeature && !_isEnlargementStage && Config::Instance()->DlssNrDualFeatureActive() &&
-        Config::Instance()->DlssNrEnabled.value_or_default())
-    {
-        if (_saidNotTakenForTarget != TargetWidth())
-        {
-            _saidNotTakenForTarget = TargetWidth();
-            LOG_WARN("DLSS-NR dual feature: asked for, not taken by {} {} -- the split needs render < display, "
-                     "and this feature was built with them equal",
-                     Name(), FeatureIdentity());
-        }
-    }
-
-    // An upscaler does the enlarging when one is asked for and builds. Otherwise the spatial scaler,
-    // which needs nothing the first half has already consumed and so cannot be wrong about it.
-    const bool useUpscalerEnlarger = useDualFeature && EnsureEnlarger(InCommandList, InParameters);
-
     bool useOutputScaling =
-        (useDualFeature && !useUpscalerEnlarger) || (Config::Instance()->OutputScalingEnabled.value_or_default() &&
-                                                     (LowResMV() || RenderWidth() == DisplayWidth()));
+        Config::Instance()->OutputScalingEnabled.value_or_default() && (LowResMV() || RenderWidth() == DisplayWidth());
 
     if (!OutputScaler->IsInit())
         useOutputScaling = false;
@@ -250,110 +91,12 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     ID3D12Resource* paramMotion = nullptr;
     ID3D12Resource* paramDepth = nullptr;
 
-    paramOutput = PipelineResource(InParameters, NVSDK_NGX_Parameter_Output);
-    paramMotion = PipelineResource(InParameters, NVSDK_NGX_Parameter_MotionVectors);
-    paramDepth = PipelineResource(InParameters, NVSDK_NGX_Parameter_Depth);
+    InParameters->Get(NVSDK_NGX_Parameter_Output, &paramOutput);
+    InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, &paramMotion);
+    InParameters->Get(NVSDK_NGX_Parameter_Depth, &paramDepth);
 
     // Order is important as that's the order of shader dispatch
     std::vector<ShaderPass> pipeline;
-
-    // First, so it runs on what the upscaler wrote and before anything enlarges it. The model asks for
-    // a 1:1 scaling ratio at every quality level, so the only way to run it on fewer pixels is to give
-    // it a smaller frame -- which is what the upscaler writing at render resolution produces.
-    if (useDualFeature)
-    {
-        pipeline.push_back({ // Setup
-                             [&](ID3D12Resource* nextOutput) -> ID3D12Resource*
-                             { return DlssNr::StageInputSurface(InCommandList, nextOutput); },
-
-                             // Dispatch
-                             [&](ID3D12Resource* input, ID3D12Resource* output) -> bool
-                             {
-                                 if (DlssNr::EvaluateStage(InCommandList, InParameters, input, output))
-                                     return true;
-
-                                 // A pass that declines leaves the frame where it is, so the enlargement still has
-                                 // something to read. The upscaler's own result, unedited, is the right fallback.
-                                 ResourceBarrier(InCommandList, input, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                                 D3D12_RESOURCE_STATE_COPY_SOURCE);
-                                 ResourceBarrier(InCommandList, output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                                 D3D12_RESOURCE_STATE_COPY_DEST);
-
-                                 InCommandList->CopyResource(output, input);
-
-                                 ResourceBarrier(InCommandList, input, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                                 ResourceBarrier(InCommandList, output, D3D12_RESOURCE_STATE_COPY_DEST,
-                                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-                                 return true;
-                             } });
-    }
-
-    if (useUpscalerEnlarger)
-    {
-        pipeline.push_back(
-            { // Setup
-              [&](ID3D12Resource* nextOutput) -> ID3D12Resource*
-              {
-                  // Render resolution, matching what the first half wrote rather than what this stage
-                  // produces -- nextOutput is the game's frame and is display sized.
-                  if (!EnsureIntermediate(Device, nextOutput, TargetWidth(), TargetHeight(), &EnlargerInput))
-                      return nullptr;
-
-                  return EnlargerInput;
-              },
-
-              // Dispatch
-              [&](ID3D12Resource* input, ID3D12Resource* output) -> bool
-              {
-                  // Borrow the game's guides, but test unjittered color for the second DLSS pass.
-                  ID3D12Resource* gameColor = nullptr;
-                  gameColor = PipelineResource(InParameters, NVSDK_NGX_Parameter_Color);
-
-                  SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Color, input);
-                  SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Output, output);
-
-                  float savedJitterX = 0.0f, savedJitterY = 0.0f;
-                  const bool zeroEnlargerJitter = State::Instance().gameExe == "ffxiv_dx11.exe" &&
-                      Config::Instance()->Dx11Upscaler.value_or_default() == Upscaler::DLSS_on12 &&
-                      EnlargerType == Upscaler::DLSS &&
-                      InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &savedJitterX) == NVSDK_NGX_Result_Success &&
-                      InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &savedJitterY) == NVSDK_NGX_Result_Success;
-                  if (zeroEnlargerJitter)
-                  {
-                      InParameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, 0.0f);
-                      InParameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, 0.0f);
-                      static bool logged = false;
-                      if (!logged)
-                      {
-                          LOG_INFO("FFXIV split jitter test: enlargement jitter ({}, {}) -> (0, 0); restoring after evaluation",
-                                   savedJitterX, savedJitterY);
-                          logged = true;
-                      }
-                  }
-
-                  const bool ok = Enlarger->Evaluate(InCommandList, InParameters);
-
-                  if (zeroEnlargerJitter)
-                  {
-                      InParameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, savedJitterX);
-                      InParameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, savedJitterY);
-                  }
-
-                  SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Color, gameColor);
-
-                  // Dropped rather than retried: EnlargerType stays set, so EnsureEnlarger declines from
-                  // here on and the next frame is built around the spatial scaler instead.
-                  if (!ok)
-                  {
-                      LOG_WARN("DLSS-NR dual feature: the enlargement failed, dropping back to the output scaler");
-                      Enlarger.reset();
-                  }
-
-                  return ok;
-              } });
-    }
 
     if (useOutputScaling)
     {
@@ -480,16 +223,6 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
               } });
     }
 
-    static thread_local std::string lastSplitIdentity;
-    const auto splitIdentity = FeatureIdentity();
-    const bool reportSplit = Config::Instance()->DlssNrDualFeatureActive() && splitIdentity != lastSplitIdentity;
-    if (reportSplit)
-    {
-        lastSplitIdentity = splitIdentity;
-        LOG_INFO("NR split pipeline: {} split={} enlarger={} spatial={} scalerReady={} stages={}",
-                 splitIdentity, useDualFeature, useUpscalerEnlarger, useOutputScaling, OutputScaler->IsInit(), pipeline.size());
-    }
-
     // Iterate BACKWARDS to establish where each shader needs to pull its input from
     ID3D12Resource* currentTarget = paramOutput;
     for (auto it = pipeline.rbegin(); it != pipeline.rend(); ++it)
@@ -503,16 +236,14 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
         }
     }
 
-    if (reportSplit && currentTarget != nullptr && paramOutput != nullptr)
-    {
-        const auto inputDesc = currentTarget->GetDesc();
-        const auto outputDesc = paramOutput->GetDesc();
-        LOG_INFO("NR split surfaces: upscaler writes {}x{}; final output {}x{}; redirected={}",
-                 inputDesc.Width, inputDesc.Height, outputDesc.Width, outputDesc.Height, currentTarget != paramOutput);
-    }
-
     // Upscaler will write to the first active shader, or just output
-    SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Output, currentTarget);
+    InParameters->Set(NVSDK_NGX_Parameter_Output, currentTarget);
+    struct RestoreOutput
+    {
+        NVSDK_NGX_Parameter* params;
+        ID3D12Resource* output;
+        ~RestoreOutput() { params->Set(NVSDK_NGX_Parameter_Output, output); }
+    } restoreOutput { InParameters, paramOutput };
 
     UpscalerTime->Start(InCommandList);
 
@@ -521,22 +252,7 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     UpscalerTime->End(InCommandList);
 
     if (!evalResult)
-    {
-        // Output still points at the first stage's buffer, which is this pipeline's and is render
-        // sized. Leaving it there hands the game's next reader a surface it does not own; every other
-        // exit from here restores it.
-        SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Output, paramOutput);
-
-        static bool said = false;
-
-        if (!said)
-        {
-            said = true;
-            LOG_ERROR("Upscaler evaluate failed; {} pipeline stage(s) skipped this frame", pipeline.size());
-        }
-
         return false;
-    }
 
     // Iterate FORWARDS to execute the shaders in the defined order
     for (auto& pass : pipeline)
@@ -569,7 +285,7 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
         }
     }
 
-    SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Output, paramOutput);
+    InParameters->Set(NVSDK_NGX_Parameter_Output, paramOutput);
 
     return evalResult;
 }
@@ -618,11 +334,4 @@ IFeature_Dx12::~IFeature_Dx12()
     OutputScaler.reset();
     RCAS.reset();
     Bias.reset();
-    Enlarger.reset();
-
-    if (EnlargerInput != nullptr)
-    {
-        EnlargerInput->Release();
-        EnlargerInput = nullptr;
-    }
 }

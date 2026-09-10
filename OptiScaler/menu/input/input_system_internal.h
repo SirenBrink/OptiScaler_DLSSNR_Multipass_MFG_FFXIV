@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "input_system.h"
 
@@ -77,7 +77,6 @@ struct DirectInputDeviceSlot
     bool InUse = false;
     void* Device = nullptr;
     DirectInputDeviceKind Kind = DirectInputDeviceKind::Other;
-    DWORD LastObjectDataSize = 0;
 };
 
 enum class HidDeviceKind
@@ -479,18 +478,17 @@ class ScopedHookBypass
 
 // Lifecycle
 bool InstallHooks();
-bool RemoveHooks();
-bool ReleaseTrackedWindowsHooksLocked();
+void RemoveHooks();
+void ReleaseTrackedWindowsHooksLocked();
 
 // GameInput / Windows.Gaming.Input
 void UpdateGameInputIntegrationLocked();
-bool RemoveGameInputHooksLocked();
+void RemoveGameInputHooksLocked();
 HRESULT WINAPI hkGameInputCreate(void** gameInput);
 
 // XInput
 void UpdateXInputIntegrationLocked();
-bool RemoveXInputHooksLocked();
-void DrainXInputKeystrokesLocked();
+void RemoveXInputHooksLocked();
 DWORD WINAPI hkXInputGetState(DWORD userIndex, XINPUT_STATE* state);
 DWORD WINAPI hkXInputGetStateEx(DWORD userIndex, XINPUT_STATE* state);
 DWORD WINAPI hkXInputGetKeystroke(DWORD userIndex, DWORD reserved, PXINPUT_KEYSTROKE keystroke);
@@ -498,8 +496,7 @@ DWORD WINAPI hkXInputSetState(DWORD userIndex, XINPUT_VIBRATION* vibration);
 
 // DirectInput
 void UpdateDirectInputIntegrationLocked();
-bool RemoveDirectInputHooksLocked();
-void DrainDirectInputBufferedDataLocked();
+void RemoveDirectInputHooksLocked();
 HRESULT WINAPI hkDirectInput8Create(HINSTANCE instance, DWORD version, REFIID riid, LPVOID* out, LPUNKNOWN outer);
 HRESULT WINAPI hkDirectInputCreateA(HINSTANCE instance, DWORD version, void** out, LPUNKNOWN outer);
 HRESULT WINAPI hkDirectInputCreateW(HINSTANCE instance, DWORD version, void** out, LPUNKNOWN outer);
@@ -515,7 +512,7 @@ ULONG WINAPI hkDirectInputDeviceRelease(void* device);
 void SetTargetWindow(HWND hwnd, bool isUwp, bool useWndProcSubclass);
 void SetInputWindow(HWND hwnd, bool useWndProcSubclass, bool explicitInputHwnd);
 bool InstallWindowSubclass(HWND hwnd);
-bool RemoveWindowSubclass(bool preserveLostChain = false);
+void RemoveWindowSubclass();
 bool TryGetWindowProc(HWND hwnd, WNDPROC* wndProc);
 void ClearTargetWindowLocked();
 void ClearInputWindowLocked();
@@ -581,8 +578,8 @@ void SanitizeRawMouseAllLocked(RAWINPUT& input);
 void SanitizeRawMouseKeepAllowedButtonUpsLocked(RAWINPUT& input, USHORT allowedButtonUpFlags);
 void SanitizeRawKeyboardLocked(RAWINPUT& input);
 int NormalizeRawKeyboardVirtualKey(const RAWKEYBOARD& keyboard);
-// Returns true when this packet must still reach the game because it contains an input release
-// the game is owed. The GetRawInputData hook sanitizes the packet before the game receives it.
+// Returns true when this packet must still reach the game -- a key release it is owed, because it
+// saw the matching press before the menu opened. Everything else returns false and may be withheld.
 bool HandleRawInputLocked(HRAWINPUT rawInputHandle);
 
 // Win32 hook tracking
@@ -600,7 +597,7 @@ int WindowsHookMouseMessageToButton(int hookType, WPARAM wParam, LPARAM lParam);
 HOOKPROC GetWindowsHookProxyProc(std::size_t slotIndex);
 LRESULT CALLBACK InvokeWindowsHookProxy(std::size_t slotIndex, int code, WPARAM wParam, LPARAM lParam);
 void UpdateExternalMouseHookLocked();
-bool RemoveExternalMouseHookLocked();
+void RemoveExternalMouseHookLocked();
 void EnsureExternalRawInputSinkLocked();
 void PumpExternalRawInputSinkLocked();
 void RemoveExternalRawInputSinkLocked();

@@ -226,8 +226,8 @@ class Config
   public:
     Config();
 
-    // Pipeline placement is fixed for this process; the editable value is saved for next launch.
-    bool DlssNrDualFeatureActive() const { return _dlssNrDualFeatureActive; }
+
+
 
     // Init flags
     CustomOptional<bool, NoDefault> DepthInverted;
@@ -260,6 +260,15 @@ class Config
     // DLSS Neural Rendering: a detail-synthesis pass over the upscaler's output. Off by default -- it is
     // an undocumented feature driven directly through its snippet, not something NVIDIA exposes.
     CustomOptional<bool> DlssNrEnabled { false };
+    // Run the NR pass on the upscaler's colour input, at render resolution, immediately before SR.
+    // Off preserves the v0.2.0 post-upscale placement.
+    CustomOptional<bool> DlssNrRunBeforeSr { false };
+    // Generate NR before SR, upscale its signed contribution with a private DLSS feature,
+    // and apply it after the game's upscaler. Takes precedence over RunBeforeSR; opt-in.
+    CustomOptional<bool> DlssNrDeferredDlss { false };
+    CustomOptional<bool> DlssNrResidualFg { false };
+    CustomOptional<uint32_t> DlssNrPrecision { 0 }; // 0 NVIDIA FP8 (default), 4 Experimental NVFP4 hybrid
+    CustomOptional<bool> DlssNrResidualFgApproxCamera { false };
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.
     CustomOptional<int> DlssNrToggleKey { UnboundKey };
@@ -267,23 +276,64 @@ class Config
     CustomOptional<float> DlssNrIntensity { 1.0f };
     // 0 default (standard), 1 natural, 2 cinematic -- the model's own processing profiles.
     CustomOptional<uint32_t> DlssNrStyle { 0 };
+    // Optional per-pass model profiles. Pass 1 uses Preset/Style above; an absent override inherits
+    // pass 1. Keeping inheritance explicit preserves every existing configuration and lets changing
+    // the base profile update the whole stack unless a later pass was deliberately specialised.
+    CustomOptional<uint32_t, NoDefault> DlssNrPass2Preset;
+    CustomOptional<uint32_t, NoDefault> DlssNrPass2Style;
+    CustomOptional<uint32_t, NoDefault> DlssNrPass3Preset;
+    CustomOptional<uint32_t, NoDefault> DlssNrPass3Style;
     CustomOptional<float> DlssNrLocalStructure { 1.0f };
     CustomOptional<float> DlssNrLocalTone { 1.0f };
     // -1 means follow local structure, which is the model's own default. It is not a strength of zero.
     CustomOptional<float> DlssNrSkinStructure { -1.0f };
     CustomOptional<bool> DlssNrAutoMask { true };
-    // Sparse per-pass model settings, "2:intensity=0.5,style=1;3:intensity=0.3". A pass with no
-    // entry uses the values above.
-    CustomOptional<std::string> DlssNrPassOverrides { "" };
-    // Lifts the pass slider past kDefaultMaxPasses. Each pass is another model run and another NGX
-    // feature holding its own history.
+    // Optional final-composition filter, not NVIDIA's semantic auto mask.
+    CustomOptional<bool> DlssNrSkinProtection { false };
+    CustomOptional<bool> DlssNrSkinToneEnabled { true };
+    CustomOptional<float> DlssNrSkinDetail { 1.0f };
+    CustomOptional<float> DlssNrSkinColour { 1.0f };
+    CustomOptional<float> DlssNrEnvironmentDetail { 1.0f };
+    CustomOptional<float> DlssNrEnvironmentColour { 1.0f };
+    CustomOptional<bool> DlssNrShowSkinMask { false };
+    CustomOptional<float, NoDefault> DlssNrPass2Intensity;
+    CustomOptional<float, NoDefault> DlssNrPass2LocalStructure;
+    CustomOptional<float, NoDefault> DlssNrPass2LocalTone;
+    CustomOptional<float, NoDefault> DlssNrPass2SkinStructure;
+    CustomOptional<bool, NoDefault> DlssNrPass2AutoMask;
+    CustomOptional<float, NoDefault> DlssNrPass3Intensity;
+    CustomOptional<float, NoDefault> DlssNrPass3LocalStructure;
+    CustomOptional<float, NoDefault> DlssNrPass3LocalTone;
+    CustomOptional<float, NoDefault> DlssNrPass3SkinStructure;
+    CustomOptional<bool, NoDefault> DlssNrPass3AutoMask;
     CustomOptional<bool> DlssNrUnlockPasses { false };
+    struct NrExtraPass
+    {
+        CustomOptional<uint32_t, NoDefault> style;
+        CustomOptional<float, NoDefault> intensity, structure, tone, skin;
+        CustomOptional<bool, NoDefault> autoMask;
+    };
+    NrExtraPass DlssNrExtraPasses[27]; // pass 4..30; legacy pass 2/3 keys stay compatible
 
     // How much of the model's edit reaches the frame. Separated because detail synthesis is a luminance
     // edit and any colour shift is usually the part you do not want, and allowed past 1.0 because
     // exaggerating an edit is the only honest way to see whether there is one.
     CustomOptional<float> DlssNrTransferStrength { 1.0f };
     CustomOptional<float> DlssNrColourStrength { 1.0f };
+
+    // The RenoDX reversible proxy mode. 0 = today's soft-knee encode + our composition (default,
+    // byte-identical); 1 = unclipped Neutwo proxy + our composition; 2 = Neutwo proxy + pure-inverse
+    // replace. An in-game A/B and a way back. Default 0 = byte-identical to before.
+    CustomOptional<uint32_t> DlssNrReversibleMode { 0 };
+
+    // Whether the model's edit is applied. Off keeps the pass running (so Hold frame works) but shows
+    // the clean upscaler frame -- for A/B'ing NR on/off on a frozen frame. Default true.
+    CustomOptional<bool> DlssNrApplyModel { true };
+
+    // Frame hold: freeze the NR pass's input so a live setting change re-renders the SAME frame -- the
+    // only clean way to A/B our settings. A live testing toggle, not really a saved preference; off by
+    // default. See dlssnr/design/frame-hold.md.
+    CustomOptional<bool> DlssNrHoldFrame { false };
 
 
     // The most the pass may multiply or divide a pixel by. A detail pass has no business restyling a
@@ -349,34 +399,10 @@ class Config
     // untouched whatever this is set to. 1.0 is full resolution and behaves exactly as before.
     CustomOptional<float> DlssNrWorkingScale { 1.0f };
 
-    // Run the model before the upscaler instead of after it.
-    //
-    // The model asks for a 1:1 scaling ratio at every quality level it accepts, so the only way to run
-    // it on fewer pixels is to hand it a smaller frame. Here that is the game's render-resolution
-    // colour buffer, which is also rendered samples rather than the upscaler's reconstruction.
-    //
-    // Experimental: colour at this point is jittered per frame and the model takes no jitter offset.
-    CustomOptional<bool> DlssNrPreUpscale { false };
-
-    // Split the upscaler in two and put the model between the halves.
-    //
-    // The upscaler is built to write at render resolution instead of display resolution, which for
-    // ray reconstruction makes it a denoiser and nothing else. The model then runs on a clean,
-    // temporally settled frame at render resolution, and the enlargement happens after it.
-    //
-    // This is the arrangement that answers the jitter objection to DlssNrPreUpscale: the frame the
-    // model is shown here has already been through temporal accumulation, so the subpixel offset the
-    // model cannot be told about has been resolved before it ever sees the picture.
-    CustomOptional<bool> DlssNrDualFeature { false };
-
-    // Which upscaler performs the enlargement in that arrangement, or none for the spatial output
-    // scaler. Read through the same name table as every other upscaler choice, and resolved through
-    // the same provider -- so a machine without DLSS is handed FSR here exactly as it is anywhere else.
-    //
-    // Unset means the spatial scaler: it needs no motion vectors, no depth and no jitter, so it is the
-    // one option that cannot be wrong about them. The upscalers are sharper and answer to the jitter
-    // question, which the first half has already consumed.
-    CustomOptional<Upscaler, NoDefault> DlssNrDualEnlarger;
+    // Filter used for NR supersampling (working scale > 1): the model runs above native, and this is
+    // the downscaler that averages its answer back to native. Independent of OutputScalingDownscaler
+    // so NR and Output Scaling can run different filters at once. Lanczos3 is the sharp default.
+    CustomOptional<Scaler> DlssNrScalingDownscaler { Scaler::Lanczos3 };
 
     // Ask the driver's own nvngx.dll whether it will dispatch Neural Rendering, once per session.
     //
@@ -483,21 +509,18 @@ class Config
     // picture that had been tuned came back wrong for a reason nothing on screen explained.
     CustomOptional<float> DlssNrScanTrim { 1.0f };
 
-    // How many times to run the model over the same frame, each pass shown the last one's answer.
+    // How many sequential model layers to run between one encode and one final composition. Each extra
+    // layer consumes the preceding model output and owns a persistent feature/history. The implementation
+    // deliberately caps this at three and never evaluates a feature on the command list that created it.
     //
-    // A count of features, not a setting on one: every pass has its own NGX feature carrying its own
-    // temporal history, and each is built on a frame of its own before it is first evaluated. The
-    // proxy the composition differences against is written once, by the encode, and never by the
-    // chain, so what the composition receives is the whole chain's edit against the frame's own
-    // picture rather than the last pass's edit against the one before it.
-    //
-    // 1 is what the model was trained for. Above that it is being asked to enhance its own output,
-    // which is outside its training distribution: detail compounds, and so does anything it got
-    // wrong. The ceiling is DlssNr::kMaxPasses.
+    // 1 is what the model was trained for and what every published number describes. Above that it
+    // is being asked to enhance its own output, which is outside its training distribution: detail
+    // compounds, and so does anything it got wrong. Two often looks richer; three is the guarded
+    // ceiling because further layers converge while still paying the full cost.
     //
     // The cost is exactly linear -- the model is 98% of the frame's expense and every pass pays it
-    // again. The passes are sequential and each one needs the last one's output, so there is no
-    // amortisation. VRAM grows with the count as well: a feature's history is its own.
+    // again -- so 3 costs three times, near enough. There is no shortcut and no amortisation: the
+    // passes are sequential and each one needs the last one's output.
     CustomOptional<uint32_t> DlssNrPasses { 1 };
 
     // Which depth convention the model is told the guide uses.
@@ -788,7 +811,6 @@ class Config
 
     // NVAPI Override
     CustomOptional<bool> DisableFlipMetering { false };
-    CustomOptional<bool> DisableReflexSync { false };
 
     // Spoofing
     CustomOptional<bool, SoftDefault> DxgiSpoofing { true };
@@ -821,6 +843,9 @@ class Config
 
     // Frame Generation
     CustomOptional<FGInput> FGInput { FGInput::NoFG };
+    CustomOptional<bool> ExternalFrameGeneration { false };
+    CustomOptional<bool> FGDLSSGAdaMfgUnlock { false };
+    CustomOptional<bool, NoDefault> FGDLSSGAdaBlackwellKernels;
     CustomOptional<FGOutput> FGOutput { FGOutput::NoFG };
     CustomOptional<FGNvngxReplacement> FGNvngxReplacement { FGNvngxReplacement::None };
     CustomOptional<bool> FGDrawUIOverFG { false };
@@ -917,8 +942,6 @@ class Config
     CustomOptional<bool> FGDLSSGOverrideForceDMFG { false };   // Overrides game's DLSSG mode to Dynamic
     CustomOptional<bool> FGDLSSGForceDMFG { false };           // Overrides Opti's DLSSG mode to Dynamic
     CustomOptional<float> FGDLSSGFramerateTargetDMFG { 0.0f }; // 0.0 means auto-detects the display refresh rate
-    CustomOptional<bool> FGDLSSGAdaMfgUnlock { false };
-    CustomOptional<bool> FGDLSSGAdaBlackwellKernels { false }; // Blackwell kernels on Ada, see MfgUnlock
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033
@@ -977,7 +1000,7 @@ class Config
     static Config* Instance();
 
   private:
-    bool _dlssNrDualFeatureActive = false;
+
     inline static Config* _config;
     inline static std::vector<std::string> _log;
 

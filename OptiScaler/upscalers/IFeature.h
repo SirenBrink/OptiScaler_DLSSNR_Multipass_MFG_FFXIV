@@ -107,46 +107,18 @@ class IFeature
 
     virtual void SetInit(bool InValue) { _isInited = InValue; }
 
-    // Set on a feature that is itself the enlargement half of another. Such a feature never splits in
-    // turn: it is the half that does the enlarging, and it writes at display resolution.
-    bool _isEnlargementStage = false;
-    // Feature output size is fixed at creation; the input subrect can change each frame.
-    unsigned int _splitOutputWidth = 0;
-    unsigned int _splitOutputHeight = 0;
-
-    // Throttle for the "asked for, not taken" warning, per feature rather than per process. It was a
-    // function-level static, which several features share: with a bridge there are at least two live
-    // objects and the first one to reach a given target silenced the rest, which is precisely the
-    // information the message exists to carry.
-    unsigned int _saidNotTakenForTarget = 0;
-
     // Whether this feature has reported the game's raw evaluate geometry at least once.
     bool _reportedEvaluateGeometry = false;
-
   public:
     NVSDK_NGX_Handle* Handle() const { return _handle; };
     static unsigned int GetNextHandleId() { return handleCounter++; }
     int GetFeatureFlags() const { return _featureFlags; }
-
-    void MarkEnlargementStage() { _isEnlargementStage = true; }
-    bool IsEnlargementStage() const { return _isEnlargementStage; }
 
     virtual bool IsWithDx12() = 0;
     virtual feature_version Version() = 0;
     virtual Upscaler GetUpscalerType() const = 0;
     virtual API Api() const = 0;
     std::string Name() const { return UpscalerDisplayName(GetUpscalerType()); };
-
-    /// @brief What this feature thinks its resolutions are, safe to call from a constructor.
-    ///
-    /// A bridged upscaler is two feature objects, and a dual-feature split adds a third. They log
-    /// through the same call sites, so a line saying the split was declined does not say which object
-    /// declined it -- and that is the one thing worth knowing. Every dual-feature message carries this.
-    ///
-    /// Members only, no virtual calls: SetInitParameters runs inside several upscalers' constructors,
-    /// where a virtual belonging to a class not yet constructed ends the process. Pair it with Name()
-    /// at call sites that run after construction; those are the ones that can say who this is.
-    std::string FeatureIdentity() const;
     std::string ShortName() const { return UpscalerShortName(GetUpscalerType()); }; // Without the version
     virtual std::optional<double> ReadUpscalerTime(void* commandQueue) { return std::nullopt; }
     virtual void ReadDetailedGpuTimes(void* commandQueue, std::vector<DetailedGpuTime>& detailedGpuTimes) {};
@@ -158,16 +130,8 @@ class IFeature
     virtual bool UpdateOutputResolution(const NVSDK_NGX_Parameter* InParameters);
     virtual unsigned int DisplayWidth() { return _displayWidth; };
     virtual unsigned int DisplayHeight() { return _displayHeight; };
-    // Where the split lives, rather than in _targetWidth.
-    //
-    // Every upscaler's ProcessInitParams assigns _targetWidth from the display size after
-    // SetInitParameters has run, so a value written there does not survive to the build. Answering
-    // here instead puts the split ahead of all of them, including the OutWidth each one publishes to
-    // its own NGX feature.
-    bool DualFeatureSplit() const;
-
-    virtual unsigned int TargetWidth() { return DualFeatureSplit() ? _splitOutputWidth : _targetWidth; };
-    virtual unsigned int TargetHeight() { return DualFeatureSplit() ? _splitOutputHeight : _targetHeight; };
+    virtual unsigned int TargetWidth() { return _targetWidth; };
+    virtual unsigned int TargetHeight() { return _targetHeight; };
     virtual unsigned int RenderWidth() { return _renderWidth; };
     virtual unsigned int RenderHeight() { return _renderHeight; };
     virtual NVSDK_NGX_PerfQuality_Value PerfQualityValue() { return _perfQualityValue; }
@@ -198,6 +162,10 @@ class IFeature
     virtual bool SharpenEnabled() { return _initFlags.SharpenEnabled; }
 
     virtual bool CallsUpscalerEndByItself() { return false; }
+
+    // Resolve games such as FFXIV that report the allocation as the DLSS render subrect.
+    // Bridge paths call this before pre-SR NR so NR and the upscaler consume the same active extent.
+    void CorrectRenderSubrect(NVSDK_NGX_Parameter* InParameters);
 
     IFeature(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters) { SetHandle(InHandleId); }
 
