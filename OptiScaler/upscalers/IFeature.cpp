@@ -2,6 +2,10 @@
 #include <Config.h>
 #include <NVNGX_Parameter.h>
 #include "IFeature.h"
+#include <detours/detours.h>
+#include <atomic>
+#include <misc/FfxivNativeQuality.h>
+#include <TlHelp32.h>
 
 void IFeature::SetHandle(unsigned int InHandleId)
 {
@@ -18,9 +22,7 @@ void IFeature::SetHandle(unsigned int InHandleId)
 // model would run on the frame it runs on today, at the cost it costs today.
 bool IFeature::DualFeatureSplit() const
 {
-    return !_isEnlargementStage && _renderWidth > 0 && _renderWidth < _displayWidth &&
-           Config::Instance()->DlssNrDualFeature.value_or_default() &&
-           Config::Instance()->DlssNrEnabled.value_or_default();
+    return !_isEnlargementStage && _splitOutputWidth > 0 && _splitOutputHeight > 0;
 }
 
 // Not one virtual call in here, deliberately.
@@ -35,7 +37,7 @@ bool IFeature::DualFeatureSplit() const
 // ---------------------------------------------------------------------------------------------
 // FFXIV probe -- read only, and only in FINAL FANTASY XIV.
 //
-// FUN_140375180 in ffxiv_dx11.exe is the one function that writes the DLSS render size, the
+// FUN_1403746e0 in ffxiv_dx11.exe writes the DLSS render size, the
 // PerfQualityValue and the render preset hint. It takes the quality from a single byte in the game's
 // graphics settings block:
 //
@@ -46,31 +48,265 @@ bool IFeature::DualFeatureSplit() const
 // and the render size from either the quality table or, when a flag on the DLSS context is set,
 // display multiplied by the float at SETTINGS + 0x4c -- the manual 3D resolution scale.
 //
-// SETTINGS is a pointer held in a global at image base + 0x28f8470.
+// Verified against executable MD5 ca3fe5c8673fe54d1961d856ade51fcc.
+// SETTINGS is a pointer held in a global at image base + 0x28f6470.
 //
 // This reads those five fields and reports them when they change. Nothing is written. The point is to
-// confirm the mapping against what the in-game dropdown says before trusting any of it: if the byte
-// reads 1 while the game's Graphics Upscaling quality shows DLAA, the addresses are right.
+// compare the live state with the game configuration before adding a quality override.
+// Matching instruction bytes are required before using this build-specific layout.
 // ---------------------------------------------------------------------------------------------
 namespace
 {
-constexpr uintptr_t kFfxivSettingsPointerRva = 0x28f8470;
+constexpr uintptr_t kFfxivSettingsPointerRva = 0x28f6470;
 
-bool ReadableAt(const void* address, size_t bytes)
+bool ReadFfxivMemory(const void* address, void* output, size_t bytes)
 {
-    MEMORY_BASIC_INFORMATION info {};
-
-    if (VirtualQuery(address, &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT)
-        return false;
-
-    constexpr DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
-                               PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-
-    if ((info.Protect & readable) == 0 || (info.Protect & PAGE_GUARD) != 0)
-        return false;
-
-    return (uintptr_t) address + bytes <= (uintptr_t) info.BaseAddress + info.RegionSize;
+    SIZE_T copied = 0;
+    return ReadProcessMemory(GetCurrentProcess(), address, output, bytes, &copied) && copied == bytes;
 }
+
+bool MatchesFfxivSettingsInstructions(uintptr_t base)
+{
+    // RIP-relative settings load, then gates +0x54/+0x44/+0x45 and selector +0x55.
+    // Includes the displacement to the expected global; fail closed after an incompatible update.
+    constexpr unsigned char expected[] = {
+        0x4c, 0x8b, 0x05, 0x42, 0x1d, 0x58, 0x02, 0x45, 0x33, 0xe4,
+        0x41, 0x80, 0x78, 0x54, 0x02, 0x74, 0x06, 0x45, 0x38, 0x60,
+        0x44, 0x74, 0x71, 0x45, 0x38, 0x60, 0x45, 0x74, 0x6b,
+        0x41, 0x0f, 0xb6, 0x40, 0x55, 0x83, 0xf8, 0x06
+    };
+    unsigned char actual[sizeof(expected)] {};
+    return base != 0 && ReadFfxivMemory((const void*) (base + 0x374727), actual, sizeof(actual)) &&
+           memcmp(actual, expected, sizeof(expected)) == 0;
+}
+
+std::atomic<bool> nativeQualityAvailable {false};
+std::atomic<int> nativeRequestedQuality {-1};
+std::atomic<unsigned int> nativeRequestSequence {0};
+using FfxivRendererUpdate = void (*)(uintptr_t, float);
+using FfxivResizeCallbacks = unsigned char (*)(uintptr_t);
+FfxivRendererUpdate originalRendererUpdate = nullptr;
+FfxivResizeCallbacks dispatchResizeCallbacks = nullptr;
+
+void ProcessFfxivQualityRequest(uintptr_t renderer)
+{
+    static unsigned int handled = 0;
+    const auto sequence = nativeRequestSequence.load();
+    if (sequence == handled) return;
+    const auto base = (uintptr_t) GetModuleHandleW(nullptr);
+    uintptr_t settings = 0, manager = 0, context = 0, device = 0, callbacks = 0;
+    unsigned char type = 0, flags = 0;
+    if (!ReadFfxivMemory((void*) (base + 0x28f6470), &settings, sizeof(settings)) || settings == 0 ||
+        !ReadFfxivMemory((void*) (settings + 0x54), &type, sizeof(type)) || type != 2 ||
+        !ReadFfxivMemory((void*) (base + 0x28f6498), &manager, sizeof(manager)) || manager == 0 ||
+        !ReadFfxivMemory((void*) (manager + 0x4220), &context, sizeof(context)) || context == 0 ||
+        !ReadFfxivMemory((void*) (context + 0x181), &flags, sizeof(flags)) ||
+        (flags & 1) == 0 || (flags & 0x30) != 0 ||
+        !ReadFfxivMemory((void*) (base + 0x28efd00), &device, sizeof(device)) || device == 0 ||
+        !ReadFfxivMemory((void*) (device + 0x30), &callbacks, sizeof(callbacks)) || callbacks == 0)
+        return;
+
+    // Invalidate only the quality table's display-size cache. The native callback then queries
+    // NGX again and propagates the result to rendering textures on the game's update thread.
+    const unsigned long long invalidDisplay = 0;
+    SIZE_T written = 0;
+    if (!WriteProcessMemory(GetCurrentProcess(), (void*) (context + 0x150), &invalidDisplay,
+                            sizeof(invalidDisplay), &written) || written != sizeof(invalidDisplay))
+        return;
+    const auto result = dispatchResizeCallbacks(callbacks);
+    handled = sequence;
+    unsigned int size[2] {};
+    ReadFfxivMemory((void*) (renderer + 0x428), size, sizeof(size));
+    LOG_INFO("FFXIV native quality: request={} preset={} callbacks={} scene={}x{} thread={}",
+             sequence, nativeRequestedQuality.load(), result, size[0], size[1], GetCurrentThreadId());
+}
+
+void ObserveFfxivRendererUpdate(uintptr_t renderer, float elapsed)
+{
+    ProcessFfxivQualityRequest(renderer);
+    originalRendererUpdate(renderer, elapsed);
+}
+
+
+using FfxivSelectSize = void (*)(uintptr_t, unsigned int*, unsigned char);
+using FfxivQuerySize = uintptr_t (*)(const unsigned int*, unsigned int*, unsigned int*, unsigned int*);
+FfxivSelectSize originalSelectSize = nullptr;
+FfxivQuerySize originalQuerySize = nullptr;
+std::atomic<unsigned long long> sceneSelections {0};
+struct FfxivSceneObservation
+{
+    bool called = false;
+    bool succeeded = false;
+    unsigned int optimal[2] {}, minimum[2] {}, maximum[2] {};
+};
+thread_local FfxivSceneObservation* activeSceneObservation = nullptr;
+
+uintptr_t ObserveFfxivQuery(const unsigned int* display, unsigned int* optimal,
+                          unsigned int* minimum, unsigned int* maximum)
+{
+    const auto result = originalQuerySize(display, optimal, minimum, maximum);
+    // Constrain the native scene selector, rather than just NGX feature-creation metadata.
+    const int requested = nativeRequestedQuality.load();
+    if ((result & 0xff) != 0 && requested >= 0 && requested <= 5)
+    {
+        const auto answer = LastQualityAnswer();
+        unsigned int target[2] {}, output[2] {};
+        if (ReadFfxivMemory(optimal, target, sizeof(target)) && ReadFfxivMemory(display, output, sizeof(output)) &&
+            answer.quality == requested && answer.renderWidth == target[0] && answer.renderHeight == target[1] &&
+            target[0] > 0 && target[1] > 0 && target[0] <= output[0] && target[1] <= output[1])
+        {
+            memcpy(minimum, target, sizeof(target));
+            memcpy(maximum, target, sizeof(target));
+        }
+    }
+    if (activeSceneObservation != nullptr)
+    {
+        auto& observation = *activeSceneObservation;
+        observation.called = true;
+        observation.succeeded = (result & 0xff) != 0;
+        if (observation.succeeded)
+        {
+            ReadFfxivMemory(optimal, observation.optimal, sizeof(observation.optimal));
+            ReadFfxivMemory(minimum, observation.minimum, sizeof(observation.minimum));
+            ReadFfxivMemory(maximum, observation.maximum, sizeof(observation.maximum));
+        }
+    }
+    return result;
+}
+
+void ObserveFfxivSelection(uintptr_t renderer, unsigned int* size, unsigned char mode)
+{
+    unsigned int before[2] {}, after[2] {};
+    const bool beforeValid = ReadFfxivMemory(size, before, sizeof(before));
+    FfxivSceneObservation observation;
+    auto* previous = activeSceneObservation;
+    activeSceneObservation = &observation;
+    originalSelectSize(renderer, size, mode);
+    activeSceneObservation = previous;
+    const auto count = sceneSelections.fetch_add(1) + 1;
+    const bool afterValid = ReadFfxivMemory(size, after, sizeof(after));
+    // Bound logging even if the game invokes this every frame.
+    if (count > 100 && count % 300 != 0)
+        return;
+    unsigned short heights[4] {};
+    ReadFfxivMemory((void*) (renderer + 0x700), heights, sizeof(heights));
+    try
+    {
+        LOG_INFO("FFXIV scene select #{} thread={} mode={} readable={}/{}: {}x{} -> {}x{}; "
+                 "query called={} success={} optimal={}x{} min={}x{} max={}x{}; heights applied/current/max/min={}/{}/{}/{}",
+                 count, GetCurrentThreadId(), mode, beforeValid, afterValid, before[0], before[1], after[0], after[1],
+                 observation.called, observation.succeeded, observation.optimal[0], observation.optimal[1],
+                 observation.minimum[0], observation.minimum[1], observation.maximum[0], observation.maximum[1],
+                 heights[0], heights[1], heights[2], heights[3]);
+    }
+    catch (...) {} // Logging must not escape into the game's native callback.
+}
+
+void InstallFfxivSceneDiagnostic(uintptr_t base)
+{
+    static std::once_flag once;
+    std::call_once(once, [base]() {
+        constexpr unsigned char selectBytes[] = {0x48,0x89,0x5c,0x24,0x18,0x55,0x56,0x57,
+            0x41,0x56,0x41,0x57,0x48,0x83,0xec,0x20,0x8b,0x42,0x04,0x0f,0x57,0xc0,0x48,0x8b,0xd9};
+        constexpr unsigned char queryBytes[] = {0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,
+            0x48,0x89,0x7c,0x24,0x18,0x41,0x56,0x48,0x83,0xec,0x20,0x48,0x8b,0x05,0xdc,0x3f,0x5a,0x02};
+        unsigned char actualSelect[sizeof(selectBytes)] {}, actualQuery[sizeof(queryBytes)] {};
+        if (!ReadFfxivMemory((void*) (base + 0x2db890), actualSelect, sizeof(actualSelect)) ||
+            !ReadFfxivMemory((void*) (base + 0x3524a0), actualQuery, sizeof(actualQuery)) ||
+            memcmp(actualSelect, selectBytes, sizeof(selectBytes)) != 0 ||
+            memcmp(actualQuery, queryBytes, sizeof(queryBytes)) != 0)
+        {
+            LOG_WARN("FFXIV scene diagnostic: instruction mismatch; hooks disabled");
+            return;
+        }
+        constexpr unsigned char updateBytes[] = {0x4c,0x8b,0xdc,0x57,0x48,0x81,0xec,0xd0,0x00,0x00,0x00,0x48,0x8b,0x05,0xd6,0x94,0x5f,0x02};
+        constexpr unsigned char dispatchBytes[] = {0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x6c,0x24,0x18,0x48,0x89,0x74,0x24,0x20,0x57,0x48,0x83,0xec,0x20};
+        unsigned char updateActual[sizeof(updateBytes)] {}, dispatchActual[sizeof(dispatchBytes)] {};
+        if (!ReadFfxivMemory((void*) (base + 0x2da790), updateActual, sizeof(updateActual)) ||
+            !ReadFfxivMemory((void*) (base + 0x236ca0), dispatchActual, sizeof(dispatchActual)) ||
+            memcmp(updateActual, updateBytes, sizeof(updateBytes)) != 0 ||
+            memcmp(dispatchActual, dispatchBytes, sizeof(dispatchBytes)) != 0)
+        {
+            LOG_WARN("FFXIV native quality: update instruction mismatch; hooks disabled");
+            return;
+        }
+        originalRendererUpdate = (FfxivRendererUpdate) (base + 0x2da790);
+        dispatchResizeCallbacks = (FfxivResizeCallbacks) (base + 0x236ca0);
+        originalSelectSize = (FfxivSelectSize) (base + 0x2db890);
+        originalQuerySize = (FfxivQuerySize) (base + 0x3524a0);
+        // Enlist existing game threads so Detours can relocate any instruction pointer in a patched prologue.
+        std::vector<HANDLE> threads;
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) return;
+        THREADENTRY32 entry {};
+        entry.dwSize = sizeof(entry);
+        bool readable = Thread32First(snapshot, &entry) != FALSE;
+        bool threadsReady = readable;
+        while (readable)
+        {
+            if (entry.th32OwnerProcessID == GetCurrentProcessId() && entry.th32ThreadID != GetCurrentThreadId())
+            {
+                HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, entry.th32ThreadID);
+                if (thread != nullptr) threads.push_back(thread);
+                else if (GetLastError() != ERROR_INVALID_PARAMETER) threadsReady = false;
+            }
+            readable = Thread32Next(snapshot, &entry) != FALSE;
+        }
+        CloseHandle(snapshot);
+        if (!threadsReady)
+        {
+            for (auto thread : threads) CloseHandle(thread);
+            LOG_WARN("FFXIV scene diagnostic: unable to enlist game threads; hooks disabled");
+            return;
+        }
+        LONG result = DetourTransactionBegin();
+        if (result == NO_ERROR)
+        {
+            result = DetourUpdateThread(GetCurrentThread());
+            for (auto thread : threads)
+            {
+                if (result != NO_ERROR) break;
+                result = DetourUpdateThread(thread);
+            }
+            if (result == NO_ERROR)
+                result = DetourAttach(&(PVOID&) originalSelectSize, ObserveFfxivSelection);
+            if (result == NO_ERROR)
+                result = DetourAttach(&(PVOID&) originalQuerySize, ObserveFfxivQuery);
+            if (result == NO_ERROR)
+                result = DetourAttach(&(PVOID&) originalRendererUpdate, ObserveFfxivRendererUpdate);
+            if (result == NO_ERROR)
+                result = DetourTransactionCommit();
+            else
+                DetourTransactionAbort();
+        }
+        for (auto thread : threads) CloseHandle(thread);
+        if (result == NO_ERROR)
+        {
+            nativeQualityAvailable.store(true);
+            const int forced = Config::Instance()->ForcePerfQuality.value_or_default();
+            if (forced >= 0 && forced <= 5) FfxivNativeQuality::Request(forced);
+        }
+        LOG_INFO("FFXIV native quality v2: hook transaction result={} (0=installed); native scene updates enabled", result);
+    });
+}
+
+void ReportFfxivSceneSnapshot(uintptr_t base)
+{
+    // Called under the settings-probe mutex. Limit snapshots to once per two seconds.
+    static ULONGLONG next = 0;
+    const auto now = GetTickCount64();
+    if (now < next) return;
+    next = now + 2000;
+    uintptr_t renderer = 0;
+    unsigned int scene[2] {};
+    unsigned short heights[4] {};
+    if (!ReadFfxivMemory((void*) (base + 0x28f6490), &renderer, sizeof(renderer)) || renderer == 0 ||
+        !ReadFfxivMemory((void*) (renderer + 0x428), scene, sizeof(scene)) ||
+        !ReadFfxivMemory((void*) (renderer + 0x700), heights, sizeof(heights))) return;
+    LOG_INFO("FFXIV scene snapshot: selections={} scene={}x{} heights applied/current/max/min={}/{}/{}/{}",
+             sceneSelections.load(), scene[0], scene[1], heights[0], heights[1], heights[2], heights[3]);
+}
+
 
 const char* FfxivQualityName(unsigned char value)
 {
@@ -97,81 +333,79 @@ const char* FfxivQualityName(unsigned char value)
 
 void ReportFfxivQualitySetting()
 {
-    // Retried until it resolves, not decided once.
-    //
-    // The first version cached its own failure: the pointer read zero on the very first feature init
-    // and the probe never looked again, so fourteen further inits over three minutes went unexamined.
-    // The block is allocated during config load, so reading zero means too early, not wrong -- and the
-    // only way to tell "too early" from "wrong address" is to keep asking.
-    static const unsigned char* settings = nullptr;
-    static unsigned int attempts = 0;
-    static bool gaveUp = false;
-
-    // Called per evaluate as well as per init, so this is roughly twenty seconds of frames.
-    constexpr unsigned int kMaxAttempts = 1200;
-
-    if (settings == nullptr && !gaveUp)
-    {
-        if (State::Instance().gameExe != "ffxiv_dx11.exe")
-        {
-            gaveUp = true;
-            return;
-        }
-
-        ++attempts;
-
-        const auto base = (uintptr_t) GetModuleHandleW(nullptr);
-        const auto slot = (const unsigned char* const*) (base + kFfxivSettingsPointerRva);
-
-        if (base == 0 || !ReadableAt(slot, sizeof(void*)))
-        {
-            LOG_WARN("FFXIV probe: base+{:#x} is not readable -- the offset is wrong for this build",
-                     kFfxivSettingsPointerRva);
-            gaveUp = true;
-            return;
-        }
-
-        const unsigned char* block = *slot;
-
-        // Sanity, so a stale or wrong pointer is not mistaken for the settings block: the two gate
-        // bytes and the quality selector are all small enumerations in this build.
-        const bool plausible = block != nullptr && ReadableAt(block, 0xd8) && block[0x54] <= 8 &&
-                               block[0x55] <= 8 && block[0x44] <= 1 && block[0x45] <= 1;
-
-        if (!plausible)
-        {
-            if (attempts == 1 || attempts == kMaxAttempts)
-                LOG_WARN("FFXIV probe: attempt {} of {} -- pointer at base+{:#x} reads {:#x}{}", attempts,
-                         kMaxAttempts, kFfxivSettingsPointerRva, (uintptr_t) block,
-                         block == nullptr ? " (not populated yet)" : " (does not look like the settings block)");
-
-            if (attempts >= kMaxAttempts)
-            {
-                LOG_WARN("FFXIV probe: giving up after {} attempts; the address is wrong for this game build",
-                         attempts);
-                gaveUp = true;
-            }
-
-            return;
-        }
-
-        settings = block;
-        LOG_INFO("FFXIV probe: graphics settings block at {:#x} after {} attempt(s), module base {:#x}",
-                 (uintptr_t) block, attempts, base);
-    }
-
-    if (settings == nullptr)
+    if (State::Instance().gameExe != "ffxiv_dx11.exe")
         return;
 
-    const unsigned char gateA = settings[0x54];
-    const unsigned char gateB = settings[0x44];
-    const unsigned char gateC = settings[0x45];
-    const unsigned char quality = settings[0x55];
+    static std::mutex probeMutex;
+    const std::lock_guard<std::mutex> lock(probeMutex);
+    const auto base = (uintptr_t) GetModuleHandleW(nullptr);
+    static const bool matchingInstructions = MatchesFfxivSettingsInstructions(base);
+    if (!matchingInstructions)
+    {
+        static bool reported = false;
+        if (!reported)
+        {
+            LOG_WARN("FFXIV probe: unsupported executable instructions; settings read disabled");
+            reported = true;
+        }
+        return;
+    }
+
+    InstallFfxivSceneDiagnostic(base);
+    ReportFfxivSceneSnapshot(base);
+
+    // Resolve the pointer and copy a fresh snapshot on every call. A settings reload can replace
+    // or free the previous block; ReadProcessMemory fails safely if either read becomes inaccessible.
+    static const unsigned char* lastSettings = nullptr;
+    static unsigned int attempts = 0;
+    static bool gaveUp = false;
+    static bool everReported = false;
+
+    if (gaveUp)
+        return;
+
+    const unsigned char* settings = nullptr;
+    unsigned char snapshot[0x56] {};
+    const bool validSnapshot =
+        ReadFfxivMemory((const void*) (base + kFfxivSettingsPointerRva), &settings, sizeof(settings)) &&
+        settings != nullptr && ReadFfxivMemory(settings, snapshot, sizeof(snapshot)) &&
+        snapshot[0x54] <= 8 && snapshot[0x55] <= 6 && snapshot[0x44] <= 1 && snapshot[0x45] <= 1;
+
+    // Bound consecutive failures independently of the game's frame rate.
+    constexpr unsigned int kMaxAttempts = 1200;
+
+    if (!validSnapshot)
+    {
+        ++attempts;
+        everReported = false;
+        if (attempts == 1 || attempts == kMaxAttempts)
+            LOG_WARN("FFXIV probe: attempt {} of {} -- no readable, plausible settings snapshot at base+{:#x}",
+                     attempts, kMaxAttempts, kFfxivSettingsPointerRva);
+        if (attempts >= kMaxAttempts)
+        {
+            LOG_WARN("FFXIV probe: settings unavailable after {} attempts; disabling diagnostic", attempts);
+            gaveUp = true;
+        }
+        return;
+    }
+
+    if (settings != lastSettings)
+    {
+        LOG_INFO("FFXIV probe: verified settings instructions; graphics settings block at {:#x}, "
+                 "pointer RVA {:#x}, module base {:#x}", (uintptr_t) settings, kFfxivSettingsPointerRva, base);
+        lastSettings = settings;
+        everReported = false;
+    }
+    attempts = 0;
+
+    const unsigned char gateA = snapshot[0x54];
+    const unsigned char gateB = snapshot[0x44];
+    const unsigned char gateC = snapshot[0x45];
+    const unsigned char quality = snapshot[0x55];
 
     float scale = 0.0f;
-    memcpy(&scale, settings + 0x4c, sizeof(scale));
+    memcpy(&scale, snapshot + 0x4c, sizeof(scale));
 
-    static bool everReported = false;
     static unsigned char lastGateA = 0, lastGateB = 0, lastGateC = 0, lastQuality = 0;
     static float lastScale = 0.0f;
 
@@ -194,6 +428,13 @@ void ReportFfxivQualitySetting()
              gatePasses ? "the game reads the quality byte" : "the game forces DLAA");
 }
 } // namespace
+
+bool FfxivNativeQuality::Available() { return nativeQualityAvailable.load(); }
+void FfxivNativeQuality::Request(int quality)
+{
+    nativeRequestedQuality.store(quality >= 0 && quality <= 5 ? quality : -1);
+    nativeRequestSequence.fetch_add(1);
+}
 
 std::string IFeature::FeatureIdentity() const
 {
@@ -415,6 +656,12 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
             _renderHeight = height;
         }
 
+        const bool createSplit = _renderWidth > 0 && _renderHeight > 0 && _renderWidth < _displayWidth &&
+                                 Config::Instance()->DlssNrDualFeature.value_or_default() &&
+                                 Config::Instance()->DlssNrEnabled.value_or_default();
+        _splitOutputWidth = createSplit ? _renderWidth : 0;
+        _splitOutputHeight = createSplit ? _renderHeight : 0;
+
         _perfQualityValue = (NVSDK_NGX_PerfQuality_Value) pqValue;
 
         if (DualFeatureSplit())
@@ -451,6 +698,22 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
                                    unsigned int* OutHeight)
 {
     ReportFfxivQualitySetting();
+    if (State::Instance().gameExe == "ffxiv_dx11.exe")
+    {
+        static thread_local ULONGLONG nextSample = 0;
+        const auto now = GetTickCount64();
+        if (now >= nextSample)
+        {
+            nextSample = now + 2000;
+            unsigned int submittedWidth = 0, submittedHeight = 0;
+            const auto widthResult = InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &submittedWidth);
+            const auto heightResult = InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &submittedHeight);
+            LOG_INFO("FFXIV scene evaluate: feature={} init={}x{} display={}x{} submitted={}x{} readable={}/{}",
+                     _handle ? _handle->Id : 0u, _renderWidth, _renderHeight, _displayWidth, _displayHeight,
+                     submittedWidth, submittedHeight, widthResult == NVSDK_NGX_Result_Success,
+                     heightResult == NVSDK_NGX_Result_Success);
+        }
+    }
 
     if (InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, OutWidth) !=
             NVSDK_NGX_Result_Success ||

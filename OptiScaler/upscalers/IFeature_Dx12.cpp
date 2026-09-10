@@ -8,6 +8,30 @@
 #include "State.h"
 #include <dlssnr/DlssNr.h>
 
+namespace
+{
+ID3D12Resource* PipelineResource(NVSDK_NGX_Parameter* params, const char* key)
+{
+    ID3D12Resource* typed = nullptr;
+    if (params->Get(key, &typed) == NVSDK_NGX_Result_Success && typed != nullptr)
+        return typed;
+    void* plain = nullptr;
+    if (params->Get(key, &plain) == NVSDK_NGX_Result_Success)
+        return static_cast<ID3D12Resource*>(plain);
+    return nullptr;
+}
+void SetPipelineResource(NVSDK_NGX_Parameter* params, const char* key, ID3D12Resource* value)
+{
+    // Preserve the resource representation used by this caller. The bridge uses void* slots;
+    // native DX12 callers use typed slots. Writing a different slot can leave the old one stale.
+    ID3D12Resource* typed = nullptr;
+    if (params->Get(key, &typed) == NVSDK_NGX_Result_Success && typed != nullptr)
+        params->Set(key, value);
+    else
+        params->Set(key, static_cast<void*>(value));
+}
+}
+
 void IFeature_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
                                     D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState) const
 {
@@ -92,8 +116,8 @@ bool IFeature_Dx12::EnsureEnlarger(ID3D12GraphicsCommandList* InCommandList, NVS
     InParameters->Get(NVSDK_NGX_Parameter_OutWidth, &outWidth);
     InParameters->Get(NVSDK_NGX_Parameter_OutHeight, &outHeight);
 
-    InParameters->Set(NVSDK_NGX_Parameter_Width, RenderWidth());
-    InParameters->Set(NVSDK_NGX_Parameter_Height, RenderHeight());
+    InParameters->Set(NVSDK_NGX_Parameter_Width, TargetWidth());
+    InParameters->Set(NVSDK_NGX_Parameter_Height, TargetHeight());
     InParameters->Set(NVSDK_NGX_Parameter_OutWidth, DisplayWidth());
     InParameters->Set(NVSDK_NGX_Parameter_OutHeight, DisplayHeight());
 
@@ -226,9 +250,9 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     ID3D12Resource* paramMotion = nullptr;
     ID3D12Resource* paramDepth = nullptr;
 
-    InParameters->Get(NVSDK_NGX_Parameter_Output, &paramOutput);
-    InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, &paramMotion);
-    InParameters->Get(NVSDK_NGX_Parameter_Depth, &paramDepth);
+    paramOutput = PipelineResource(InParameters, NVSDK_NGX_Parameter_Output);
+    paramMotion = PipelineResource(InParameters, NVSDK_NGX_Parameter_MotionVectors);
+    paramDepth = PipelineResource(InParameters, NVSDK_NGX_Parameter_Depth);
 
     // Order is important as that's the order of shader dispatch
     std::vector<ShaderPass> pipeline;
@@ -274,7 +298,7 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
               {
                   // Render resolution, matching what the first half wrote rather than what this stage
                   // produces -- nextOutput is the game's frame and is display sized.
-                  if (!EnsureIntermediate(Device, nextOutput, RenderWidth(), RenderHeight(), &EnlargerInput))
+                  if (!EnsureIntermediate(Device, nextOutput, TargetWidth(), TargetHeight(), &EnlargerInput))
                       return nullptr;
 
                   return EnlargerInput;
@@ -287,14 +311,14 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
                   // motion vectors, depth, jitter, the reset -- is the game's and already in it; only
                   // the two frames differ from what the game described.
                   ID3D12Resource* gameColor = nullptr;
-                  InParameters->Get(NVSDK_NGX_Parameter_Color, &gameColor);
+                  gameColor = PipelineResource(InParameters, NVSDK_NGX_Parameter_Color);
 
-                  InParameters->Set(NVSDK_NGX_Parameter_Color, input);
-                  InParameters->Set(NVSDK_NGX_Parameter_Output, output);
+                  SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Color, input);
+                  SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Output, output);
 
                   const bool ok = Enlarger->Evaluate(InCommandList, InParameters);
 
-                  InParameters->Set(NVSDK_NGX_Parameter_Color, gameColor);
+                  SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Color, gameColor);
 
                   // Dropped rather than retried: EnlargerType stays set, so EnsureEnlarger declines from
                   // here on and the next frame is built around the spatial scaler instead.
@@ -433,6 +457,16 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
               } });
     }
 
+    static thread_local std::string lastSplitIdentity;
+    const auto splitIdentity = FeatureIdentity();
+    const bool reportSplit = Config::Instance()->DlssNrDualFeature.value_or_default() && splitIdentity != lastSplitIdentity;
+    if (reportSplit)
+    {
+        lastSplitIdentity = splitIdentity;
+        LOG_INFO("NR split pipeline: {} split={} enlarger={} spatial={} scalerReady={} stages={}",
+                 splitIdentity, useDualFeature, useUpscalerEnlarger, useOutputScaling, OutputScaler->IsInit(), pipeline.size());
+    }
+
     // Iterate BACKWARDS to establish where each shader needs to pull its input from
     ID3D12Resource* currentTarget = paramOutput;
     for (auto it = pipeline.rbegin(); it != pipeline.rend(); ++it)
@@ -446,8 +480,16 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
         }
     }
 
+    if (reportSplit && currentTarget != nullptr && paramOutput != nullptr)
+    {
+        const auto inputDesc = currentTarget->GetDesc();
+        const auto outputDesc = paramOutput->GetDesc();
+        LOG_INFO("NR split surfaces: upscaler writes {}x{}; final output {}x{}; redirected={}",
+                 inputDesc.Width, inputDesc.Height, outputDesc.Width, outputDesc.Height, currentTarget != paramOutput);
+    }
+
     // Upscaler will write to the first active shader, or just output
-    InParameters->Set(NVSDK_NGX_Parameter_Output, currentTarget);
+    SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Output, currentTarget);
 
     UpscalerTime->Start(InCommandList);
 
@@ -460,7 +502,7 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
         // Output still points at the first stage's buffer, which is this pipeline's and is render
         // sized. Leaving it there hands the game's next reader a surface it does not own; every other
         // exit from here restores it.
-        InParameters->Set(NVSDK_NGX_Parameter_Output, paramOutput);
+        SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Output, paramOutput);
 
         static bool said = false;
 
@@ -504,7 +546,7 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
         }
     }
 
-    InParameters->Set(NVSDK_NGX_Parameter_Output, paramOutput);
+    SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Output, paramOutput);
 
     return evalResult;
 }

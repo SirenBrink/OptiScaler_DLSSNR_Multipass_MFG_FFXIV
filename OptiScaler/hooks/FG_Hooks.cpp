@@ -732,8 +732,9 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
             if (bbResult == S_OK)
             {
                 LOG_DEBUG("Backbuffer {}: {:X}", i, (size_t) backBuffer);
+                // FFXIV: release only our GetBuffer reference; other owners must release their own.
                 auto refCount = backBuffer->Release();
-                while (refCount > XEFG_RESOURCE_REF_LIMIT)
+                while (State::Instance().gameExe != "ffxiv_dx11.exe" && refCount > XEFG_RESOURCE_REF_LIMIT)
                 {
                     LOG_DEBUG("Releasing backbuffer {}: RefCount {}", i, refCount);
                     refCount = backBuffer->Release();
@@ -969,8 +970,9 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
             if (bbResult == S_OK)
             {
                 LOG_DEBUG("Backbuffer {}: {:X}", i, (size_t) backBuffer);
+                // FFXIV: release only our GetBuffer reference; other owners must release their own.
                 auto refCount = backBuffer->Release();
-                while (refCount > XEFG_RESOURCE_REF_LIMIT)
+                while (State::Instance().gameExe != "ffxiv_dx11.exe" && refCount > XEFG_RESOURCE_REF_LIMIT)
                 {
                     LOG_DEBUG("Releasing backbuffer {}: RefCount {}", i, refCount);
                     refCount = backBuffer->Release();
@@ -1387,8 +1389,9 @@ ULONG FGHooks::hkFGRelease(IUnknown* This)
                     if (bbResult == S_OK)
                     {
                         LOG_DEBUG("Backbuffer {}: {:X}", i, (size_t) backBuffer);
-                        auto refCount = backBuffer->Release();
-                        while (refCount > XEFG_RESOURCE_REF_LIMIT)
+                        // FFXIV: release only our GetBuffer reference; other owners must release their own.
+                auto refCount = backBuffer->Release();
+                        while (State::Instance().gameExe != "ffxiv_dx11.exe" && refCount > XEFG_RESOURCE_REF_LIMIT)
                         {
                             LOG_DEBUG("Releasing backbuffer {}: RefCount {}", i, refCount);
                             refCount = backBuffer->Release();

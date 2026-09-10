@@ -110,6 +110,9 @@ class IFeature
     // Set on a feature that is itself the enlargement half of another. Such a feature never splits in
     // turn: it is the half that does the enlarging, and it writes at display resolution.
     bool _isEnlargementStage = false;
+    // Feature output size is fixed at creation; the input subrect can change each frame.
+    unsigned int _splitOutputWidth = 0;
+    unsigned int _splitOutputHeight = 0;
 
     // Throttle for the "asked for, not taken" warning, per feature rather than per process. It was a
     // function-level static, which several features share: with a bridge there are at least two live
@@ -163,8 +166,8 @@ class IFeature
     // its own NGX feature.
     bool DualFeatureSplit() const;
 
-    virtual unsigned int TargetWidth() { return DualFeatureSplit() ? _renderWidth : _targetWidth; };
-    virtual unsigned int TargetHeight() { return DualFeatureSplit() ? _renderHeight : _targetHeight; };
+    virtual unsigned int TargetWidth() { return DualFeatureSplit() ? _splitOutputWidth : _targetWidth; };
+    virtual unsigned int TargetHeight() { return DualFeatureSplit() ? _splitOutputHeight : _targetHeight; };
     virtual unsigned int RenderWidth() { return _renderWidth; };
     virtual unsigned int RenderHeight() { return _renderHeight; };
     virtual NVSDK_NGX_PerfQuality_Value PerfQualityValue() { return _perfQualityValue; }

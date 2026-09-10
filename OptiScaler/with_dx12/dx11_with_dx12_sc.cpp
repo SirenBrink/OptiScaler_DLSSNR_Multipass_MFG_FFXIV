@@ -399,6 +399,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetDesc(DXGI_SWAP_CHAIN_DESC* pDesc)
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat,
                                                      UINT SwapChainFlags)
 {
+    MenuOverlayDx::ScopedResize overlayResize;
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers: count {}, size {}x{}, format {}, flags {:X}", BufferCount, Width, Height,
               (UINT) NewFormat, SwapChainFlags);
 
@@ -608,6 +609,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
                                                       UINT SwapChainFlags, const UINT* pCreationNodeMask,
                                                       IUnknown* const* ppPresentQueue)
 {
+    MenuOverlayDx::ScopedResize overlayResize;
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers1: count {}, size {}x{}, format {}, flags {:X}", BufferCount, Width, Height,
               (UINT) Format, SwapChainFlags);
 

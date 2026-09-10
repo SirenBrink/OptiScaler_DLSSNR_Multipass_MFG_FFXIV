@@ -7,6 +7,15 @@
 
 namespace MenuOverlayDx
 {
+// Suppresses reentrant and concurrent overlay presents until a resize completes.
+class ScopedResize
+{
+  public:
+    ScopedResize();
+    ~ScopedResize();
+    ScopedResize(const ScopedResize&) = delete;
+    ScopedResize& operator=(const ScopedResize&) = delete;
+};
 ID3D12GraphicsCommandList* MenuCommandList();
 void CleanupRenderTarget(bool clearQueue, HWND hWnd);
 void Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,

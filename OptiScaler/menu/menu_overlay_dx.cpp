@@ -10,6 +10,20 @@
 #include <imgui/imgui_impl_dx12.h>
 #include <imgui/imgui_impl_win32.h>
 
+#include <mutex>
+static std::recursive_mutex overlayRenderMutex;
+static unsigned int overlayResizeDepth = 0;
+MenuOverlayDx::ScopedResize::ScopedResize()
+{
+    const std::lock_guard<std::recursive_mutex> lock(overlayRenderMutex);
+    ++overlayResizeDepth;
+}
+MenuOverlayDx::ScopedResize::~ScopedResize()
+{
+    const std::lock_guard<std::recursive_mutex> lock(overlayRenderMutex);
+    --overlayResizeDepth;
+}
+
 // menu
 static int const NUM_BACK_BUFFERS = 8;
 static int const SRV_HEAP_SIZE = 64;
@@ -509,6 +523,7 @@ ID3D12GraphicsCommandList* MenuOverlayDx::MenuCommandList() { return g_pd3dComma
 
 void MenuOverlayDx::CleanupRenderTarget(bool clearQueue, HWND hWnd)
 {
+    const std::lock_guard<std::recursive_mutex> lock(overlayRenderMutex);
     LOG_FUNC();
 
     auto fg = State::Instance().currentFG;
@@ -528,6 +543,11 @@ void MenuOverlayDx::CleanupRenderTarget(bool clearQueue, HWND hWnd)
 void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
                             const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP)
 {
+    // XeFG may present internally while ResizeBuffers is still on the stack.
+    // Do not block its worker or rebuild resources released for that resize.
+    const std::unique_lock<std::recursive_mutex> lock(overlayRenderMutex, std::try_to_lock);
+    if (!lock.owns_lock() || overlayResizeDepth != 0)
+        return;
     if (!Config::Instance()->OverlayMenu.value_or_default())
     {
         MenuOverlayBase::Present();
