@@ -3,10 +3,6 @@
 #include <d3d12.h>
 #include <string>
 
-#include <array>
-#include <optional>
-#include <string>
-
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <nvsdk_ngx.h>
 
@@ -52,39 +48,7 @@ void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramet
                            unsigned long long submissionEpoch = 0, bool rayReconstruction = false,
                            unsigned int guideSourceWidth = 0, unsigned int guideSourceHeight = 0);
 
-// The same pass, run on the frame the upscaler is about to read rather than on the one it wrote.
-//
-// Experimental. The model is shown the game's render-resolution colour buffer, so it costs what that
-// resolution costs rather than what the display resolution costs, and it sees rendered samples
-// instead of the upscaler's reconstruction. Against that: colour arriving here is jittered per frame
-// and the model takes no jitter offset, so its history reprojects against an offset it cannot see.
-//
-// The edit lands on a surface of ours. The caller substitutes it for the upscale and puts the game's
-// own buffer back afterwards.
-void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
-                           ID3D12CommandQueue* timingQueue = nullptr);
 
-// The surface EvaluateBeforeUpscale wrote, or null when this frame's pass did not run.
-ID3D12Resource* PreUpscaleResult();
-
-// The pass as one stage of an upscaler's own pipeline, on two frames the caller already holds.
-//
-// Everything the model needs beyond the two frames -- depth, motion vectors, the create flags, the
-// reset -- still comes from the parameter block, because those are the game's and unchanged by where
-// the stage sits. Answers whether the edit reached dest; false leaves dest untouched.
-bool EvaluateStage(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params, ID3D12Resource* source,
-                   ID3D12Resource* dest, ID3D12CommandQueue* timingQueue = nullptr);
-
-// The surface the stage before this one should write, matched to the frame this one will write.
-// Rebuilt when that frame changes size or format. Owned here, so the caller holds a borrowed pointer.
-ID3D12Resource* StageInputSurface(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* like);
-
-// Whether the model is being carried by an upscaler's own pipeline: the arrangement is switched on
-// and has been seen to work. EvaluateAfterUpscale asks this and declines when it answers yes.
-//
-// Both halves matter. Asking only the setting made the model silent whenever the split did not apply;
-// asking only what happened would keep declining after the setting was turned off.
-bool StageCarriesTheModel();
 
 // Frame generation titles tag their UI layer through Streamline; a copy of it makes the HUD mask
 // exact at the finished frame. Called at tag time.

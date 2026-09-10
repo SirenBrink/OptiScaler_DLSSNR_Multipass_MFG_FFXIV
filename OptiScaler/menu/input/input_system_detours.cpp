@@ -7,8 +7,6 @@
 #include <vector>
 #include <string_view>
 
-// #define USE_HID_HOOKS
-
 static bool messageHooks = false;
 static bool keyStateHooks = false;
 static bool getPosHooks = false;
@@ -360,7 +358,6 @@ bool InstallHooks()
             LOG_ERROR("Win32 message hook installation failed result:{}", result);
     }
 
-#ifdef USE_HID_HOOKS
     if (!State::Instance().isRunningOnLinux && !hidHooks)
     {
         DetourTransactionBegin();
@@ -380,7 +377,6 @@ bool InstallHooks()
         else
             LOG_ERROR("Win32 HID hook installation failed result:{}", result);
     }
-#endif //  USE_HID_HOOKS
 
     if (!rawHooks)
     {
@@ -446,128 +442,102 @@ bool InstallHooks()
     if (!positionHooks && !positionIATHooks)
         positionIATHooks = InstallCursorIatHooks();
 
-#ifdef USE_HID_HOOKS
-    const bool hidReady = State::Instance().isRunningOnLinux || hidHooks;
     _state.HooksInstalled = messageHooks && keyStateHooks && getPosHooks && clipCursorHooks && message2Hooks &&
-                            hidReady && rawHooks && windowsHooks && (positionHooks || positionIATHooks);
-#else
-    _state.HooksInstalled = messageHooks && keyStateHooks && getPosHooks && clipCursorHooks && message2Hooks &&
-                            rawHooks && windowsHooks && (positionHooks || positionIATHooks);
-#endif // USE_HID_HOOKS
+                            hidHooks && rawHooks && windowsHooks && (positionHooks || positionIATHooks);
 
     return _state.HooksInstalled;
 }
 
-bool RemoveHooks()
+void RemoveHooks()
 {
-    const bool hasDetourHooks = messageHooks || keyStateHooks || getPosHooks || clipCursorHooks || message2Hooks ||
-                                hidHooks || rawHooks || windowsHooks || positionHooks;
-
-    if (!hasDetourHooks && !positionIATHooks)
-    {
-        _state.HooksInstalled = false;
-        return true;
-    }
+    if (!_state.HooksInstalled)
+        return;
 
     LOG_INFO("removing Win32 input hooks");
 
-    LONG result = NO_ERROR;
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
 
-    if (hasDetourHooks)
+    if (messageHooks)
     {
-        DetourTransactionBegin();
-        DetourUpdateThread(GetCurrentThread());
+        DetourDetach(reinterpret_cast<PVOID*>(&o_PeekMessageA), hkPeekMessageA);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_PeekMessageW), hkPeekMessageW);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_GetMessageA), hkGetMessageA);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_GetMessageW), hkGetMessageW);
+        messageHooks = false;
+    }
 
-        if (messageHooks)
-        {
-            DetourDetach(reinterpret_cast<PVOID*>(&o_PeekMessageA), hkPeekMessageA);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_PeekMessageW), hkPeekMessageW);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_GetMessageA), hkGetMessageA);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_GetMessageW), hkGetMessageW);
-        }
+    if (keyStateHooks)
+    {
+        DetourDetach(reinterpret_cast<PVOID*>(&o_GetAsyncKeyState), hkGetAsyncKeyState);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_GetKeyState), hkGetKeyState);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_GetKeyboardState), hkGetKeyboardState);
+        keyStateHooks = false;
+    }
 
-        if (keyStateHooks)
-        {
-            DetourDetach(reinterpret_cast<PVOID*>(&o_GetAsyncKeyState), hkGetAsyncKeyState);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_GetKeyState), hkGetKeyState);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_GetKeyboardState), hkGetKeyboardState);
-        }
+    if (getPosHooks)
+    {
+        DetourDetach(reinterpret_cast<PVOID*>(&o_GetMessagePos), hkGetMessagePos);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_GetMouseMovePointsEx), hkGetMouseMovePointsEx);
+        getPosHooks = false;
+    }
 
-        if (getPosHooks)
-        {
-            DetourDetach(reinterpret_cast<PVOID*>(&o_GetMessagePos), hkGetMessagePos);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_GetMouseMovePointsEx), hkGetMouseMovePointsEx);
-        }
+    if (clipCursorHooks)
+    {
+        DetourDetach(reinterpret_cast<PVOID*>(&o_ClipCursor), hkClipCursor);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_GetClipCursor), hkGetClipCursor);
+        clipCursorHooks = false;
+    }
 
-        if (clipCursorHooks)
-        {
-            DetourDetach(reinterpret_cast<PVOID*>(&o_ClipCursor), hkClipCursor);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_GetClipCursor), hkGetClipCursor);
-        }
+    if (message2Hooks)
+    {
+        DetourDetach(reinterpret_cast<PVOID*>(&o_SendInput), hkSendInput);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_mouse_event), hkmouse_event);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_PostMessageA), hkPostMessageA);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_PostMessageW), hkPostMessageW);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_SendMessageA), hkSendMessageA);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_SendMessageW), hkSendMessageW);
+        message2Hooks = false;
+    }
 
-        if (message2Hooks)
-        {
-            DetourDetach(reinterpret_cast<PVOID*>(&o_SendInput), hkSendInput);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_mouse_event), hkmouse_event);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_PostMessageA), hkPostMessageA);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_PostMessageW), hkPostMessageW);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_SendMessageA), hkSendMessageA);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_SendMessageW), hkSendMessageW);
-        }
+    if (!State::Instance().isRunningOnLinux && hidHooks)
+    {
+        DetourDetach(reinterpret_cast<PVOID*>(&o_CreateFileA), hkCreateFileA);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_CreateFileW), hkCreateFileW);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_ReadFile), hkReadFile);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_DeviceIoControl), hkDeviceIoControl);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_CloseHandle), hkCloseHandle);
+        hidHooks = false;
+    }
 
-        if (hidHooks)
-        {
-            DetourDetach(reinterpret_cast<PVOID*>(&o_CreateFileA), hkCreateFileA);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_CreateFileW), hkCreateFileW);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_ReadFile), hkReadFile);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_DeviceIoControl), hkDeviceIoControl);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_CloseHandle), hkCloseHandle);
-        }
+    if (rawHooks)
+    {
+        DetourDetach(reinterpret_cast<PVOID*>(&o_GetRawInputData), hkGetRawInputData);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_GetRawInputBuffer), hkGetRawInputBuffer);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_RegisterRawInputDevices), hkRegisterRawInputDevices);
+        rawHooks = false;
+    }
 
-        if (rawHooks)
-        {
-            DetourDetach(reinterpret_cast<PVOID*>(&o_GetRawInputData), hkGetRawInputData);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_GetRawInputBuffer), hkGetRawInputBuffer);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_RegisterRawInputDevices), hkRegisterRawInputDevices);
-        }
+    if (windowsHooks)
+    {
+        DetourDetach(reinterpret_cast<PVOID*>(&o_SetWindowsHookExA), hkSetWindowsHookExA);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_SetWindowsHookExW), hkSetWindowsHookExW);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_UnhookWindowsHookEx), hkUnhookWindowsHookEx);
+        windowsHooks = false;
+    }
 
-        if (windowsHooks)
-        {
-            DetourDetach(reinterpret_cast<PVOID*>(&o_SetWindowsHookExA), hkSetWindowsHookExA);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_SetWindowsHookExW), hkSetWindowsHookExW);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_UnhookWindowsHookEx), hkUnhookWindowsHookEx);
-        }
+    if (positionHooks)
+    {
+        DetourDetach(reinterpret_cast<PVOID*>(&o_GetCursorPos), hkGetCursorPos);
+        DetourDetach(reinterpret_cast<PVOID*>(&o_SetCursorPos), hkSetCursorPos);
 
-        if (positionHooks)
-        {
-            DetourDetach(reinterpret_cast<PVOID*>(&o_GetCursorPos), hkGetCursorPos);
-            DetourDetach(reinterpret_cast<PVOID*>(&o_SetCursorPos), hkSetCursorPos);
+        if (o_GetPhysicalCursorPos != nullptr)
+            DetourDetach(reinterpret_cast<PVOID*>(&o_GetPhysicalCursorPos), hkGetPhysicalCursorPos);
 
-            if (o_GetPhysicalCursorPos != nullptr)
-                DetourDetach(reinterpret_cast<PVOID*>(&o_GetPhysicalCursorPos), hkGetPhysicalCursorPos);
+        if (o_SetPhysicalCursorPos != nullptr)
+            DetourDetach(reinterpret_cast<PVOID*>(&o_SetPhysicalCursorPos), hkSetPhysicalCursorPos);
 
-            if (o_SetPhysicalCursorPos != nullptr)
-                DetourDetach(reinterpret_cast<PVOID*>(&o_SetPhysicalCursorPos), hkSetPhysicalCursorPos);
-        }
-
-        result = DetourTransactionCommit();
-
-        if (result == NO_ERROR)
-        {
-            messageHooks = false;
-            keyStateHooks = false;
-            getPosHooks = false;
-            clipCursorHooks = false;
-            message2Hooks = false;
-            hidHooks = false;
-            rawHooks = false;
-            windowsHooks = false;
-            positionHooks = false;
-        }
-        else
-        {
-            LOG_WARN("Win32 input hook removal failed result:{}; retaining hook state for a safe retry", result);
-        }
+        positionHooks = false;
     }
 
     if (positionIATHooks)
@@ -576,11 +546,11 @@ bool RemoveHooks()
         positionIATHooks = false;
     }
 
-    const bool hidReady = State::Instance().isRunningOnLinux || hidHooks;
-    _state.HooksInstalled = messageHooks && keyStateHooks && getPosHooks && clipCursorHooks && message2Hooks &&
-                            hidReady && rawHooks && windowsHooks && (positionHooks || positionIATHooks);
+    const LONG result = DetourTransactionCommit();
+    if (result != NO_ERROR)
+        LOG_WARN("Win32 input hook removal completed with result:{}", result);
 
-    return result == NO_ERROR;
+    _state.HooksInstalled = false;
 }
 
 } // namespace OptiInput

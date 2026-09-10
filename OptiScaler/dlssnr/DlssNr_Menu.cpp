@@ -116,49 +116,6 @@ static bool InheritedProfileCombo(const char* label, CustomOptional<uint32_t, No
     return true;
 }
 
-// One per-pass control: a checkbox that decides whether this pass has an opinion, and the slider it
-// enables. Unchecked follows the global setting, which is what an untouched pass does.
-static bool PassOverrideSlider(const char* label, std::optional<float>* own, float global, float mn,
-                               float mx, int pass)
-{
-    bool changed = false;
-    bool has = own->has_value();
-
-    const std::string useId = std::string("##use") + label + std::to_string(pass);
-
-    if (ImGui::Checkbox(useId.c_str(), &has))
-    {
-        if (has)
-            *own = global;
-        else
-            own->reset();
-
-        changed = true;
-    }
-
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!has);
-
-    float value = own->value_or(global);
-    const std::string sliderId = std::string(label) + "##" + std::to_string(pass);
-
-    if (ImGui::SliderFloat(sliderId.c_str(), &value, mn, mx, "%.2f") && has)
-    {
-        *own = value;
-        changed = true;
-    }
-
-    ImGui::EndDisabled();
-
-    if (!has)
-    {
-        ImGui::SameLine();
-        ImGui::TextDisabled("global");
-    }
-
-    return changed;
-}
-
 void RenderMenu(Config* config, float menuResScale)
 {
 

@@ -5,8 +5,6 @@
 #include <framegen/dlssg/MfgUnlock.h>
 #include <DllNames.h>
 
-#include <framegen/dlssg/MfgUnlock.h>
-
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/Kernel32_Proxy.h>
 #include <proxies/Dxgi_Proxy.h>

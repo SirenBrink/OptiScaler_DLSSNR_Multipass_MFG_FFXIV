@@ -114,9 +114,6 @@ class IFeature
     static unsigned int GetNextHandleId() { return handleCounter++; }
     int GetFeatureFlags() const { return _featureFlags; }
 
-    void MarkEnlargementStage() { _isEnlargementStage = true; }
-    bool IsEnlargementStage() const { return _isEnlargementStage; }
-
     virtual bool IsWithDx12() = 0;
     virtual feature_version Version() = 0;
     virtual Upscaler GetUpscalerType() const = 0;
@@ -133,16 +130,8 @@ class IFeature
     virtual bool UpdateOutputResolution(const NVSDK_NGX_Parameter* InParameters);
     virtual unsigned int DisplayWidth() { return _displayWidth; };
     virtual unsigned int DisplayHeight() { return _displayHeight; };
-    // Where the split lives, rather than in _targetWidth.
-    //
-    // Every upscaler's ProcessInitParams assigns _targetWidth from the display size after
-    // SetInitParameters has run, so a value written there does not survive to the build. Answering
-    // here instead puts the split ahead of all of them, including the OutWidth each one publishes to
-    // its own NGX feature.
-    bool DualFeatureSplit() const;
-
-    virtual unsigned int TargetWidth() { return DualFeatureSplit() ? _renderWidth : _targetWidth; };
-    virtual unsigned int TargetHeight() { return DualFeatureSplit() ? _renderHeight : _targetHeight; };
+    virtual unsigned int TargetWidth() { return _targetWidth; };
+    virtual unsigned int TargetHeight() { return _targetHeight; };
     virtual unsigned int RenderWidth() { return _renderWidth; };
     virtual unsigned int RenderHeight() { return _renderHeight; };
     virtual NVSDK_NGX_PerfQuality_Value PerfQualityValue() { return _perfQualityValue; }

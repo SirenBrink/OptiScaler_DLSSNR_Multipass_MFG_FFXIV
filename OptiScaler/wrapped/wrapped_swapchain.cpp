@@ -325,12 +325,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     }
 
     // DXVK check, it's here because of upscaler time calculations
-    //
-    // D3D11 only. vkd3d-proton sets usesDxvk as well, and a D3D12 title returning here leaves
-    // MenuOverlayVk as the only ImGui backend: it submits on a queue of its own into the present path
-    // Streamline owns, which removes the device. Falling through reaches MenuOverlayDx::Present, which
-    // draws on the game's queue.
-    if (IdentifyGpu::getPrimaryGpu().usesDxvk && isD3D11)
+    if (IdentifyGpu::getPrimaryGpu().usesDxvk)
     {
         if (pPresentParameters == nullptr)
             presentResult = pSwapChain->Present(SyncInterval, Flags);
@@ -458,7 +453,7 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* p
     _real->AddRef();
     auto refCount = _real->Release();
 
-    CheckForHdrOutput();
+    _device2 = _device;
 
     LOG_INFO("{} created, real: {:X}, refCount: {}", _id, (UINT64) real, refCount);
 }
@@ -971,8 +966,6 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
         State::Instance().currentFG->Mutex.unlockThis(3);
     }
 
-    CheckForHdrOutput();
-
     return result;
 }
 
@@ -1129,30 +1122,10 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::CheckColorSpaceSupport(DXGI_CO
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::SetColorSpace1(DXGI_COLOR_SPACE_TYPE ColorSpace)
 {
-    if (ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 ||
-        ColorSpace == DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020 ||
-        ColorSpace == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020 ||
-        ColorSpace == DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020)
-    {
-        State::Instance().swapchainEncoding = ColorEncoding::PQ;
-    }
-    else if (ColorSpace == DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020 ||
-             ColorSpace == DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020)
-    {
-        State::Instance().swapchainEncoding = ColorEncoding::HLG;
-    }
-    else if (ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709)
-    {
-        State::Instance().swapchainEncoding = ColorEncoding::ScRGB;
-    }
-    else
-    {
-        State::Instance().swapchainEncoding = ColorEncoding::SDR;
-    }
-
-    CheckForHdrOutput();
-
-    MenuOverlayDx::CleanupRenderTarget(true, _handle);
+    State::Instance().isHdrActive = ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 ||
+                                    ColorSpace == DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020 ||
+                                    ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020 ||
+                                    ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
 
     // What one unit of the buffer means, which is the question the white point is really asking.
     //
@@ -1443,8 +1416,6 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
         LOG_TRACE("Releasing ffxMutex: {}", State::Instance().currentFG->Mutex.getOwner());
         State::Instance().currentFG->Mutex.unlockThis(3);
     }
-
-    CheckForHdrOutput();
 
     return result;
 }
