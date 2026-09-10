@@ -413,10 +413,14 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nUnlike 'Run before the upscaler', the frame here has already been through"
                        "\ntemporal accumulation, so the subpixel jitter the model cannot be told about is"
                        "\nresolved before it sees anything."
-                       "\n\nThe enlargement is the output scaler, not the upscaler's own. Takes effect when"
-                       "\nthe upscaler is next built, so restart or change quality after ticking it."
+                       "\n\nThe enlargement is the output scaler, not the upscaler's own. Takes effect after"
+                       "\nrestarting the game. Quality changes do not apply this setting."
                        "\n\nDoes nothing when render resolution already equals display resolution -- at"
                        "\nDLAA there is no smaller frame to run on.");
+
+            if (dual != config->DlssNrDualFeatureActive())
+                ImGui::TextDisabled("Restart game to apply (this session: %s).",
+                                    config->DlssNrDualFeatureActive() ? "enabled" : "disabled");
 
             if (dual)
             {

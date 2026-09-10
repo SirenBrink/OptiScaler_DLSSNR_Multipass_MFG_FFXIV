@@ -44,6 +44,7 @@ Config::Config()
 {
     absoluteFileName = Util::DllPath().parent_path() / fileName;
     Reload(absoluteFileName);
+    _dlssNrDualFeatureActive = DlssNrDualFeature.value_or_default();
 }
 
 bool Config::Reload(std::filesystem::path iniPath)

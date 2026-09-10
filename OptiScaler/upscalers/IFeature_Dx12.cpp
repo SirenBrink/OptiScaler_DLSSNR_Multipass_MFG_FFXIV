@@ -223,7 +223,7 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
 
     // Asked for and not taken. The split is decided from three numbers settled when the feature was
     // built, so a mismatch here is silent and looks exactly like the option doing nothing.
-    if (!useDualFeature && !_isEnlargementStage && Config::Instance()->DlssNrDualFeature.value_or_default() &&
+    if (!useDualFeature && !_isEnlargementStage && Config::Instance()->DlssNrDualFeatureActive() &&
         Config::Instance()->DlssNrEnabled.value_or_default())
     {
         if (_saidNotTakenForTarget != TargetWidth())
@@ -307,16 +307,39 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
               // Dispatch
               [&](ID3D12Resource* input, ID3D12Resource* output) -> bool
               {
-                  // The game's own block, borrowed. Everything the enlarging upscaler needs per frame --
-                  // motion vectors, depth, jitter, the reset -- is the game's and already in it; only
-                  // the two frames differ from what the game described.
+                  // Borrow the game's guides, but test unjittered color for the second DLSS pass.
                   ID3D12Resource* gameColor = nullptr;
                   gameColor = PipelineResource(InParameters, NVSDK_NGX_Parameter_Color);
 
                   SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Color, input);
                   SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Output, output);
 
+                  float savedJitterX = 0.0f, savedJitterY = 0.0f;
+                  const bool zeroEnlargerJitter = State::Instance().gameExe == "ffxiv_dx11.exe" &&
+                      Config::Instance()->Dx11Upscaler.value_or_default() == Upscaler::DLSS_on12 &&
+                      EnlargerType == Upscaler::DLSS &&
+                      InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &savedJitterX) == NVSDK_NGX_Result_Success &&
+                      InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &savedJitterY) == NVSDK_NGX_Result_Success;
+                  if (zeroEnlargerJitter)
+                  {
+                      InParameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, 0.0f);
+                      InParameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, 0.0f);
+                      static bool logged = false;
+                      if (!logged)
+                      {
+                          LOG_INFO("FFXIV split jitter test: enlargement jitter ({}, {}) -> (0, 0); restoring after evaluation",
+                                   savedJitterX, savedJitterY);
+                          logged = true;
+                      }
+                  }
+
                   const bool ok = Enlarger->Evaluate(InCommandList, InParameters);
+
+                  if (zeroEnlargerJitter)
+                  {
+                      InParameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, savedJitterX);
+                      InParameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, savedJitterY);
+                  }
 
                   SetPipelineResource(InParameters, NVSDK_NGX_Parameter_Color, gameColor);
 
@@ -459,7 +482,7 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
 
     static thread_local std::string lastSplitIdentity;
     const auto splitIdentity = FeatureIdentity();
-    const bool reportSplit = Config::Instance()->DlssNrDualFeature.value_or_default() && splitIdentity != lastSplitIdentity;
+    const bool reportSplit = Config::Instance()->DlssNrDualFeatureActive() && splitIdentity != lastSplitIdentity;
     if (reportSplit)
     {
         lastSplitIdentity = splitIdentity;

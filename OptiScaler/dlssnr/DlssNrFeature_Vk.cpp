@@ -1196,7 +1196,7 @@ VkImageInfo StageInputSurfaceVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPh
     return info;
 }
 
-bool StageCarriesTheModelVk() { return g_vk.stageEverRan && Config::Instance()->DlssNrDualFeature.value_or_default(); }
+bool StageCarriesTheModelVk() { return g_vk.stageEverRan && Config::Instance()->DlssNrDualFeatureActive(); }
 
 void ShutdownVk(bool deviceAlive)
 {

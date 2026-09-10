@@ -657,7 +657,7 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         }
 
         const bool createSplit = _renderWidth > 0 && _renderHeight > 0 && _renderWidth < _displayWidth &&
-                                 Config::Instance()->DlssNrDualFeature.value_or_default() &&
+                                 Config::Instance()->DlssNrDualFeatureActive() &&
                                  Config::Instance()->DlssNrEnabled.value_or_default();
         _splitOutputWidth = createSplit ? _renderWidth : 0;
         _splitOutputHeight = createSplit ? _renderHeight : 0;
@@ -673,7 +673,7 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         // the dual-feature failure keeps raising is which of them received which resolutions.
         LOG_DEBUG("Feature initialised: {} (asked for {}x{} -> {}x{}, quality {}, dual feature setting {})",
                   FeatureIdentity(), width, height, outWidth, outHeight, pqValue,
-                  Config::Instance()->DlssNrDualFeature.value_or_default());
+                  Config::Instance()->DlssNrDualFeatureActive());
 
         LOG_INFO("Render Resolution: {0}x{1}, Display Resolution {2}x{3}, Quality: {4}", _renderWidth, _renderHeight,
                  _displayWidth, _displayHeight, pqValue);

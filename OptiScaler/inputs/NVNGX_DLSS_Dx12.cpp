@@ -1166,7 +1166,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
             // The dual-feature arrangement runs the model inside the upscaler's own pipeline instead.
             // Both would be the same model twice on the same frame.
             if (!Config::Instance()->DlssNrPreUpscale.value_or_default() ||
-                Config::Instance()->DlssNrDualFeature.value_or_default() ||
+                Config::Instance()->DlssNrDualFeatureActive() ||
                 !Config::Instance()->DlssNrEnabled.value_or_default() || f == NVSDK_NGX_Feature_FrameGeneration ||
                 cmdList == nullptr || p == nullptr)
                 return;

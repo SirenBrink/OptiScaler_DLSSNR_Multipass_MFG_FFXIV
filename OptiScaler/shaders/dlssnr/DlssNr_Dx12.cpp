@@ -3252,7 +3252,7 @@ bool EvaluateStage(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* para
 // Both halves of the question: the arrangement is switched on, and it has been seen to work. Asking
 // only the setting made the model silent whenever the split did not apply; asking only the flag would
 // keep declining after the setting was turned off.
-bool StageCarriesTheModel() { return g_nr.stageEverRan && Config::Instance()->DlssNrDualFeature.value_or_default(); }
+bool StageCarriesTheModel() { return g_nr.stageEverRan && Config::Instance()->DlssNrDualFeatureActive(); }
 
 ID3D12Resource* StageInputSurface(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* like)
 {

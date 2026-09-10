@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "SysUtils.h"
 #include "State.h"
@@ -225,6 +225,9 @@ class Config
 {
   public:
     Config();
+
+    // Pipeline placement is fixed for this process; the editable value is saved for next launch.
+    bool DlssNrDualFeatureActive() const { return _dlssNrDualFeatureActive; }
 
     // Init flags
     CustomOptional<bool, NoDefault> DepthInverted;
@@ -974,6 +977,7 @@ class Config
     static Config* Instance();
 
   private:
+    bool _dlssNrDualFeatureActive = false;
     inline static Config* _config;
     inline static std::vector<std::string> _log;
 

@@ -291,7 +291,7 @@ bool IFeature_Vk::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter* InP
 
     // Asked for and not taken. The split is decided from three numbers settled when the feature was
     // built, so a mismatch here is silent and looks exactly like the option doing nothing.
-    if (!useDualFeature && !_isEnlargementStage && Config::Instance()->DlssNrDualFeature.value_or_default() &&
+    if (!useDualFeature && !_isEnlargementStage && Config::Instance()->DlssNrDualFeatureActive() &&
         Config::Instance()->DlssNrEnabled.value_or_default())
     {
         static unsigned int saidTarget = 0;
