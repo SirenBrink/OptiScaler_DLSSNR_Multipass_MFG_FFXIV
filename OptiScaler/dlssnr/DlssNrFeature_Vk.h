@@ -3,7 +3,6 @@
 #include <vulkan/vulkan.h>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
-#include <shaders/Shader_Vk.h>
 
 #include <optional>
 #include <nvsdk_ngx.h>
@@ -44,36 +43,14 @@ namespace DlssNr
 // Safe to call every frame. It builds what it needs on first use and disables itself for the session
 // rather than retrying into a crash.
 void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* params, VkInstance instance,
-                            VkPhysicalDevice physicalDevice, VkDevice device);
+                            VkPhysicalDevice physicalDevice, VkDevice device, bool rayReconstruction = false,
+                            bool ranBefore = false);
 
-// The pass as one stage of an upscaler's own pipeline, on two frames the caller already holds.
-//
-// Everything the model needs beyond the two frames -- depth, motion vectors, the create flags, the
-// reset -- still comes from the parameter block, because those are the game's and unchanged by where
-// the stage sits. Answers whether the edit reached dest; false leaves dest untouched.
-//
-// Both images belong to the caller's pipeline, where surfaces rest in VK_IMAGE_LAYOUT_GENERAL between
-// stages. dest is written as a storage image and is bound in GENERAL without a transition, so it must
-// be in GENERAL on arrival. Declining puts source back in GENERAL as well, so a caller falling back to
-// a copy finds the layout it left.
-bool EvaluateStageVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* params, VkInstance instance,
-                     VkPhysicalDevice physicalDevice, VkDevice device, const VkImageInfo& source,
-                     const VkImageInfo& dest);
-
-// The surface the stage before this one should write. Owned here; caller borrows.
-// Rebuilt when the frame it must match changes size or format.
-//
-// Handed back in VK_IMAGE_LAYOUT_GENERAL, which is where an upscaler writing a storage image expects
-// to find its target and where the other stages of that pipeline leave theirs.
-VkImageInfo StageInputSurfaceVk(VkCommandBuffer cmdBuffer, VkDevice device, VkPhysicalDevice physicalDevice,
-                                const VkImageInfo& like);
-
-// Whether the model is being carried by an upscaler's own pipeline: the arrangement is switched on
-// and has been seen to work. EvaluateAfterUpscaleVk asks this and declines when it answers yes.
-//
-// Both halves matter. Asking only the setting made the model silent whenever the split did not apply;
-// asking only what happened would keep declining after the setting was turned off.
-bool StageCarriesTheModelVk();
+// Returns an owned, readable replacement Color, or null to leave the game's input unchanged.
+// The caller must restore the original Color parameter after the upscaler, on every exit.
+NVSDK_NGX_Resource_VK* EvaluateBeforeUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* params,
+                                             VkInstance instance, VkPhysicalDevice physicalDevice, VkDevice device,
+                                             bool& handled, bool rayReconstruction = false);
 
 // Whether the native Vulkan path is up, and why not if it is not.
 bool IsRunningVk();

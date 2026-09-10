@@ -72,14 +72,8 @@ std::wstring AnsiToWide(LPCSTR text)
     if (length <= 1)
         return {};
 
-    // MultiByteToWideChar includes the terminating NUL when cbMultiByte == -1.
-    // Allocate room for it, then remove it from the returned std::wstring.
-    std::wstring result(static_cast<std::size_t>(length), L'\0');
-
-    if (MultiByteToWideChar(CP_ACP, 0, text, -1, result.data(), length) != length)
-        return {};
-
-    result.resize(static_cast<std::size_t>(length - 1));
+    std::wstring result(static_cast<std::size_t>(length - 1), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, text, -1, &result[0], length);
     return result;
 }
 
@@ -398,15 +392,12 @@ BOOL WINAPI hkDeviceIoControl(HANDLE device, DWORD controlCode, LPVOID inBuffer,
 
 BOOL WINAPI hkCloseHandle(HANDLE handle)
 {
-    const BOOL result = o_CloseHandle(handle);
-
-    if (result)
     {
         std::unique_lock lock(_state.Mutex);
         ClearHidHandleLocked(handle);
     }
 
-    return result;
+    return o_CloseHandle(handle);
 }
 
 } // namespace OptiInput

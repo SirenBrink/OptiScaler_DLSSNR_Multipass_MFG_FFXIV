@@ -388,6 +388,64 @@ template <typename T> NVSDK_NGX_Result NVNGX_Parameters::getT(const char* key, T
     return NVSDK_NGX_Result_Success;
 }
 
+/// @brief The preset the game asked for, or the one the user chose in its place.
+///
+/// Everything downstream of the optimal-settings query is indexed by the preset: the ratio lookup
+/// above, the render resolution handed back, and the dynamic-resolution window the game is then
+/// allowed to move inside. A game that exposes no preset selector decides all of that for itself, and
+/// the per-preset ratios become unreachable -- the user's setting lands in a slot the game never asks
+/// for.
+///
+/// Answering with a different preset here is the one substitution that leaves nothing inconsistent:
+/// the game receives it as the reply to its own question and allocates to match, rather than being
+/// told after the fact that the size it already chose was wrong.
+static NVSDK_NGX_PerfQuality_Value EffectivePerfQuality(const NVSDK_NGX_PerfQuality_Value asked)
+{
+    const int forced = Config::Instance()->ForcePerfQuality.value_or_default();
+
+    if (forced < 0)
+        return asked;
+
+    // DLAA is the last value in the enum. Anything past it is a typo in the ini, not a preset, and
+    // silently clamping it would hide that.
+    if (forced > (int) NVSDK_NGX_PerfQuality_Value_DLAA)
+    {
+        LOG_WARN("ForcePerfQuality is {}, which is not a quality value -- leaving the game's choice alone", forced);
+        return asked;
+    }
+
+    const auto chosen = (NVSDK_NGX_PerfQuality_Value) forced;
+
+    if (chosen != asked)
+        LOG_DEBUG("ForcePerfQuality: answering {} where the game asked for {}", (int) chosen, (int) asked);
+
+    return chosen;
+}
+
+// The last answer given, so the menu can report what is actually in force rather than what is
+// selected. Written from the render thread and read from the overlay, so a mutex rather than a
+// scatter of atomics -- it is touched a handful of times per session.
+static std::mutex g_qualityAnswerMutex;
+static ForcedQualityStatus g_qualityAnswer;
+
+static void RecordQualityAnswer(NVSDK_NGX_PerfQuality_Value answered, unsigned int renderWidth,
+                                unsigned int renderHeight, unsigned int displayWidth, unsigned int displayHeight)
+{
+    const std::lock_guard<std::mutex> lock(g_qualityAnswerMutex);
+    ++g_qualityAnswer.queries;
+    g_qualityAnswer.quality = (int) answered;
+    g_qualityAnswer.renderWidth = renderWidth;
+    g_qualityAnswer.renderHeight = renderHeight;
+    g_qualityAnswer.displayWidth = displayWidth;
+    g_qualityAnswer.displayHeight = displayHeight;
+}
+
+ForcedQualityStatus LastQualityAnswer()
+{
+    const std::lock_guard<std::mutex> lock(g_qualityAnswerMutex);
+    return g_qualityAnswer;
+}
+
 NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_Parameter* InParams)
 {
     unsigned int Width;
@@ -402,7 +460,8 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_
         InParams->Get(NVSDK_NGX_Parameter_PerfQualityValue, &PerfQualityValue) != NVSDK_NGX_Result_Success)
         return NVSDK_NGX_Result_Fail;
 
-    auto enumPQValue = (NVSDK_NGX_PerfQuality_Value) PerfQualityValue;
+    auto enumPQValue = EffectivePerfQuality((NVSDK_NGX_PerfQuality_Value) PerfQualityValue);
+    PerfQualityValue = (int) enumPQValue;
 
     LOG_DEBUG("Display Resolution: {0}x{1}", Width, Height);
 
@@ -477,7 +536,8 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_
     InParams->Set(NVSDK_NGX_Parameter_OutHeight, OutHeight);
 
     // DRS minimum resolution
-    if (Config::Instance()->DrsMinOverrideEnabled.value_or_default() || enumPQValue == NVSDK_NGX_PerfQuality_Value_DLAA)
+    if (Config::Instance()->DrsMinOverrideEnabled.value_or_default() ||
+        enumPQValue == NVSDK_NGX_PerfQuality_Value_DLAA)
     {
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Width, OutWidth);
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Min_Render_Height, OutHeight);
@@ -510,6 +570,17 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_
 
     // DRS maximum resolution
 
+    // Deliberately not widened when a quality is forced.
+    //
+    // Forcing a preset changes the answer to "what would this quality render at". It does not change
+    // what the game renders -- that is the game's decision and OptiScaler never sees it until evaluate.
+    // FFXIV settles the point: it builds a Balanced feature and then submits a 3840x2160 subrect every
+    // frame regardless. Pinning the maximum to the forced optimal puts the game's own render size
+    // outside the legal window, and the runtime answers BAD00005 on every frame from then on.
+    //
+    // So the window has to contain both the forced optimal and whatever the game may actually submit,
+    // and the default arm already does that: maximum at display resolution, minimum at the usual half.
+    // Clamping is still available to anyone who asks for it explicitly.
     if (Config::Instance()->DrsMaxOverrideEnabled.value_or_default())
     {
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, OutWidth);
@@ -540,6 +611,9 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSS_GetOptimalSettingsCallback(NVSDK_NGX_
 
     LOG_DEBUG("NVSDK_NGX_DLSS_GetOptimalSettingsCallback: Display Resolution: {0}x{1} Render Resolution: {2}x{3}",
               Width, Height, OutWidth, OutHeight);
+
+    RecordQualityAnswer(enumPQValue, OutWidth, OutHeight, Width, Height);
+
     return NVSDK_NGX_Result_Success;
 }
 
@@ -558,7 +632,8 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSSD_GetOptimalSettingsCallback(NVSDK_NGX
         InParams->Get(NVSDK_NGX_Parameter_PerfQualityValue, &PerfQualityValue) != NVSDK_NGX_Result_Success)
         return NVSDK_NGX_Result_Fail;
 
-    auto enumPQValue = (NVSDK_NGX_PerfQuality_Value) PerfQualityValue;
+    auto enumPQValue = EffectivePerfQuality((NVSDK_NGX_PerfQuality_Value) PerfQualityValue);
+    PerfQualityValue = (int) enumPQValue;
 
     LOG_DEBUG("Display Resolution: {0}x{1}", Width, Height);
 
@@ -661,6 +736,17 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSSD_GetOptimalSettingsCallback(NVSDK_NGX
     }
 
     // DRS maximum resolution
+    // Deliberately not widened when a quality is forced.
+    //
+    // Forcing a preset changes the answer to "what would this quality render at". It does not change
+    // what the game renders -- that is the game's decision and OptiScaler never sees it until evaluate.
+    // FFXIV settles the point: it builds a Balanced feature and then submits a 3840x2160 subrect every
+    // frame regardless. Pinning the maximum to the forced optimal puts the game's own render size
+    // outside the legal window, and the runtime answers BAD00005 on every frame from then on.
+    //
+    // So the window has to contain both the forced optimal and whatever the game may actually submit,
+    // and the default arm already does that: maximum at display resolution, minimum at the usual half.
+    // Clamping is still available to anyone who asks for it explicitly.
     if (Config::Instance()->DrsMaxOverrideEnabled.value_or_default())
     {
         InParams->Set(NVSDK_NGX_Parameter_DLSS_Get_Dynamic_Max_Render_Width, OutWidth);
@@ -682,6 +768,9 @@ NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_DLSSD_GetOptimalSettingsCallback(NVSDK_NGX
     InParams->Set(NVSDK_NGX_EParameter_DLSSMode, NVSDK_NGX_DLSS_Mode_DLSS_DLISP);
 
     LOG_DEBUG("Display Resolution: {0}x{1} Render Resolution: {2}x{3}", Width, Height, OutWidth, OutHeight);
+
+    RecordQualityAnswer(enumPQValue, OutWidth, OutHeight, Width, Height);
+
     return NVSDK_NGX_Result_Success;
 }
 

@@ -37,15 +37,6 @@ class IFeature_Dx12 : public virtual IFeature
 
     std::unique_ptr<GpuTime_Dx12> UpscalerTime = nullptr;
 
-    // The second half, when Neural Rendering runs inside this upscaler and the enlargement is another
-    // upscaler rather than the spatial output scaler. Built on first use, on this feature's own device,
-    // and marked so it does not try to split itself in turn.
-    std::unique_ptr<IFeature_Dx12> Enlarger = nullptr;
-    ID3D12Resource* EnlargerInput = nullptr;
-    std::optional<Upscaler> EnlargerType;
-
-    bool EnsureEnlarger(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters);
-
     void ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
                          D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState) const;
 

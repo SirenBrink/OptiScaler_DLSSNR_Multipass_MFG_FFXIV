@@ -21,10 +21,15 @@ void DLSSFeature::ProcessEvaluateParams(NVSDK_NGX_Parameter* InParameters)
         InParameters->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
     }
 
-    // Read render resolution
-    unsigned int width;
-    unsigned int height;
-    GetRenderResolution(InParameters, &width, &height);
+    // Hand the resolved render size back before the evaluate.
+    //
+    // The runtime reads the subrect itself and validates it against the size the feature was created
+    // for -- a Balanced feature built at 2258x1270 rejects a 3840x2160 subrect with InvalidParameter,
+    // every frame, forever. FFXIV reports its buffer dimensions there rather than its frame, so
+    // GetRenderResolution has already worked out the real size from Width/Height; correcting our own
+    // bookkeeping and leaving the parameter alone fixes nothing, because the runtime never reads our
+    // bookkeeping.
+    CorrectRenderSubrect(InParameters);
 
     LOG_DEBUG("Render Size: {}x{}, Target Size: {}x{}, Display Size: {}x{}", RenderWidth(), RenderHeight(),
               TargetWidth(), TargetHeight(), DisplayWidth(), DisplayHeight());

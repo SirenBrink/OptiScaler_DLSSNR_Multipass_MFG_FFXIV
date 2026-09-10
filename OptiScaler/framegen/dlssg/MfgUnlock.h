@@ -1,3 +1,4 @@
+// Adapted from y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG, tag v4 (7b7220bb), GPL-3.0.
 #pragma once
 
 #include <SysUtils.h>
@@ -52,7 +53,8 @@ const Status& LastStatus();
 
 // Applies the patches once per process. Silent and harmless when the config option is off, when
 // nvngx_dlssg.dll is not loaded, or when a signature does not match exactly once.
-void TryApply();
+void TryApply(HMODULE module = nullptr);
+bool Pending();
 
 // The generated frame ceiling the patches opened, or 0 when they did not land.
 unsigned int UnlockedMax();

@@ -2,9 +2,8 @@
 #include "LibraryLoad_Hooks.h"
 
 #include <Config.h>
-#include <DllNames.h>
-
 #include <framegen/dlssg/MfgUnlock.h>
+#include <DllNames.h>
 
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/Kernel32_Proxy.h>
@@ -56,6 +55,16 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
     auto path = std::filesystem::path(libName).lexically_normal();
     auto normalizedPath = path.wstring();
     to_lower_in_place(normalizedPath);
+
+    if (State::Instance().externalFrameGeneration)
+    {
+        const auto filename = std::filesystem::path(normalizedPath).filename().wstring();
+        const bool streamline = filename.starts_with(L"sl.") && filename.ends_with(L".dll");
+        const bool otaFg = normalizedPath.contains(L"\\versions\\") &&
+            (normalizedPath.contains(L"\\sl_") || normalizedPath.contains(L"\\dlssg\\"));
+        if (streamline || otaFg || filename == L"nvngx_dlssg.dll")
+            return nullptr; // not handled: preserve the original loader/unlocker's path
+    }
 
     std::filesystem::path localSlPath(Config::Instance()->MainDllPath.value());
     localSlPath = localSlPath / L"streamline"; // Hardcoded streamline folder
@@ -109,21 +118,13 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
             LOG_ERROR("Trying to load dll: {}", libNameA);
     }
 
-    // nvngx_dlssg
-    //
-    // The module publishes DLSSG.MultiFrameCountMax while it initialises and slDLSSGGetState returns
-    // the published value rather than recomputing it, so the patch has to be in before anything in
-    // here runs. Patching at the first GetState is one call too late.
-    if (libName.contains(L"nvngx_dlssg"))
+    // Optional Ada unlock before NGX caches capabilities. External FG already returned above.
+    if (std::filesystem::path(normalizedPath).filename() == L"nvngx_dlssg.dll" && MfgUnlock::Pending())
     {
-        auto dlssgSnippet = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
-
-        if (dlssgSnippet != nullptr)
-            MfgUnlock::TryApply();
-        else
-            LOG_ERROR("Trying to load dll as nvngx_dlssg: {}", libNameA);
-
-        return dlssgSnippet;
+        auto snippet = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
+        if (snippet)
+            MfgUnlock::TryApply(snippet);
+        return snippet;
     }
 
     // NGX OTA

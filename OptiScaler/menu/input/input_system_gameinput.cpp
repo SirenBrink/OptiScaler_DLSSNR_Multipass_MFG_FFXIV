@@ -79,13 +79,13 @@ void UpdateGameInputIntegrationLocked()
         InstallGameInputCreateHookLocked();
 }
 
-bool RemoveGameInputHooksLocked()
+void RemoveGameInputHooksLocked()
 {
     if (!_state.GameInputCreateHookInstalled || o_GameInputCreate == nullptr)
     {
         _state.GameInputCreateHookInstalled = false;
         o_GameInputCreate = nullptr;
-        return true;
+        return;
     }
 
     DetourTransactionBegin();
@@ -95,14 +95,10 @@ bool RemoveGameInputHooksLocked()
     const LONG result = DetourTransactionCommit();
 
     if (result != NO_ERROR)
-    {
-        LOG_WARN("GameInputCreate hook removal failed result:{}; retaining trampoline for a safe retry", result);
-        return false;
-    }
+        LOG_WARN("GameInputCreate hook removal completed with result:{}", result);
 
     _state.GameInputCreateHookInstalled = false;
     o_GameInputCreate = nullptr;
-    return true;
 }
 
 HRESULT WINAPI hkGameInputCreate(void** gameInput)

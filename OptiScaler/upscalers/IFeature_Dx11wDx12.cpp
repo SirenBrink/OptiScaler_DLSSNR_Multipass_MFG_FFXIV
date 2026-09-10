@@ -11,8 +11,6 @@
 
 #include <with_dx12/with_dx12.h>
 
-using Microsoft::WRL::ComPtr;
-
 void IFeature_Dx11wDx12::ResourceBarrier(ID3D12GraphicsCommandList* commandList, ID3D12Resource* resource,
                                          D3D12_RESOURCE_STATES beforeState, D3D12_RESOURCE_STATES afterState)
 {
@@ -26,6 +24,93 @@ void IFeature_Dx11wDx12::ResourceBarrier(ID3D12GraphicsCommandList* commandList,
     barrier.Transition.StateAfter = afterState;
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     commandList->ResourceBarrier(1, &barrier);
+}
+
+ID3D12Resource* IFeature_Dx11wDx12::PrepareForcedQualityColor(ID3D12GraphicsCommandList* commandList,
+                                                              NVSDK_NGX_Parameter* parameters,
+                                                              ID3D12Resource* color,
+                                                              unsigned int* guideSourceWidth,
+                                                              unsigned int* guideSourceHeight)
+{
+    if (guideSourceWidth != nullptr)
+        *guideSourceWidth = 0;
+    if (guideSourceHeight != nullptr)
+        *guideSourceHeight = 0;
+
+    if (commandList == nullptr || parameters == nullptr || color == nullptr || dx12Feature == nullptr ||
+        !(State::Instance().gameQuirks & GameQuirk::ScaleDisplayColorForForcedQuality) ||
+        Config::Instance()->ForcePerfQuality.value_or_default() < 0)
+    {
+        return color;
+    }
+
+    const auto desc = color->GetDesc();
+    const auto renderWidth = dx12Feature->RenderWidth();
+    const auto renderHeight = dx12Feature->RenderHeight();
+    if (renderWidth == 0 || renderHeight == 0 || renderWidth > desc.Width || renderHeight > desc.Height ||
+        (renderWidth == desc.Width && renderHeight == desc.Height))
+    {
+        return color;
+    }
+
+    unsigned int subrectWidth = 0;
+    unsigned int subrectHeight = 0;
+    const bool fullAllocationSubrect =
+        parameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &subrectWidth) ==
+            NVSDK_NGX_Result_Success &&
+        parameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &subrectHeight) ==
+            NVSDK_NGX_Result_Success &&
+        subrectWidth == desc.Width && subrectHeight == desc.Height;
+    if (!fullAllocationSubrect)
+        return color;
+
+    if (ForcedQualityColorScaler == nullptr)
+    {
+        ForcedQualityColorScaler =
+            std::make_unique<OS_Dx12>("Forced quality color input", _dx11on12Device, false, Scaler::Lanczos3);
+    }
+
+    if (!ForcedQualityColorScaler->CreateBufferResource(_dx11on12Device, color, renderWidth, renderHeight,
+                                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+    {
+        LOG_ERROR("Forced quality color input: could not create the {}x{} staging texture", renderWidth,
+                  renderHeight);
+        return nullptr;
+    }
+
+    ForcedQualityColorScaler->SetBufferState(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    ResourceBarrier(commandList, color, D3D12_RESOURCE_STATE_COMMON,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    const bool scaled = ForcedQualityColorScaler->Dispatch(commandList, color, ForcedQualityColorScaler->Buffer());
+    ResourceBarrier(commandList, color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COMMON);
+
+    if (!scaled)
+    {
+        LOG_ERROR("Forced quality color input: scaling {}x{} to {}x{} failed", desc.Width, desc.Height,
+                  renderWidth, renderHeight);
+        return nullptr;
+    }
+
+    ForcedQualityColorScaler->SetBufferState(commandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    if (!ReportedForcedQualityColorScale)
+    {
+        ReportedForcedQualityColorScale = true;
+        LOG_INFO("Forced quality color input: scaling the complete {}x{} frame to {}x{} before the upscaler; "
+                 "the game's render subrect describes the allocation, not a crop",
+                 desc.Width, desc.Height, renderWidth, renderHeight);
+    }
+
+    // The color is now a synthetic compact frame, not the active top-left part of a padded
+    // allocation. Depth and motion still describe the complete source frame. Preserve that extent
+    // for NR before CorrectRenderSubrect replaces the game's allocation-sized subrect below.
+    if (guideSourceWidth != nullptr)
+        *guideSourceWidth = (unsigned int) desc.Width;
+    if (guideSourceHeight != nullptr)
+        *guideSourceHeight = desc.Height;
+
+    return ForcedQualityColorScaler->Buffer();
 }
 
 bool IFeature_Dx11wDx12::CreateD3D12Objects()
@@ -369,41 +454,60 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
     const bool hasRestoreParamReactive = getOriginalNgxResource(
         InParameters, NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, &restoreParamReactive);
 
-    ComPtr<ID3D11ShaderResourceView> restoreSRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
-    ComPtr<ID3D11SamplerState> restoreSamplerStates[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {};
-    ComPtr<ID3D11Buffer> restoreCBVs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
-    ComPtr<ID3D11UnorderedAccessView> restoreUAVs[D3D11_1_UAV_SLOT_COUNT] = {};
-    ComPtr<ID3D11RenderTargetView> restoreRTVs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
-    ID3D11RenderTargetView* rawRTVs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
-    ComPtr<ID3D11DepthStencilView> restoreDSV = nullptr;
+    ID3D11ShaderResourceView* restoreSRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
+    ID3D11SamplerState* restoreSamplerStates[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {};
+    ID3D11Buffer* restoreCBVs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
+    ID3D11UnorderedAccessView* restoreUAVs[D3D11_1_UAV_SLOT_COUNT] = {};
+    ID3D11RenderTargetView* restoreRTVs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    ID3D11DepthStencilView* restoreDSV = nullptr;
 
     // backup compute shader resources
     for (UINT i = 0; i < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT; i++)
     {
-        InDeviceContext->CSGetShaderResources(i, 1, restoreSRVs[i].GetAddressOf());
+        restoreSRVs[i] = nullptr;
+        InDeviceContext->CSGetShaderResources(i, 1, &restoreSRVs[i]);
+
+        if (restoreSRVs[i] != nullptr)
+            restoreSRVs[i]->Release();
     }
 
     for (UINT i = 0; i < D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT; i++)
     {
-        InDeviceContext->CSGetSamplers(i, 1, restoreSamplerStates[i].GetAddressOf());
+        restoreSamplerStates[i] = nullptr;
+        InDeviceContext->CSGetSamplers(i, 1, &restoreSamplerStates[i]);
+
+        if (restoreSamplerStates[i] != nullptr)
+            restoreSamplerStates[i]->Release();
     }
 
     for (UINT i = 0; i < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT; i++)
     {
-        InDeviceContext->CSGetConstantBuffers(i, 1, restoreCBVs[i].GetAddressOf());
+        restoreCBVs[i] = nullptr;
+        InDeviceContext->CSGetConstantBuffers(i, 1, &restoreCBVs[i]);
+
+        if (restoreCBVs[i] != nullptr)
+            restoreCBVs[i]->Release();
     }
 
     for (UINT i = 0; i < D3D11_1_UAV_SLOT_COUNT; i++)
     {
-        InDeviceContext->CSGetUnorderedAccessViews(i, 1, restoreUAVs[i].GetAddressOf());
+        restoreUAVs[i] = nullptr;
+        InDeviceContext->CSGetUnorderedAccessViews(i, 1, &restoreUAVs[i]);
+
+        if (restoreUAVs[i] != nullptr)
+            restoreUAVs[i]->Release();
     }
 
-    InDeviceContext->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rawRTVs, restoreDSV.GetAddressOf());
+    InDeviceContext->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, restoreRTVs, &restoreDSV);
 
-    for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+    for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
     {
-        restoreRTVs[i].Attach(rawRTVs[i]);
+        if (restoreRTVs[i] != nullptr)
+            restoreRTVs[i]->Release();
     }
+
+    if (restoreDSV != nullptr)
+        restoreDSV->Release();
 
     // Unbind RenderTargets
     ID3D11RenderTargetView* nullRTVs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
@@ -427,7 +531,17 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
 
         commandListRecording = true;
 
-        InParameters->Set(NVSDK_NGX_Parameter_Color, (void*) dx11Color.Dx12Resource);
+        unsigned int nrGuideSourceWidth = 0;
+        unsigned int nrGuideSourceHeight = 0;
+        auto upscalerColor = PrepareForcedQualityColor(cmdList, InParameters, dx11Color.Dx12Resource,
+                                                       &nrGuideSourceWidth, &nrGuideSourceHeight);
+        if (upscalerColor == nullptr)
+        {
+            LOG_ERROR("Can't prepare the forced-quality color input");
+            break;
+        }
+
+        InParameters->Set(NVSDK_NGX_Parameter_Color, (void*) upscalerColor);
         InParameters->Set(NVSDK_NGX_Parameter_MotionVectors, (void*) dx11Mv.Dx12Resource);
         InParameters->Set(NVSDK_NGX_Parameter_Output, (void*) dx11Out.Dx12Resource);
         InParameters->Set(NVSDK_NGX_Parameter_Depth, (void*) dx11Depth.Dx12Resource);
@@ -440,6 +554,13 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
                               (void*) dx11Reactive.Dx12Resource);
 
         LOG_DEBUG("Dispatch!!");
+        const auto upscaler = dx12Feature->GetUpscalerType();
+        if (upscaler == Upscaler::DLSS || upscaler == Upscaler::DLSSD)
+            dx12Feature->CorrectRenderSubrect(InParameters);
+
+        DlssNr::EvaluateBeforeUpscale(cmdList, InParameters, Dx12CommandQueue, _frameCount,
+                                      upscaler == Upscaler::DLSSD, nrGuideSourceWidth,
+                                      nrGuideSourceHeight);
         dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters);
 
         // DLSS 5 Neural Rendering rides the bridge: at this moment the block carries the D3D12 copies
@@ -458,7 +579,9 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
 
         if (dx12EvalResult && Config::Instance()->DlssNrEnabled.value_or_default())
         {
-            DlssNr::EvaluateAfterUpscale(cmdList, InParameters, Dx12CommandQueue);
+            DlssNr::EvaluateAfterUpscale(cmdList, InParameters, Dx12CommandQueue,
+                                         dx12Feature->GetUpscalerType() == Upscaler::DLSSD,
+                                         _frameCount, nrGuideSourceWidth, nrGuideSourceHeight);
 
             // Asked only after the D3D12 path has had its turn. Probing first would have made a D3D11
             // init the very first thing to ever touch the snippet, and if that had left its core
@@ -541,29 +664,25 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
     // restore compute shader resources
     for (UINT i = 0; i < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT; i++)
     {
-        auto raw = restoreSRVs[i].Get();
-        InDeviceContext->CSSetShaderResources(i, 1, &raw);
+        InDeviceContext->CSSetShaderResources(i, 1, &restoreSRVs[i]);
     }
 
     for (UINT i = 0; i < D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT; i++)
     {
-        auto raw = restoreSamplerStates[i].Get();
-        InDeviceContext->CSSetSamplers(i, 1, &raw);
+        InDeviceContext->CSSetSamplers(i, 1, &restoreSamplerStates[i]);
     }
 
     for (UINT i = 0; i < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT; i++)
     {
-        auto raw = restoreCBVs[i].Get();
-        InDeviceContext->CSSetConstantBuffers(i, 1, &raw);
+        InDeviceContext->CSSetConstantBuffers(i, 1, &restoreCBVs[i]);
     }
 
     for (UINT i = 0; i < D3D11_1_UAV_SLOT_COUNT; i++)
     {
-        auto raw = restoreUAVs[i].Get();
-        InDeviceContext->CSSetUnorderedAccessViews(i, 1, &raw, 0);
+        InDeviceContext->CSSetUnorderedAccessViews(i, 1, &restoreUAVs[i], 0);
     }
 
-    InDeviceContext->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rawRTVs, restoreDSV.Get());
+    InDeviceContext->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, restoreRTVs, restoreDSV);
 
     return evalResult;
 }

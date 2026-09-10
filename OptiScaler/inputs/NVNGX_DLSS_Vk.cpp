@@ -1027,11 +1027,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
             auto result = NVNGXProxy::VULKAN_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters, InCallback);
             LOG_INFO("VULKAN_EvaluateFeature result for ({0}): {1:X}", handleId, (UINT) result);
 
-            // Neural Rendering over what the upscaler just wrote, on the same command buffer -- the
-            // same placement as the D3D12 path, so frame generation interpolates from enhanced frames
-            // and the model still costs one run per rendered frame.
-            if (result == NVSDK_NGX_Result_Success)
-                DlssNr::EvaluateAfterUpscaleVk(InCmdList, InParameters, vkInstance, vkPD, vkDevice);
+            // SR/RR creates are owned by VkContexts. These forwarded handles are other NGX
+            // features, not an upscaler seam; never run NR on a frame-generation evaluate.
 
             return result;
         }
@@ -1073,7 +1070,21 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
 
     UpscalerTimeVk::UpscaleStart(InCmdList);
 
+    const auto backend = deviceContext->GetUpscalerType();
+    const bool bridged = backend == Upscaler::XeSS_on12 || backend == Upscaler::FSR21_on12 ||
+                         backend == Upscaler::FSR22_on12 || backend == Upscaler::FFX_on12;
+    const bool rayReconstruction = backend == Upscaler::DLSSD;
+    void* originalColor = nullptr;
+    InParameters->Get(NVSDK_NGX_Parameter_Color, &originalColor);
+    bool nrHandled = false;
+    auto nrColor = !bridged
+                       ? DlssNr::EvaluateBeforeUpscaleVk(InCmdList, InParameters, vkInstance, vkPD, vkDevice, nrHandled, rayReconstruction)
+                       : nullptr;
+    if (nrColor)
+        InParameters->Set(NVSDK_NGX_Parameter_Color, (void*) nrColor);
     auto upscaleResult = deviceContext->Evaluate(InCmdList, InParameters);
+    if (nrColor)
+        InParameters->Set(NVSDK_NGX_Parameter_Color, originalColor);
 
     if (!upscaleResult)
         ImGui::InsertNotification({ ImGuiToastType::Error, 10000, "Upscaler failed to run!" });
@@ -1101,12 +1112,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_VULKAN_EvaluateFeature(VkCommandBuffer 
     // Asked of the live feature rather than of the config: the config is what was requested and the
     // feature is what is actually running, and they differ for a frame after any backend change and
     // permanently after a fallback.
-    const auto backend = deviceContext != nullptr ? deviceContext->GetUpscalerType() : Upscaler::FSR22;
-    const bool bridged = backend == Upscaler::XeSS_on12 || backend == Upscaler::FSR21_on12 ||
-                         backend == Upscaler::FSR22_on12 || backend == Upscaler::FFX_on12;
-
     if (upscaleResult && !bridged)
-        DlssNr::EvaluateAfterUpscaleVk(InCmdList, InParameters, vkInstance, vkPD, vkDevice);
+        DlssNr::EvaluateAfterUpscaleVk(InCmdList, InParameters, vkInstance, vkPD, vkDevice,
+                                      rayReconstruction, nrHandled);
 
     return upscaleResult ? NVSDK_NGX_Result_Success : NVSDK_NGX_Result_Fail;
 }

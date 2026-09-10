@@ -1,8 +1,10 @@
+// Adapted from y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG, tag v4 (7b7220bb), GPL-3.0.
 #include "pch.h"
 
 #include "MfgUnlock.h"
 
 #include <Config.h>
+#include <State.h>
 #include <Util.h>
 #include <scanner/scanner.h>
 #include <misc/IdentifyGpu.h>
@@ -74,6 +76,12 @@ uintptr_t FindDataBytes(HMODULE module, const uint8_t* needle, size_t length)
 
 MfgUnlock::Status g_status {};
 
+uintptr_t UniqueAddress(HMODULE module, std::string_view pattern)
+{
+    const auto first = scanner::GetAddress(module, pattern);
+    return first && !scanner::GetAddress(module, pattern, 0, first + 1) ? first : 0;
+}
+
 // The module's own file version, for the report. A signature that does not match is expected on a
 // version nobody has looked at, and the version is the one thing that makes such a report actionable.
 std::string ModuleVersion(HMODULE module)
@@ -124,7 +132,7 @@ std::string Hex(const uint8_t* bytes, size_t count)
 // Rewrites count and neutralises the architecture clamp, so MultiFrameCountMax is published as five.
 bool PatchAdvertise(HMODULE module)
 {
-    if (const auto at309 = scanner::GetAddress(module, kAdvertisePattern309); at309 != 0)
+    if (const auto at309 = UniqueAddress(module, kAdvertisePattern309); at309 != 0)
     {
         // The jl is a rel32, six bytes.
         const auto branchAt = at309 + 6;
@@ -136,7 +144,7 @@ bool PatchAdvertise(HMODULE module)
         return WriteBytes(branchAt, nop, sizeof(nop));
     }
 
-    const auto address = scanner::GetAddress(module, kAdvertisePattern);
+    const auto address = UniqueAddress(module, kAdvertisePattern);
 
     if (address == 0)
     {
@@ -161,7 +169,7 @@ bool PatchAdvertise(HMODULE module)
 // Drops the Ada branch and raises the accepted count, so a request for five is not rejected.
 bool PatchValidate(HMODULE module)
 {
-    if (const auto at309 = scanner::GetAddress(module, kValidatePattern309); at309 != 0)
+    if (const auto at309 = UniqueAddress(module, kValidatePattern309); at309 != 0)
     {
         // setae al -> mov al, 1, so the flag is set whatever the architecture reports.
         const auto setAt = at309 + 5;
@@ -173,7 +181,7 @@ bool PatchValidate(HMODULE module)
         return WriteBytes(setAt, always, sizeof(always));
     }
 
-    const auto address = scanner::GetAddress(module, kValidatePattern);
+    const auto address = UniqueAddress(module, kValidatePattern);
 
     if (address == 0)
     {
@@ -245,29 +253,40 @@ unsigned int RewriteBlackwellKernels(HMODULE module)
         for (uint8_t* c = std::search(start, end, magic, magic + sizeof(magic)); c < end;
              c = std::search(c + 1, end, magic, magic + sizeof(magic)))
         {
-            if (c + 16 > end)
+            if (end - c < 16)
                 break;
 
             const auto headerSize = *reinterpret_cast<const uint16_t*>(c + 6);
             const auto fatSize = *reinterpret_cast<const uint64_t*>(c + 8);
 
-            if (headerSize != 0x10 || fatSize == 0 || c + 16 + fatSize > end)
+            if (headerSize != 0x10 || fatSize == 0 || fatSize > (uint64_t) (end - c - 16))
                 continue;
 
             uint8_t* blackwell = nullptr;
             size_t blackwellHeader = 0;
             size_t blackwellPayload = 0;
             std::vector<uint8_t*> ada;
+            bool valid = true;
 
             for (uint8_t* image = c + 16; image < c + 16 + fatSize;)
             {
+                const auto remaining = (uint64_t) (c + 16 + fatSize - image);
+                if (remaining < kImageArch + sizeof(uint32_t))
+                {
+                    valid = false;
+                    break;
+                }
                 const auto kind = *reinterpret_cast<const uint16_t*>(image);
                 const auto imageHeader = *reinterpret_cast<const uint32_t*>(image + 4);
                 const auto payload = *reinterpret_cast<const uint64_t*>(image + kImagePayloadSize);
                 const auto arch = *reinterpret_cast<const uint32_t*>(image + kImageArch);
 
-                if (imageHeader == 0 || payload == 0)
+                if (imageHeader < kImageArch + sizeof(uint32_t) || imageHeader > remaining ||
+                    payload == 0 || payload > remaining - imageHeader)
+                {
+                    valid = false;
                     break;
+                }
 
                 // kind 1 is PTX, 2 is a cubin. Only the PTX can be retargeted; the cubin is parked.
                 if (kind == 1 && arch == kArchBlackwell)
@@ -284,7 +303,7 @@ unsigned int RewriteBlackwellKernels(HMODULE module)
                 image += imageHeader + payload;
             }
 
-            if (blackwell == nullptr || ada.empty())
+            if (!valid || blackwell == nullptr || ada.empty())
                 continue;
 
             const char from[] = ".target sm_120";
@@ -298,21 +317,17 @@ unsigned int RewriteBlackwellKernels(HMODULE module)
             if (at == bodyEnd)
                 continue;
 
-            if (!WriteBytes(reinterpret_cast<uintptr_t>(at), reinterpret_cast<const uint8_t*>(to),
-                            sizeof(to) - 1))
-                continue;
-
             const uint32_t ada89 = kArchAda;
             const uint32_t parked = kArchParked;
-
-            WriteBytes(reinterpret_cast<uintptr_t>(blackwell + kImageArch),
-                       reinterpret_cast<const uint8_t*>(&ada89), sizeof(ada89));
-
+            // Prepare one complete container first. A failed protection change must not leave
+            // its PTX target and architecture headers disagreeing, or count a partial rewrite.
+            std::vector<uint8_t> patched(c, c + 16 + fatSize);
+            std::memcpy(patched.data() + (at - c), to, sizeof(to) - 1);
+            std::memcpy(patched.data() + (blackwell + kImageArch - c), &ada89, sizeof(ada89));
             for (uint8_t* image : ada)
-                WriteBytes(reinterpret_cast<uintptr_t>(image + kImageArch),
-                           reinterpret_cast<const uint8_t*>(&parked), sizeof(parked));
-
-            ++rewritten;
+                std::memcpy(patched.data() + (image + kImageArch - c), &parked, sizeof(parked));
+            if (WriteBytes(reinterpret_cast<uintptr_t>(c), patched.data(), patched.size()))
+                ++rewritten;
         }
     }
 
@@ -322,9 +337,13 @@ unsigned int RewriteBlackwellKernels(HMODULE module)
 }
 } // namespace
 
-void MfgUnlock::TryApply()
+void MfgUnlock::TryApply(HMODULE requestedModule)
 {
-    if (!Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default())
+    if (!Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default() || State::Instance().externalFrameGeneration)
+        return;
+    const auto& gpu = IdentifyGpu::getPrimaryGpu();
+    // The kernel retarget is Ada-specific. Do not patch Ampere/Turing or change Blackwell's working path.
+    if (gpu.vendorId != VendorId::Nvidia || gpu.nvidiaArchInfo.architecture_id != NV_GPU_ARCHITECTURE_AD100)
         return;
 
     // Latches once nvngx_dlssg.dll is present; before that every call rescans for it.
@@ -332,28 +351,42 @@ void MfgUnlock::TryApply()
 
     if (!snippetDone)
     {
-        if (auto module = GetModuleHandleW(L"nvngx_dlssg.dll"); module != nullptr)
+        if (auto module = requestedModule ? requestedModule : GetModuleHandleW(L"nvngx_dlssg.dll"); module != nullptr)
         {
             snippetDone = true;
             g_status.ModuleFound = true;
             g_status.SnippetVersion = ModuleVersion(module);
 
-            const bool advertise = PatchAdvertise(module);
-            const bool validate = PatchValidate(module);
-
-            g_status.AdvertiseMatched = advertise;
-            g_status.ValidateMatched = validate;
+            // Validate both gates before touching either. Ambiguous/unknown versions remain unmodified.
+            const bool knownGates =
+                (UniqueAddress(module, kAdvertisePattern309) && UniqueAddress(module, kValidatePattern309)) ||
+                (UniqueAddress(module, kAdvertisePattern) && UniqueAddress(module, kValidatePattern));
+            if (!knownGates)
+            {
+                LOG_WARN("MFG unlock: unsupported or ambiguous DLSSG {} signatures; left unchanged",
+                         g_status.SnippetVersion);
+                return;
+            }
 
             // Default on where it applies: below Blackwell the unlock alone produces frames that do
             // not advance the picture, so the two belong together. dlssCapable is set from the same
             // field, so an architecture that never reported leaves this off.
-            const auto& gpu = IdentifyGpu::getPrimaryGpu();
             const bool preBlackwell = gpu.vendorId == VendorId::Nvidia &&
                                       gpu.nvidiaArchInfo.architecture_id >= NV_GPU_ARCHITECTURE_TU100 &&
                                       gpu.nvidiaArchInfo.architecture_id <= NV_GPU_ARCHITECTURE_AD100;
 
             if (Config::Instance()->FGDLSSGAdaBlackwellKernels.value_or(preBlackwell))
                 g_status.KernelsRewritten = RewriteBlackwellKernels(module);
+
+            if (g_status.KernelsRewritten == 0)
+            {
+                LOG_WARN("MFG unlock: no compatible interpolation kernels; frame-count gates left unchanged");
+                return;
+            }
+            const bool advertise = PatchAdvertise(module);
+            const bool validate = PatchValidate(module);
+            g_status.AdvertiseMatched = advertise;
+            g_status.ValidateMatched = validate;
 
             if (advertise && validate)
                 LOG_INFO("MFG unlock: nvngx_dlssg.dll patched for {} generated frames", kMaxGeneratedFrames);
@@ -367,7 +400,17 @@ unsigned int MfgUnlock::UnlockedMax()
 {
     const auto& status = LastStatus();
 
-    return status.AdvertiseMatched && status.ValidateMatched ? kMaxGeneratedFrames : 0;
+    return status.AdvertiseMatched && status.ValidateMatched && status.KernelsRewritten > 0
+               ? kMaxGeneratedFrames : 0;
+}
+
+bool MfgUnlock::Pending()
+{
+    if (!Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default() ||
+        State::Instance().externalFrameGeneration || g_status.ModuleFound)
+        return false;
+    const auto& gpu = IdentifyGpu::getPrimaryGpu();
+    return gpu.vendorId == VendorId::Nvidia && gpu.nvidiaArchInfo.architecture_id == NV_GPU_ARCHITECTURE_AD100;
 }
 
 const MfgUnlock::Status& MfgUnlock::LastStatus() { return g_status; }

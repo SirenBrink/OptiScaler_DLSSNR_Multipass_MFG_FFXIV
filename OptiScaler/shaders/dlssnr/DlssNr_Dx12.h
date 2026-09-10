@@ -20,7 +20,6 @@
 #include "DlssNr_Common.h"
 
 #include <d3d12.h>
-#include <optional>
 #include <d3dx/d3dx12.h>
 #include <shaders/Shader_Dx12.h>
 #include <shaders/Shader_Dx12Utils.h>
@@ -30,19 +29,9 @@
 // there has to be enough for three passes times the deepest pipeline we might sit behind.
 // Descriptor and constant slots, consumed one per dispatch and reused round-robin with no fence.
 //
-// The pass records four dispatches per frame -- meter, encode, downsample, resolve -- so sixteen slots
-// is four frames of coverage before a slot is rewritten. The comment this replaces said "three passes
-// times the deepest pipeline we might sit behind", and the pass count has since grown to four while
-// the ring did not.
-//
-// Four frames is not enough. Frame generation deliberately runs the GPU several frames behind the CPU,
-// and the constants live in an UPLOAD heap written at record time -- so a wrap while the GPU is still
-// reading a slot rewrites descriptors and constants underneath it.
-//
-// A fifth dispatch has since been added -- the calibration grid -- which at thirty-two slots would
-// have left six frames, spending exactly the headroom the previous note set aside. Forty-eight
-// restores eight frames at five dispatches. If a sixth is ever added, raise this with it rather than
-// spending the margin again.
+// The shader still records at most meter + encode + downsample + resolve per frame. Extra model layers
+// are NGX evaluates and do not consume this ring; their A/B resources and feature histories are
+// persistent. Forty-eight slots leave twelve fully populated frames before descriptor/constant reuse.
 #define DLSSNR_NUM_OF_HEAPS 48
 
 class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
@@ -82,14 +71,9 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // Sizes come from the resources. Everything the pass cannot work out for itself is in
     // DlssNrFrameInfo; everything the user chose stays in Config. colour and output may be the same
     // resource. timingQueue is the queue this list will be executed on, when the caller knows it.
-    // outputArrival is the state output is found in and left in, for an output this pass does not also
-    // read. Unset means the output is the frame itself, arriving as the game's OutputResourceBarrier
-    // describes it. A caller placing this pass inside its own pipeline sets it to whatever the next
-    // stage there expects, because nothing else in the chain knows this pass ran.
     void Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
                   ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
-                  ID3D12CommandQueue* timingQueue = nullptr,
-                  std::optional<D3D12_RESOURCE_STATES> outputArrival = std::nullopt);
+                  ID3D12CommandQueue* timingQueue = nullptr);
 
     // Records one pass. Resources that a given mode does not read may be null; a stand-in is bound in
     // their place so every descriptor in the table is valid.

@@ -14,6 +14,11 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d12.h>
+#include <map>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace {
 
@@ -55,6 +60,13 @@ void setResource(void *params, const char *name, ID3D12Resource *v) {
 
 using PFN_NrInitExt = int(__cdecl *)(unsigned long long, const wchar_t *, ID3D12Device *, int,
                                      const void *);
+// An explicit ControlMask takes precedence over the runtime's automatic mask.
+// We do not supply one; clear it on the reusable parameter block instead of
+// allowing another feature's stale mask/resource to silently override this toggle.
+void setAutomaticMask(void *params, int enabled) {
+    setResourcePtr(params, "DLSSNR.ControlMask", nullptr);
+    setUInt(params, "DLSSNR.UseAutoMask", enabled != 0 ? 1u : 0u);
+}
 using PFN_NrCreate = int(__cdecl *)(ID3D12GraphicsCommandList *, int, const void *, void **);
 using PFN_NrEvaluate = int(__cdecl *)(ID3D12GraphicsCommandList *, const void *, const void *, void *);
 using PFN_NrRelease = int(__cdecl *)(void *);
@@ -65,27 +77,40 @@ struct Snippet {
     PFN_NrCreate create = nullptr;
     PFN_NrEvaluate evaluate = nullptr;
     PFN_NrRelease release = nullptr;
-    bool initialised = false;
+    std::unordered_set<ID3D12Device*> initialisedDevices;
 
 };
 
-Snippet g_snip;
+std::recursive_mutex g_snippetMutex;
+std::map<std::wstring, Snippet> g_snippets;
+std::unordered_map<void*, Snippet*> g_featureOwners;
+thread_local std::string g_modelError;
 
-bool loadSnippet(const wchar_t *path) {
-    if (g_snip.module) {
-        return g_snip.create != nullptr;
+void recordModelError(Snippet* snippet, const char* fallback) {
+    auto message = snippet && snippet->module
+        ? (const char*(*)())GetProcAddress(snippet->module, "NVFP4_GetLastError") : nullptr;
+    const char* detail = message ? message() : nullptr;
+    g_modelError = detail && *detail ? detail : fallback;
+}
+
+Snippet* loadSnippet(const wchar_t *path) {
+    std::lock_guard<std::recursive_mutex> lock(g_snippetMutex);
+    if (!path || !*path) return nullptr;
+    auto& snippet = g_snippets[path];
+    if (snippet.module) {
+        return snippet.create && snippet.evaluate && snippet.release ? &snippet : nullptr;
     }
-    g_snip.module = LoadLibraryExW(path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-    if (!g_snip.module) {
-        return false;
+    snippet.module = LoadLibraryExW(path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!snippet.module) {
+        return nullptr;
     }
-    g_snip.init = (PFN_NrInitExt) GetProcAddress(g_snip.module, "NVSDK_NGX_D3D12_Init_Ext");
-    g_snip.create = (PFN_NrCreate) GetProcAddress(g_snip.module, "NVSDK_NGX_D3D12_CreateFeature");
-    g_snip.evaluate = (PFN_NrEvaluate) GetProcAddress(g_snip.module, "NVSDK_NGX_D3D12_EvaluateFeature");
-    g_snip.release = (PFN_NrRelease) GetProcAddress(g_snip.module, "NVSDK_NGX_D3D12_ReleaseFeature");
+    snippet.init = (PFN_NrInitExt) GetProcAddress(snippet.module, "NVSDK_NGX_D3D12_Init_Ext");
+    snippet.create = (PFN_NrCreate) GetProcAddress(snippet.module, "NVSDK_NGX_D3D12_CreateFeature");
+    snippet.evaluate = (PFN_NrEvaluate) GetProcAddress(snippet.module, "NVSDK_NGX_D3D12_EvaluateFeature");
+    snippet.release = (PFN_NrRelease) GetProcAddress(snippet.module, "NVSDK_NGX_D3D12_ReleaseFeature");
 
 
-    return g_snip.create != nullptr && g_snip.evaluate != nullptr;
+    return snippet.create && snippet.evaluate && snippet.release ? &snippet : nullptr;
 }
 
 
@@ -113,6 +138,7 @@ __declspec(dllexport) void dlssnr_call_probe_float(void *params, const char *nam
 // Last init and create results, so the add-on can log why a feature never appeared.
 __declspec(dllexport) int dlssnr_call_last_init = 0;
 __declspec(dllexport) int dlssnr_call_last_create = 0;
+__declspec(dllexport) const char* dlssnr_call_error() { return g_modelError.c_str(); }
 
 // ---------------------------------------------------------------------------------------------
 // Vulkan.
@@ -209,14 +235,15 @@ __declspec(dllexport) int dlssnr_query_scaling_ratio(const wchar_t *snippetPath,
                                                      unsigned int perfQuality, float *outRatio) {
     dlssnr_last_ratio_stage = 0;
 
-    if (!loadSnippet(snippetPath) || !capabilityParams || !outRatio) {
+    auto* snippet = loadSnippet(snippetPath);
+    if (!snippet || !capabilityParams || !outRatio) {
         return 0;
     }
 
     dlssnr_last_ratio_stage = 1;
 
     // Publishing is what puts the callback in the block. Harmless if it has already happened.
-    auto populate = (PFN_NrPopulate) GetProcAddress(g_snip.module, "NVSDK_NGX_D3D12_PopulateParameters_Impl");
+    auto populate = (PFN_NrPopulate) GetProcAddress(snippet->module, "NVSDK_NGX_D3D12_PopulateParameters_Impl");
 
     if (populate != nullptr) {
         volatile int populated = populate(capabilityParams);
@@ -466,15 +493,15 @@ __declspec(dllexport) int dlssnr_d3d11_init(const wchar_t *snippetPath, const wc
     }
 
     const bool haveCopy = loadD3D11Snippet(snippetPath);
-    const bool haveShared = loadSnippet(snippetPath);
+    auto* shared = loadSnippet(snippetPath);
 
     struct Attempt { HMODULE module; bool ext; };
 
     const Attempt attempts[4] = {
         { haveCopy ? g_d3d11.module : nullptr, true },
         { haveCopy ? g_d3d11.module : nullptr, false },
-        { haveShared ? g_snip.module : nullptr, true },
-        { haveShared ? g_snip.module : nullptr, false },
+        { shared ? shared->module : nullptr, true },
+        { shared ? shared->module : nullptr, false },
     };
 
     int last = -1;
@@ -557,7 +584,7 @@ __declspec(dllexport) void *dlssnr_d3d11_create(void *deviceContext, void *capab
     setFloat(capabilityParams, "DLSSNR.LocalStructureStrength", localStructure);
     setFloat(capabilityParams, "DLSSNR.LocalToneStrength", localTone);
     setFloat(capabilityParams, "DLSSNR.SkinStructureStrength", skinStructure);
-    setUInt(capabilityParams, "DLSSNR.UseAutoMask", (unsigned int) useAutoMask);
+    setAutomaticMask(capabilityParams, useAutoMask);
     setUInt(capabilityParams, "DLSSNR.UICorrection", (unsigned int) uiCorrection);
 
     void *feature = nullptr;
@@ -646,7 +673,7 @@ __declspec(dllexport) void *dlssnr_vk_create(void *cmdBuffer, void *capabilityPa
     setFloat(capabilityParams, "DLSSNR.LocalStructureStrength", localStructure);
     setFloat(capabilityParams, "DLSSNR.LocalToneStrength", localTone);
     setFloat(capabilityParams, "DLSSNR.SkinStructureStrength", skinStructure);
-    setUInt(capabilityParams, "DLSSNR.UseAutoMask", (unsigned int) useAutoMask);
+    setAutomaticMask(capabilityParams, useAutoMask);
     setUInt(capabilityParams, "DLSSNR.UICorrection", (unsigned int) uiCorrection);
 
     void *feature = nullptr;
@@ -664,10 +691,13 @@ __declspec(dllexport) void *dlssnr_vk_create(void *cmdBuffer, void *capabilityPa
 //
 // Filling it here rather than in the host keeps the two APIs from drifting: a parameter added to one
 // evaluate and forgotten in the other would be a bug that only appears on one backend.
-__declspec(dllexport) int dlssnr_vk_evaluate(void *cmdBuffer, void *feature, void *capabilityParams,
+__declspec(dllexport) int dlssnr_vk_evaluate_v2(void *cmdBuffer, void *feature, void *capabilityParams,
                                              void *color, void *depth, void *motion, void *output,
                                              unsigned int width, unsigned int height,
                                              unsigned int guideWidth, unsigned int guideHeight,
+                                             unsigned int motionWidth, unsigned int motionHeight,
+                                             unsigned int depthBaseX, unsigned int depthBaseY,
+                                             unsigned int motionBaseX, unsigned int motionBaseY,
                                              int depthInverted, int reset, float intensity, int style,
                                              float localStructure, float localTone, float skinStructure,
                                              int useAutoMask, float mvScaleX, float mvScaleY) {
@@ -696,14 +726,14 @@ __declspec(dllexport) int dlssnr_vk_evaluate(void *cmdBuffer, void *feature, voi
     setUInt(capabilityParams, "DLSSNR.OutputSubrectBaseY", 0);
     setUInt(capabilityParams, "DLSSNR.OutputSubrectWidth", width);
     setUInt(capabilityParams, "DLSSNR.OutputSubrectHeight", height);
-    setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseX", 0);
-    setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseY", 0);
+    setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseX", depthBaseX);
+    setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseY", depthBaseY);
     setUInt(capabilityParams, "DLSSNR.DepthSubrectWidth", guideWidth);
     setUInt(capabilityParams, "DLSSNR.DepthSubrectHeight", guideHeight);
-    setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseX", 0);
-    setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseY", 0);
-    setUInt(capabilityParams, "DLSSNR.MVecSubrectWidth", guideWidth);
-    setUInt(capabilityParams, "DLSSNR.MVecSubrectHeight", guideHeight);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseX", motionBaseX);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseY", motionBaseY);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectWidth", motionWidth);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectHeight", motionHeight);
 
     // The game's own encoding, passed through rather than derived. Deriving it from the resolutions
     // came out as exactly 1.0 at native, which told the model almost nothing had moved.
@@ -715,7 +745,7 @@ __declspec(dllexport) int dlssnr_vk_evaluate(void *cmdBuffer, void *feature, voi
     setFloat(capabilityParams, "DLSSNR.LocalStructureStrength", localStructure);
     setFloat(capabilityParams, "DLSSNR.LocalToneStrength", localTone);
     setFloat(capabilityParams, "DLSSNR.SkinStructureStrength", skinStructure);
-    setUInt(capabilityParams, "DLSSNR.UseAutoMask", (unsigned int) useAutoMask);
+    setAutomaticMask(capabilityParams, useAutoMask);
 
     // Assigned rather than returned. A tail call becomes a jmp and the snippet would resolve its
     // caller past this module, which the gate rejects.
@@ -740,18 +770,23 @@ __declspec(dllexport) void *dlssnr_call_create(const wchar_t *snippetPath, const
                                                int style, float localStructure, float localTone,
                                                float skinStructure, int useAutoMask,
                                                int uiCorrection) {
-    if (!loadSnippet(snippetPath) || !capabilityParams) {
+    std::lock_guard<std::recursive_mutex> lock(g_snippetMutex);
+    g_modelError.clear();
+    auto* snippet = loadSnippet(snippetPath);
+    if (!snippet || !capabilityParams) {
+        recordModelError(snippet, "model DLL or capability parameters unavailable");
         return nullptr;
     }
-    if (!g_snip.initialised && g_snip.init) {
+    if (!snippet->initialisedDevices.count(device) && snippet->init) {
         // OptiScaler's own generic application id, the one it already hands DLSS when a game's id is
         // not wanted. What was here before was 0x4350324B -- "CP2K" -- so every game that ever loaded
         // this announced itself to the driver as Cyberpunk 2077.
-        dlssnr_call_last_init = g_snip.init(0x24480451ull, dataPath, device, 0x0000015, capabilityParams);
-        g_snip.initialised = (dlssnr_call_last_init == 1);
-        if (!g_snip.initialised) {
+        dlssnr_call_last_init = snippet->init(0x24480451ull, dataPath, device, 0x0000015, capabilityParams);
+        if (dlssnr_call_last_init != 1) {
+            recordModelError(snippet, "model initialization failed");
             return nullptr;
         }
+        snippet->initialisedDevices.insert(device);
     }
     setUInt(capabilityParams, "DLSSNR.Enabled", 1);
     setUInt(capabilityParams, "DLSSNR.Width", width);
@@ -771,25 +806,35 @@ __declspec(dllexport) void *dlssnr_call_create(const wchar_t *snippetPath, const
     setFloat(capabilityParams, "DLSSNR.LocalStructureStrength", localStructure);
     setFloat(capabilityParams, "DLSSNR.LocalToneStrength", localTone);
     setFloat(capabilityParams, "DLSSNR.SkinStructureStrength", skinStructure);
-    setUInt(capabilityParams, "DLSSNR.UseAutoMask", (unsigned int) useAutoMask);
+    setAutomaticMask(capabilityParams, useAutoMask);
     setUInt(capabilityParams, "DLSSNR.UICorrection", (unsigned int) uiCorrection);
     void *handle = nullptr;
-    dlssnr_call_last_create = g_snip.create(cmd, 18, capabilityParams, &handle);
-    return handle;
+    dlssnr_call_last_create = snippet->create(cmd, 18, capabilityParams, &handle);
+    if (dlssnr_call_last_create == 1 && handle) g_featureOwners[handle] = snippet;
+    else recordModelError(snippet, "model feature creation failed");
+    // Match the DX11/Vulkan paths: a partial handle on failure is not usable.
+    return dlssnr_call_last_create == 1 ? handle : nullptr;
 }
 
 // Colour and output are display resolution; depth and motion come from the game's own DLSS evaluation and
 // may be render resolution, so each resource carries its own subrect and motion scales by the ratio.
-__declspec(dllexport) int dlssnr_call_evaluate(ID3D12GraphicsCommandList *cmd, void *feature,
+__declspec(dllexport) int dlssnr_call_evaluate_v2(ID3D12GraphicsCommandList *cmd, void *feature,
                                                void *capabilityParams, ID3D12Resource *color,
                                                ID3D12Resource *depth, ID3D12Resource *motion,
                                                ID3D12Resource *output, unsigned int width,
                                                unsigned int height, unsigned int guideWidth,
-                                               unsigned int guideHeight, int depthInverted, int reset,
+                                               unsigned int guideHeight, unsigned int motionWidth,
+                                               unsigned int motionHeight, unsigned int depthBaseX,
+                                               unsigned int depthBaseY, unsigned int motionBaseX,
+                                               unsigned int motionBaseY, int depthInverted, int reset,
                                                float intensity, int style, float localStructure,
                                                float localTone, float skinStructure, int useAutoMask,
                                                float mvScaleX, float mvScaleY) {
-    if (!feature || !capabilityParams || !g_snip.evaluate) {
+    std::lock_guard<std::recursive_mutex> lock(g_snippetMutex);
+    g_modelError.clear();
+    const auto owner = g_featureOwners.find(feature);
+    if (!feature || !capabilityParams || owner == g_featureOwners.end()) {
+        g_modelError = "invalid model feature or capability parameters";
         return 0;
     }
     setResource(capabilityParams, "DLSSNR.Color", color);
@@ -813,14 +858,14 @@ __declspec(dllexport) int dlssnr_call_evaluate(ID3D12GraphicsCommandList *cmd, v
     setUInt(capabilityParams, "DLSSNR.OutputSubrectBaseY", 0);
     setUInt(capabilityParams, "DLSSNR.OutputSubrectWidth", width);
     setUInt(capabilityParams, "DLSSNR.OutputSubrectHeight", height);
-    setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseX", 0);
-    setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseY", 0);
+    setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseX", depthBaseX);
+    setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseY", depthBaseY);
     setUInt(capabilityParams, "DLSSNR.DepthSubrectWidth", guideWidth);
     setUInt(capabilityParams, "DLSSNR.DepthSubrectHeight", guideHeight);
-    setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseX", 0);
-    setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseY", 0);
-    setUInt(capabilityParams, "DLSSNR.MVecSubrectWidth", guideWidth);
-    setUInt(capabilityParams, "DLSSNR.MVecSubrectHeight", guideHeight);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseX", motionBaseX);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseY", motionBaseY);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectWidth", motionWidth);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectHeight", motionHeight);
 
     // The game's own encoding, passed through. Deriving this from the resolutions was a guess, and at
     // native resolution it came out as exactly 1.0 -- so a game using normalised vectors was telling
@@ -833,13 +878,14 @@ __declspec(dllexport) int dlssnr_call_evaluate(ID3D12GraphicsCommandList *cmd, v
     setFloat(capabilityParams, "DLSSNR.LocalStructureStrength", localStructure);
     setFloat(capabilityParams, "DLSSNR.LocalToneStrength", localTone);
     setFloat(capabilityParams, "DLSSNR.SkinStructureStrength", skinStructure);
-    setUInt(capabilityParams, "DLSSNR.UseAutoMask", (unsigned int) useAutoMask);
+    setAutomaticMask(capabilityParams, useAutoMask);
 
     // The result must not be returned directly. `return f(...)` is a tail call, and the compiler emits a
     // jmp rather than a call, which leaves this module's frame behind: the snippet then resolves its
     // caller to whoever called us and rejects it. Keeping the value in a volatile forces a real call and
     // a return through this module, which is the whole reason this file exists.
-    volatile int result = g_snip.evaluate(cmd, feature, capabilityParams, nullptr);
+    volatile int result = owner->second->evaluate(cmd, feature, capabilityParams, nullptr);
+    if (result != 1) recordModelError(owner->second, "model evaluation failed");
     return result;
 }
 
@@ -880,9 +926,12 @@ __declspec(dllexport) void dlssnr_call_set_extras(void *capabilityParams, float 
 }
 
 __declspec(dllexport) void dlssnr_call_release(void *feature) {
-    if (feature && g_snip.release) {
-        volatile int result = g_snip.release(feature); // not a tail call, for the reason above
+    std::lock_guard<std::recursive_mutex> lock(g_snippetMutex);
+    const auto owner = g_featureOwners.find(feature);
+    if (feature && owner != g_featureOwners.end()) {
+        volatile int result = owner->second->release(feature); // retain this module's caller frame
         (void) result;
+        g_featureOwners.erase(owner);
     }
 }
 

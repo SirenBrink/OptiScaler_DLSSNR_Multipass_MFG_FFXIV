@@ -1,25 +1,12 @@
 #include <pch.h>
 #include <Config.h>
+#include <NVNGX_Parameter.h>
 #include "IFeature.h"
 
 void IFeature::SetHandle(unsigned int InHandleId)
 {
     _handle = new NVSDK_NGX_Handle { InHandleId };
     LOG_INFO("Handle: {0}", _handle->Id);
-}
-
-// Neural Rendering between the halves of the upscaler: the upscaler writes at render resolution and
-// the enlargement to display resolution becomes a later stage, with the model between the two. For ray
-// reconstruction that makes the feature a denoiser and nothing else, which is the point -- the frame
-// handed to the model is clean, temporally settled, and a ninth of the pixels at Ultra Performance.
-//
-// Only where there is something to split. At render == display the upscaler is already 1:1 and the
-// model would run on the frame it runs on today, at the cost it costs today.
-bool IFeature::DualFeatureSplit() const
-{
-    return !_isEnlargementStage && _renderWidth > 0 && _renderWidth < _displayWidth &&
-           Config::Instance()->DlssNrDualFeature.value_or_default() &&
-           Config::Instance()->DlssNrEnabled.value_or_default();
 }
 
 bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
@@ -124,6 +111,74 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         InParameters->Get(NVSDK_NGX_Parameter_Height, &height);
         InParameters->Get(NVSDK_NGX_Parameter_PerfQualityValue, &pqValue);
 
+        // The same substitution the optimal-settings query made, repeated where the feature is
+        // actually built.
+        //
+        // The query moved the render resolution; this moves the label that travels with it. Leaving
+        // them apart creates a feature that declares DLAA while being handed a Balanced-sized render
+        // target, and a mismatched pair is what the runtime rejects -- so the two have to agree.
+        //
+        // They only agree when this create descends from that query, which is not every create. A
+        // game may rebuild the feature from dimensions it decided earlier, without asking again:
+        // FFXIV recomputes its per-quality table only when the display size changes, yet recreates
+        // the feature at several other moments -- leaving group pose, changing a character's
+        // appearance. Those recreates carry the previous table's dimensions. Forcing a different
+        // quality into one of them hands the runtime a render target sized for one preset and a
+        // PerfQualityValue naming another; it answers BAD00005, the feature is gone for the rest of
+        // the session, and all the overlay can report is that the upscaler is not in use.
+        //
+        // So the override applies to a create the last answer accounts for, and otherwise stands
+        // down. Standing down costs a preset change that lands late -- it takes effect the next time
+        // the game asks -- which is the smaller loss by a wide margin.
+        if (const int forcedPq = Config::Instance()->ForcePerfQuality.value_or_default();
+            forcedPq >= 0 && forcedPq <= (int) NVSDK_NGX_PerfQuality_Value_DLAA && forcedPq != pqValue)
+        {
+            const auto answer = LastQualityAnswer();
+
+            // No query yet means no answer to contradict. Games that never ask for optimal settings
+            // reach this path with nothing else setting the quality, so the override is all there is.
+            const bool nothingToCheck = answer.queries == 0;
+
+            // Near, not equal.
+            //
+            // Exact equality assumes the game creates the feature at precisely the size we answered.
+            // Plenty round it first, to a multiple of 8 or 16, and the answer is far more often odd
+            // than 16:9 testing suggests: at 3440x1440 three of the six presets land on an odd width,
+            // at 5120x1440 the same, and even 4K is odd at Ultra Quality. A game that rounds 2023 to
+            // 2024 would fail an exact match, the override would quietly never apply, and the setting
+            // would look broken on exactly the displays least likely to be tested.
+            //
+            // The mismatch this guard exists to catch is a stale render size -- a whole preset away,
+            // hundreds of pixels. Thirty-two absorbs any rounding without coming close to that.
+            constexpr unsigned int kRoundingSlack = 32;
+
+            // Not named "near": windef.h still defines that away to nothing for the 16-bit memory
+            // models, so the declaration becomes "const auto = ..." and the compiler asks what
+            // variable you meant.
+            const auto withinSlack = [](unsigned int a, unsigned int b)
+            { return (a > b ? a - b : b - a) <= kRoundingSlack; };
+
+            const bool matchesLastAnswer =
+                withinSlack(answer.renderWidth, width) && withinSlack(answer.renderHeight, height) &&
+                withinSlack(answer.displayWidth, outWidth) && withinSlack(answer.displayHeight, outHeight);
+
+            if (nothingToCheck || matchesLastAnswer)
+            {
+                LOG_INFO("PerfQualityValue overrided by user: {} (game asked for {})", forcedPq, pqValue);
+                pqValue = forcedPq;
+                InParameters->Set(NVSDK_NGX_Parameter_PerfQualityValue, pqValue);
+            }
+            else
+            {
+                LOG_WARN("Leaving PerfQualityValue at the game's {}: this feature is being built for "
+                         "{}x{} -> {}x{}, but the last optimal-settings answer was {}x{} -> {}x{} for "
+                         "quality {}. Forcing {} onto dimensions it did not produce is what the runtime "
+                         "rejects. The override applies again once the game asks.",
+                         pqValue, width, height, outWidth, outHeight, answer.renderWidth, answer.renderHeight,
+                         answer.displayWidth, answer.displayHeight, answer.quality, forcedPq);
+            }
+        }
+
         GetDynamicOutputResolution(InParameters, &outWidth, &outHeight);
 
         // Thanks to Crytek added these checks
@@ -164,10 +219,6 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         }
 
         _perfQualityValue = (NVSDK_NGX_PerfQuality_Value) pqValue;
-
-        if (DualFeatureSplit())
-            LOG_INFO("DLSS-NR dual feature: upscaler targets {}x{}, enlargement to {}x{} runs after the model",
-                     _renderWidth, _renderHeight, _displayWidth, _displayHeight);
 
         LOG_INFO("Render Resolution: {0}x{1}, Display Resolution {2}x{3}, Quality: {4}", _renderWidth, _renderHeight,
                  _displayWidth, _displayHeight, pqValue);
@@ -242,6 +293,49 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
         } while (false);
     }
 
+    // A subrect bigger than Width/Height is describing the buffer, not the render.
+    //
+    // NGX means DLSS_Render_Subrect_Dimensions to be the part of the colour buffer that holds this
+    // frame -- the render size. FFXIV instead reports the buffer's own dimensions there: 3840x2160
+    // subrect alongside Width/Height of 2258x1270, which is what it genuinely rendered. Taking the
+    // subrect at face value made the render size look equal to the display size, which declined every
+    // dual-feature split and then handed DLSS a 3840x2160 frame that the feature had been created at
+    // 2258x1270 to receive. That is the BAD00005 on every frame.
+    //
+    // Width/Height cannot be larger than the render, so the smaller of the two is the render whichever
+    // convention a game follows, and this is a no-op wherever they agree.
+    unsigned int paramWidth = 0, paramHeight = 0;
+
+    if (InParameters->Get(NVSDK_NGX_Parameter_Width, &paramWidth) == NVSDK_NGX_Result_Success &&
+        InParameters->Get(NVSDK_NGX_Parameter_Height, &paramHeight) == NVSDK_NGX_Result_Success &&
+        paramWidth > 0 && paramHeight > 0 && (paramWidth < *OutWidth || paramHeight < *OutHeight))
+    {
+        // Per axis, not both together. Letterboxing and pillarboxing scale one axis and not the other,
+        // so a game can legitimately report a smaller width beside an equal height. Replacing the pair
+        // whenever either shrank would take the larger of the two on the other axis and hand the
+        // runtime a frame taller or wider than the one that exists.
+        const unsigned int resolvedWidth = paramWidth < *OutWidth ? paramWidth : *OutWidth;
+        const unsigned int resolvedHeight = paramHeight < *OutHeight ? paramHeight : *OutHeight;
+
+        if (_renderWidth != resolvedWidth || _renderHeight != resolvedHeight || !_reportedEvaluateGeometry)
+            LOG_INFO("Evaluate geometry: the game reports a {}x{} subrect but Width/Height of {}x{}. Taking "
+                     "{}x{} as the render size -- the subrect is this game's buffer, not its frame.",
+                     *OutWidth, *OutHeight, paramWidth, paramHeight, resolvedWidth, resolvedHeight);
+
+        *OutWidth = resolvedWidth;
+        *OutHeight = resolvedHeight;
+    }
+
+    // Once per distinct answer, not per frame -- the run that found this produced 9156 identical lines.
+    if (_renderWidth != *OutWidth || _renderHeight != *OutHeight || !_reportedEvaluateGeometry)
+    {
+        _reportedEvaluateGeometry = true;
+
+        LOG_INFO("Evaluate geometry from the game: render {}x{}. This feature was created for render {}x{} "
+                 "display {}x{}.",
+                 *OutWidth, *OutHeight, _renderWidth, _renderHeight, _displayWidth, _displayHeight);
+    }
+
     _renderWidth = *OutWidth;
     _renderHeight = *OutHeight;
 
@@ -260,6 +354,27 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
         InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &ji.y) == NVSDK_NGX_Result_Success)
     {
         _jitterInfo.insert(std::make_pair(ji.x, ji.y));
+    }
+}
+
+void IFeature::CorrectRenderSubrect(NVSDK_NGX_Parameter* InParameters)
+{
+    unsigned int width = 0;
+    unsigned int height = 0;
+    GetRenderResolution(InParameters, &width, &height);
+
+    unsigned int subrectWidth = 0;
+    unsigned int subrectHeight = 0;
+    if (InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &subrectWidth) ==
+            NVSDK_NGX_Result_Success &&
+        InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &subrectHeight) ==
+            NVSDK_NGX_Result_Success &&
+        (subrectWidth != width || subrectHeight != height))
+    {
+        LOG_DEBUG("Correcting the render subrect the game set: {}x{} -> {}x{}", subrectWidth, subrectHeight, width,
+                  height);
+        InParameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, width);
+        InParameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, height);
     }
 }
 
@@ -296,12 +411,7 @@ void IFeature::TickFrozenCheck()
 
         lastFrameCount = _frameCount;
 
-        // Ticked once per present, but _frameCount only advances on an evaluate. Frame generation
-        // presents its generated frames between evaluates, so the count reaches the multiplier every
-        // real frame with nothing wrong. Scale the threshold by it.
-        const auto presentsPerEvaluate = std::max(1, State::Instance().dlssgDetectedInterpolationCount + 1);
-
-        _featureFrozen = updatesWithoutFramecountChange > 10L * presentsPerEvaluate;
+        _featureFrozen = updatesWithoutFramecountChange > 10;
     }
 }
 

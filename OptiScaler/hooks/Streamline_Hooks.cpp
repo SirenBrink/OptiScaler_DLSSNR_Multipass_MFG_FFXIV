@@ -311,8 +311,11 @@ static sl::Result dummy_slDLSSGGetState(const sl::ViewportHandle& viewport, sl::
                                         const sl::DLSSGOptions* options)
 {
     state.numFramesActuallyPresented = 1; // TODO: can do better
-    state.numFramesToGenerateMax = 1;
-    state.bIsVsyncSupportAvailable = sl::Boolean::eTrue;
+    if (state.structVersion >= 2)
+    {
+        state.numFramesToGenerateMax = 1;
+        state.bIsVsyncSupportAvailable = sl::Boolean::eTrue;
+    }
     state.estimatedVRAMUsageInBytes = 300 * 1024 * 1024;
 
     return sl::Result::eOk;
@@ -1151,8 +1154,7 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
         // nvngx_dlssg.dll can load after this runs, and the ceiling read before it does is Ada's
         // 1. Caching that holds it for the session and clamps the override to it. ModuleFound
         // means the patches have been attempted, so from there the answer is final either way.
-        const bool unlockPending =
-            Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default() && !MfgUnlock::LastStatus().ModuleFound;
+        const bool unlockPending = MfgUnlock::Pending();
 
         // Populate dlssgMfgMax once
         if (!state.dlssgMfgMax.has_value() && !unlockPending)
@@ -1226,6 +1228,8 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
 
         // We might be feeding a newer struct to an older SL but that seems to work just fine for this Get function
         result = o_slDLSSGGetState(viewport, dynamic_cast<sl::DLSSGState&>(newState), options);
+        if (result != sl::Result::eOk)
+            return result;
 
         // Copy back data to game's struct
         memcpy(&state, &newState, 56); // struct ver 1 size
@@ -1256,6 +1260,8 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
     else
     {
         result = o_slDLSSGGetState(viewport, state, options);
+        if (result != sl::Result::eOk)
+            return result;
         State::Instance().dlssgGameDMFGSupported = state.bIsDynamicMFGSupported == sl::eTrue;
 
         // The wrapper's ceiling, replaced by the unlocked count.
@@ -1273,8 +1279,7 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
     if (optiState.streamlineVersion >= feature_version { 2, 7, 1 })
     {
         // Provisional until the snippet has been seen. See the note in hkslDLSSGSetOptions.
-        const bool unlockPending =
-            Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default() && !MfgUnlock::LastStatus().ModuleFound;
+        const bool unlockPending = MfgUnlock::Pending();
 
         if (!optiState.dlssgMfgMax.has_value() && !unlockPending)
         {
@@ -1778,26 +1783,19 @@ void StreamlineHooks::updateDlssgOptions()
     }
 }
 
-void StreamlineHooks::applyMenuDlssgInterlock(sl::DLSSGOptions& options, bool dlssgPotentiallyActive)
+void StreamlineHooks::applyMenuDlssgInterlock(sl::DLSSGOptions& options, bool potentiallyActive)
 {
     auto& state = State::Instance();
-
-    // Keyed on the overlay, not the swapchain: the submit this guards against is MenuOverlayVk's, and
-    // a title whose swapchainApi is not Vulkan can still have that overlay live.
-    if (state.swapchainApi != API::Vulkan && !state.menuOverlayIsVulkan)
+    if (state.externalFrameGeneration || (state.swapchainApi != API::Vulkan && !state.menuOverlayIsVulkan))
         return;
-
-    // Charged while the menu is hidden, spent by MenuOverlayVk::QueuePresent once it opens: the
-    // overlay holds off for 10 presents while DLSS-G unwinds. DX overlays do not use this delay.
-    if (dlssgPotentiallyActive && !MenuOverlayBase::IsVisible())
+    if (potentiallyActive && !MenuOverlayBase::IsVisible())
         state.delayMenuRenderBy = 10;
-
-    if (!MenuOverlayBase::IsVisible())
-        return;
-
-    options.mode = sl::DLSSGMode::eOff;
-    options.flags |= sl::DLSSGFlags::eRetainResourcesWhenOff;
-    ReflexHooks::setDlssgFrameCount(0);
+    if (MenuOverlayBase::IsVisible())
+    {
+        options.mode = sl::DLSSGMode::eOff;
+        options.flags |= sl::DLSSGFlags::eRetainResourcesWhenOff;
+        ReflexHooks::setDlssgFrameCount(0);
+    }
 }
 
 // SL INTERPOSER
@@ -1865,6 +1863,8 @@ void StreamlineHooks::unhookInterposer()
 // Call it just after sl.interposer's load or if sl.interposer is already loaded
 void StreamlineHooks::hookInterposer(HMODULE slInterposer)
 {
+    if (State::Instance().externalFrameGeneration)
+        return;
     LOG_FUNC();
 
     if (!slInterposer)
@@ -2086,6 +2086,8 @@ void StreamlineHooks::unhookDlss()
 
 void StreamlineHooks::hookDlss(HMODULE slDlss)
 {
+    if (State::Instance().externalFrameGeneration)
+        return;
     LOG_FUNC();
 
     if (!slDlss)
@@ -2139,6 +2141,8 @@ void StreamlineHooks::unhookDlssg()
 
 void StreamlineHooks::hookDlssg(HMODULE slDlssg)
 {
+    if (State::Instance().externalFrameGeneration)
+        return;
     LOG_FUNC();
 
     if (!slDlssg)
@@ -2190,6 +2194,8 @@ void StreamlineHooks::unhookLocalDlssg()
 
 void StreamlineHooks::hookLocalDlssg(HMODULE slDlssg)
 {
+    if (State::Instance().externalFrameGeneration)
+        return;
     LOG_FUNC();
 
     if (!slDlssg)
@@ -2241,6 +2247,8 @@ void StreamlineHooks::unhookReflex()
 
 void StreamlineHooks::hookReflex(HMODULE slReflex)
 {
+    if (State::Instance().externalFrameGeneration)
+        return;
     LOG_FUNC();
 
     if (!slReflex)
@@ -2297,6 +2305,8 @@ void StreamlineHooks::unhookPcl()
 
 void StreamlineHooks::hookPcl(HMODULE slPcl)
 {
+    if (State::Instance().externalFrameGeneration)
+        return;
     LOG_FUNC();
 
     if (!slPcl)
@@ -2355,6 +2365,8 @@ void StreamlineHooks::unhookCommon()
 
 void StreamlineHooks::hookCommon(HMODULE slCommon)
 {
+    if (State::Instance().externalFrameGeneration)
+        return;
     LOG_FUNC();
 
     if (!slCommon)

@@ -107,17 +107,12 @@ class IFeature
 
     virtual void SetInit(bool InValue) { _isInited = InValue; }
 
-    // Set on a feature that is itself the enlargement half of another. Such a feature never splits in
-    // turn: it is the half that does the enlarging, and it writes at display resolution.
-    bool _isEnlargementStage = false;
-
+    // Whether this feature has reported the game's raw evaluate geometry at least once.
+    bool _reportedEvaluateGeometry = false;
   public:
     NVSDK_NGX_Handle* Handle() const { return _handle; };
     static unsigned int GetNextHandleId() { return handleCounter++; }
     int GetFeatureFlags() const { return _featureFlags; }
-
-    void MarkEnlargementStage() { _isEnlargementStage = true; }
-    bool IsEnlargementStage() const { return _isEnlargementStage; }
 
     virtual bool IsWithDx12() = 0;
     virtual feature_version Version() = 0;
@@ -135,16 +130,8 @@ class IFeature
     virtual bool UpdateOutputResolution(const NVSDK_NGX_Parameter* InParameters);
     virtual unsigned int DisplayWidth() { return _displayWidth; };
     virtual unsigned int DisplayHeight() { return _displayHeight; };
-    // Where the split lives, rather than in _targetWidth.
-    //
-    // Every upscaler's ProcessInitParams assigns _targetWidth from the display size after
-    // SetInitParameters has run, so a value written there does not survive to the build. Answering
-    // here instead puts the split ahead of all of them, including the OutWidth each one publishes to
-    // its own NGX feature.
-    bool DualFeatureSplit() const;
-
-    virtual unsigned int TargetWidth() { return DualFeatureSplit() ? _renderWidth : _targetWidth; };
-    virtual unsigned int TargetHeight() { return DualFeatureSplit() ? _renderHeight : _targetHeight; };
+    virtual unsigned int TargetWidth() { return _targetWidth; };
+    virtual unsigned int TargetHeight() { return _targetHeight; };
     virtual unsigned int RenderWidth() { return _renderWidth; };
     virtual unsigned int RenderHeight() { return _renderHeight; };
     virtual NVSDK_NGX_PerfQuality_Value PerfQualityValue() { return _perfQualityValue; }
@@ -175,6 +162,10 @@ class IFeature
     virtual bool SharpenEnabled() { return _initFlags.SharpenEnabled; }
 
     virtual bool CallsUpscalerEndByItself() { return false; }
+
+    // Resolve games such as FFXIV that report the allocation as the DLSS render subrect.
+    // Bridge paths call this before pre-SR NR so NR and the upscaler consume the same active extent.
+    void CorrectRenderSubrect(NVSDK_NGX_Parameter* InParameters);
 
     IFeature(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters) { SetHandle(InHandleId); }
 
