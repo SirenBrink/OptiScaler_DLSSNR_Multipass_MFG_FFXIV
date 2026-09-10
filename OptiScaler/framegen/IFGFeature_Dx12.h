@@ -126,6 +126,7 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     LockedDx12Resource GetResource(FG_ResourceType type, int index = -1);
     bool GetResourceCopy(FG_ResourceType type, D3D12_RESOURCE_STATES bufferState, ID3D12Resource* output);
     ID3D12CommandQueue* GetCommandQueue();
+    void CancelPendingUpscalerWork();
 
     bool HasResource(FG_ResourceType type, int index = -1) override final;
 

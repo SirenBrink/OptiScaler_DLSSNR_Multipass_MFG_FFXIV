@@ -38,6 +38,36 @@ bool IFGFeature_Dx12::GetResourceCopy(FG_ResourceType type, D3D12_RESOURCE_STATE
 
 ID3D12CommandQueue* IFGFeature_Dx12::GetCommandQueue() { return _gameCommandQueue; }
 
+void IFGFeature_Dx12::CancelPendingUpscalerWork()
+{
+    // The input feature can disappear before its final Present (FFXIV exit/scene changes).
+    // These lists may reference its shaders/resources. Close without submitting them.
+    Deactivate();
+    UINT cancelled = 0;
+    for (UINT i = 0; i < BUFFER_COUNT; ++i)
+    {
+        if (_uiCommandListResetted[i])
+        {
+            _uiCommandList[i]->Close();
+            _uiCommandListResetted[i] = false;
+            _uiAllocatorFenceValues[i] = 0; // reserved value was never submitted
+            ++cancelled;
+        }
+        if (_scCommandListResetted[i])
+        {
+            _scCommandList[i]->Close();
+            _scCommandListResetted[i] = false;
+            ++cancelled;
+        }
+        std::unique_lock lock(_resourceMutex[i]);
+        _frameResources[i].clear();
+        _resourceReady[i].clear();
+    }
+    _lastDispatchedFrame = _frameCount;
+    _waitingNewFrameData = true;
+    LOG_INFO("FFXIV upscaler release: cancelled {} pending FG command lists", cancelled);
+}
+
 bool IFGFeature_Dx12::HasResource(FG_ResourceType type, int index)
 {
     if (index < 0)

@@ -332,15 +332,32 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Shutdown()
 
     // Dx11Contexts.clear();
 
-    D3D11Device = nullptr;
     State::Instance().currentFeature = nullptr;
 
-    if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::IsDx11Inited() &&
-        NVNGXProxy::D3D11_Shutdown() != nullptr)
+    if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::IsDx11Inited())
     {
-        auto result = NVNGXProxy::D3D11_Shutdown()();
-        NVNGXProxy::SetDx11Inited(false);
+        NVSDK_NGX_Result result = NVSDK_NGX_Result_FAIL_PlatformError;
+        if (State::Instance().gameExe == "ffxiv_dx11.exe" && WithDx12::IsInited())
+        {
+            // Legacy Shutdown destroys NGX on ALL devices, including Streamline's live DX12
+            // FG instance. Keep that instance alive for its remaining presents and cleanup.
+            if (D3D11Device != nullptr && NVNGXProxy::D3D11_Shutdown1() != nullptr)
+            {
+                result = NVNGXProxy::D3D11_Shutdown1()(D3D11Device);
+                LOG_INFO("FFXIV device-specific NGX shutdown: DX11 device {:X}, result {:X}",
+                         (size_t) D3D11Device, (UINT) result);
+            }
+            else
+                LOG_ERROR("FFXIV NGX shutdown deferred: device-specific shutdown unavailable; DX12 still alive");
+        }
+        else if (NVNGXProxy::D3D11_Shutdown() != nullptr)
+            result = NVNGXProxy::D3D11_Shutdown()();
+
+        if (result == NVSDK_NGX_Result_Success)
+            NVNGXProxy::SetDx11Inited(false);
     }
+
+    D3D11Device = nullptr;
 
     // Unhooking and cleaning stuff causing issues during shutdown.
     // Disabled for now to check if it cause any issues
@@ -356,6 +373,15 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Shutdown()
 
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Shutdown1(ID3D11Device* InDevice)
 {
+    // A null Shutdown1 device has the same global effect as legacy Shutdown.
+    // Route FFXIV through the guarded path using its recorded DX11 device.
+    if (State::Instance().gameExe == "ffxiv_dx11.exe" && WithDx12::IsInited())
+    {
+        if (InDevice != nullptr)
+            D3D11Device = InDevice;
+        return NVSDK_NGX_D3D11_Shutdown();
+    }
+
     shutdown = true;
 
     if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::IsDx11Inited() &&
@@ -608,6 +634,33 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_CreateFeature(ID3D11DeviceContext
     return NVSDK_NGX_Result_Success;
 }
 
+static bool WaitForFfxivReleaseQueue(ID3D12CommandQueue* queue)
+{
+    if (queue == nullptr)
+        return true;
+    Microsoft::WRL::ComPtr<ID3D12Device> device;
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+    if (FAILED(queue->GetDevice(IID_PPV_ARGS(&device))))
+        return false;
+    // Once removed, this device can no longer execute work referencing the feature.
+    if (FAILED(device->GetDeviceRemovedReason()))
+        return true;
+    if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
+        return false;
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (event == nullptr)
+        return false;
+    auto result = queue->Signal(fence.Get(), 1);
+    if (SUCCEEDED(result))
+        result = fence->SetEventOnCompletion(1, event);
+    const auto waited = SUCCEEDED(result) ? WaitForSingleObject(event, 5000) : WAIT_FAILED;
+    CloseHandle(event);
+    const bool completed = waited == WAIT_OBJECT_0 || FAILED(device->GetDeviceRemovedReason());
+    LOG_INFO("FFXIV upscaler release: queue {:X} drained={}, wait={:X}, result={:X}",
+             (size_t) queue, completed, waited, (UINT) result);
+    return completed;
+}
+
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_ReleaseFeature(NVSDK_NGX_Handle* InHandle)
 {
     if (!InHandle)
@@ -636,6 +689,24 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_ReleaseFeature(NVSDK_NGX_Handle* 
 
     if (auto deviceContext = Dx11Contexts[handleId].feature.get(); deviceContext != nullptr)
     {
+        if (State::Instance().gameExe == "ffxiv_dx11.exe" && deviceContext->IsWithDx12())
+        {
+            auto fg = State::Instance().currentFG;
+            ID3D12CommandQueue* fgQueue = nullptr;
+            if (deviceContext == State::Instance().currentFeature && fg != nullptr &&
+                State::Instance().activeFgInput == FGInput::Upscaler)
+            {
+                OwnedLockGuard guard(fg->Mutex, 5);
+                fg->CancelPendingUpscalerWork();
+                fgQueue = fg->GetCommandQueue();
+                if (!WaitForFfxivReleaseQueue(fgQueue))
+                    return NVSDK_NGX_Result_FAIL_PlatformError;
+            }
+            auto upscaleQueue = WithDx12::GetD3D12CommandQueue();
+            if (upscaleQueue != fgQueue && !WaitForFfxivReleaseQueue(upscaleQueue))
+                return NVSDK_NGX_Result_FAIL_PlatformError;
+        }
+
         if (!shutdown)
         {
             LOG_TRACE("sleeping for 500ms before reset()!");
