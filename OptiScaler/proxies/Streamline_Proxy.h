@@ -273,6 +273,58 @@ class StreamlineProxy
         return pcl;
     }
 
+    template <typename T> static bool ResolveActiveFeatureFunction(sl::Feature feature, const char* name, T& target)
+    {
+        target = nullptr;
+        void* address = nullptr;
+        if (_slGetFeatureFunction == nullptr)
+            return false;
+        auto result = _slGetFeatureFunction(feature, name, address);
+        if (result != sl::Result::eOk || address == nullptr)
+        {
+            LOG_ERROR("Active Streamline function {} unavailable: result {}", name, (int) result);
+            return false;
+        }
+        target = reinterpret_cast<T>(address);
+        HMODULE module = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(address), &module))
+        {
+            wchar_t path[32768] {};
+            if (GetModuleFileNameW(module, path, (DWORD) std::size(path)) != 0)
+                LOG_INFO("Active Streamline function {}: {}", name, std::filesystem::path(path).string());
+        }
+        return true;
+    }
+
+    static bool BindActiveFfxivPlugins()
+    {
+        // Resolve through the interposer AFTER setting the device. Driver overrides can select
+        // another plugin binary; loading the bundled DLL directly does not initialize that copy.
+        bool ready = true;
+        ready &= ResolveActiveFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGSetOptions", _slDLSSGSetOptions);
+        ready &= ResolveActiveFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGGetState", _slDLSSGGetState);
+        ready &= ResolveActiveFeatureFunction(sl::kFeatureReflex, "slReflexGetState", _slReflexGetState);
+        ready &= ResolveActiveFeatureFunction(sl::kFeatureReflex, "slReflexSleep", _slReflexSleep);
+        ready &= ResolveActiveFeatureFunction(sl::kFeatureReflex, "slReflexSetOptions", _slReflexSetOptions);
+        ready &= ResolveActiveFeatureFunction(sl::kFeaturePCL, "slPCLGetState", _slPCLGetState);
+        ready &= ResolveActiveFeatureFunction(sl::kFeaturePCL, "slPCLSetMarker", _slPCLSetMarker);
+        ready &= ResolveActiveFeatureFunction(sl::kFeaturePCL, "slPCLSetOptions", _slPCLSetOptions);
+        if (!ready)
+            return false;
+
+        auto moduleFor = [](auto function) {
+            HMODULE module = nullptr;
+            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              reinterpret_cast<LPCWSTR>(function), &module);
+            return module;
+        };
+        State::Instance().optiSlDLSSG = moduleFor(_slDLSSGSetOptions);
+        State::Instance().optiSlReflex = moduleFor(_slReflexSetOptions);
+        State::Instance().optiSlPCL = moduleFor(_slPCLSetMarker);
+        return true;
+    }
+
     static feature_version Version()
     {
         if (_slVersion.major == 0)
@@ -364,6 +416,23 @@ class StreamlineProxy
 
         if (initResult == sl::Result::eOk)
         {
+            if (State::Instance().gameExe == "ffxiv_dx11.exe")
+            {
+                if (_slSetD3DDevice == nullptr || _slSetD3DDevice(device) != sl::Result::eOk ||
+                    !BindActiveFfxivPlugins())
+                {
+                    LOG_ERROR("FFXIV Streamline initialization failed before Reflex setup");
+                    return false;
+                }
+                sl::ReflexOptions reflexConst {};
+                reflexConst.mode = sl::ReflexMode::eOff;
+                reflexConst.useMarkersToOptimize = false;
+                auto result = _slReflexSetOptions(reflexConst);
+                LOG_INFO("FFXIV active-plugin Reflex initialization result: {}", (int) result);
+                _isD3D12Inited = result == sl::Result::eOk;
+                return _isD3D12Inited;
+            }
+
             State::Instance().optiSlDLSSG = StreamlineProxy::HookStreamlineDLSSG();
             State::Instance().optiSlReflex = StreamlineProxy::HookStreamlineReflex();
             State::Instance().optiSlPCL = StreamlineProxy::HookStreamlinePCL();
