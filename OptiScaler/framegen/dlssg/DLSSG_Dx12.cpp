@@ -330,6 +330,13 @@ bool DLSSG_Dx12::Dispatch()
 
     UINT64 willDispatchFrame = 0;
     auto fIndex = GetDispatchIndex(willDispatchFrame);
+    static thread_local UINT64 diagnosticCalls = 0;
+    if (++diagnosticCalls % 240 == 1)
+        LOG_INFO("DLSSG dispatch diagnostic: enabled={} active={} paused={} frame={} dispatchFrame={} index={} depthReady={} velocityReady={}",
+                 Config::Instance()->FGEnabled.value_or_default(), IsActive(), IsPaused(), _frameCount,
+                 willDispatchFrame, fIndex,
+                 fIndex >= 0 && IsResourceReady(FG_ResourceType::Depth, fIndex),
+                 fIndex >= 0 && IsResourceReady(FG_ResourceType::Velocity, fIndex));
     if (fIndex < 0)
         return false;
 
@@ -377,6 +384,26 @@ bool DLSSG_Dx12::Dispatch()
 
     StreamlineHooks::applyMenuDlssgInterlock(options, true);
     auto dlssgSetOptionsResult = StreamlineProxy::DLSSGSetOptions()(viewport, options);
+    // Sample runtime telemetry on this dispatch thread; presented count resets on each query.
+    static thread_local ULONGLONG lastDiagnosticTime = 0;
+    static thread_local int lastDiagnosticMode = -1;
+    static thread_local float lastDiagnosticTarget = -1.0f;
+    const auto diagnosticTime = GetTickCount64();
+    const auto diagnosticMode = static_cast<int>(options.mode);
+    if (diagnosticMode != lastDiagnosticMode || options.dynamicTargetFrameRate != lastDiagnosticTarget ||
+        diagnosticTime - lastDiagnosticTime >= 2000)
+    {
+        sl::DLSSGState runtimeState {};
+        const auto queryResult = StreamlineProxy::DLSSGGetState()(viewport, runtimeState, nullptr);
+        LOG_INFO("DLSSG runtime diagnostic: mode={} target={} requestedGenerated={} setResult={} queryResult={} status={} presentedSinceQuery={} sampleMs={} frame={}",
+                 diagnosticMode, options.dynamicTargetFrameRate, options.numFramesToGenerate,
+                 magic_enum::enum_name(dlssgSetOptionsResult), magic_enum::enum_name(queryResult),
+                 static_cast<unsigned int>(runtimeState.status), runtimeState.numFramesActuallyPresented,
+                 lastDiagnosticTime == 0 ? 0 : diagnosticTime - lastDiagnosticTime, _frameCount);
+        lastDiagnosticTime = diagnosticTime;
+        lastDiagnosticMode = diagnosticMode;
+        lastDiagnosticTarget = options.dynamicTargetFrameRate;
+    }
 
     if (dlssgSetOptionsResult != sl::Result::eOk)
     {
@@ -386,6 +413,13 @@ bool DLSSG_Dx12::Dispatch()
     sl::ReflexOptions reflexConst = {};
     reflexConst.mode = sl::ReflexMode::eLowLatency;
     reflexConst.useMarkersToOptimize = ReflexHooks::gameIsSendingMarkers();
+    // Let Streamline see the same output cap as the user, so dynamic MFG can account for it.
+    if (options.mode == sl::DLSSGMode::eDynamic)
+    {
+        const float limit = Config::Instance()->FramerateLimit.value_or_default();
+        if (limit > 0.0f && std::isfinite(limit))
+            reflexConst.frameLimitUs = static_cast<uint32_t>(std::clamp(1000000.0 / limit, 1.0, 4294967295.0));
+    }
 
     auto reflexSetOptionsResult = StreamlineProxy::ReflexSetOptions()(reflexConst);
 

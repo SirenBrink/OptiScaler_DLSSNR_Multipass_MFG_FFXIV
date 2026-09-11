@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <misc/FfxivNativeQuality.h>
 
 #include "NVNGX_Parameter.h"
 
@@ -401,6 +402,8 @@ template <typename T> NVSDK_NGX_Result NVNGX_Parameters::getT(const char* key, T
 /// told after the fact that the size it already chose was wrong.
 static NVSDK_NGX_PerfQuality_Value EffectivePerfQuality(const NVSDK_NGX_PerfQuality_Value asked)
 {
+    if (FfxivNativeQuality::NativeDlaaRequired())
+        return NVSDK_NGX_PerfQuality_Value_DLAA;
     const int forced = Config::Instance()->ForcePerfQuality.value_or_default();
 
     if (forced < 0)

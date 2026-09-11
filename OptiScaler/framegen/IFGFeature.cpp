@@ -39,7 +39,9 @@ UINT64 IFGFeature::StartNewFrame()
 
     if (_lastDispatchedFrame == 0 || (_frameCount - _lastDispatchedFrame) > 2)
     {
-        LOG_WARN("Frame count jumped too much! _frameCount: {}, _lastDispatchedFrame: {}", _frameCount,
+        // Frames continue while FG is disabled; no dispatch is expected in that state.
+        if (Config::Instance()->FGEnabled.value_or_default() && IsActive() && !IsPaused())
+            LOG_WARN("FG dispatch fell behind: frame={}, lastDispatched={}", _frameCount,
                  _lastDispatchedFrame);
 
         _lastDispatchedFrame = _frameCount - 1;

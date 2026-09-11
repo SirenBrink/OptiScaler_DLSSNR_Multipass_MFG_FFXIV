@@ -1,4 +1,5 @@
 #include <pch.h>
+#include <misc/FfxivNativeQuality.h>
 #include "IFeature_Dx11wDx12.h"
 
 #include <dlssnr/DlssNr.h>
@@ -37,9 +38,8 @@ ID3D12Resource* IFeature_Dx11wDx12::PrepareForcedQualityColor(ID3D12GraphicsComm
     if (guideSourceHeight != nullptr)
         *guideSourceHeight = 0;
 
-    if (commandList == nullptr || parameters == nullptr || color == nullptr || dx12Feature == nullptr ||
-        !(State::Instance().gameQuirks & GameQuirk::ScaleDisplayColorForForcedQuality) ||
-        Config::Instance()->ForcePerfQuality.value_or_default() < 0)
+    if (FfxivNativeQuality::Available() || commandList == nullptr || parameters == nullptr || color == nullptr || dx12Feature == nullptr ||
+        !(State::Instance().gameQuirks & GameQuirk::ScaleDisplayColorForForcedQuality))
     {
         return color;
     }

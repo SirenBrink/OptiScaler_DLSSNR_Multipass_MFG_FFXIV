@@ -182,6 +182,20 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
     InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &jitterY);
 
     fg->StartNewFrame();
+    // Sample on toggles and periodically, without changing frame/resource scheduling.
+    static thread_local int previousFgEnabled = -1;
+    const int fgEnabled = Config::Instance()->FGEnabled.value_or_default() ? 1 : 0;
+    if (previousFgEnabled != fgEnabled || fg->FrameCount() % 240 == 0)
+    {
+        auto& diagnosticCache = Dx11WithDx12::GetUpscalerResourceCache();
+        LOG_INFO("FG bridge diagnostic: enabled={} active={} paused={} frame={} lastDispatched={} cacheFrame={} render={}x{} display={}x{} lowResMV={} mvScale=({}, {}) jitter=({}, {}) reset={} depth={} velocity={}",
+                 fgEnabled, fg->IsActive(), fg->IsPaused(), fg->FrameCount(), fg->LastDispatchedFrame(),
+                 Dx11WithDx12::GetLastPreparedUpscalerFrameId(), feature->RenderWidth(), feature->RenderHeight(),
+                 feature->DisplayWidth(), feature->DisplayHeight(), feature->LowResMV(), mvScaleX, mvScaleY,
+                 jitterX, jitterY, reset, diagnosticCache.Depth.Dx12Resource != nullptr,
+                 diagnosticCache.Mv.Dx12Resource != nullptr);
+        previousFgEnabled = fgEnabled;
+    }
 
     auto aspectRatio = (float) feature->DisplayWidth() / (float) feature->DisplayHeight();
     fg->SetCameraValues(cameraNear, cameraFar, cameraVFov, aspectRatio, meterFactor);

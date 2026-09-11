@@ -1,4 +1,5 @@
-﻿#include "pch.h"
+#include "pch.h"
+#include <misc/FfxivNativeQuality.h>
 #include "menu_common.h"
 #include <framegen/dlssg/MfgUnlock.h>
 #include <NVNGX_Parameter.h>
@@ -4114,7 +4115,21 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
         ImGui::Text("Current DLSSG state:");
         ImGui::SameLine();
-        if (auto count = state.dlssgDetectedInterpolationCount; count > 0)
+        // OptiFG owns this backend; NGX input detection does not observe bridge-generated frames.
+        if (state.activeFgNvngx == FGNvngxReplacement::None)
+        {
+            auto backend = state.currentFG;
+            if (!config->FGEnabled.value_or_default())
+                ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.f, 0.f, 1.f)), "OFF");
+            else if (backend == nullptr || !backend->IsActive())
+                ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "WAITING");
+            else if (backend->IsPaused())
+                ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "PAUSED");
+            else
+                ImGui::TextColored(toneMapColor(ImVec4(0.f, 1.f, 0.25f, 1.f)), "ON");
+            ShowHelpMarker("OptiFG backend state. This does not measure how many generated frames reach the display.");
+        }
+        else if (auto count = state.dlssgDetectedInterpolationCount; count > 0)
         {
             ImGui::TextColored(toneMapColor(ImVec4(0.f, 1.f, 0.25f, 1.f)), std::format("ON {}x", count + 1).c_str());
         }
@@ -5583,18 +5598,19 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
         }
 
         if (ImGui::Combo("Preset", &forcedIndex, forcedQualityNames, IM_ARRAYSIZE(forcedQualityNames)))
+        {
             config->ForcePerfQuality = forcedQualityValues[forcedIndex];
+            if (FfxivNativeQuality::Available())
+                FfxivNativeQuality::Request(forcedQualityValues[forcedIndex]);
+        }
 
-        ShowHelpMarker("Which quality preset the game is answered with, whichever one it asks for.\n\n"
-                       "Some games never expose the choice -- Final Fantasy XIV offers only DLSS or FSR\n"
-                       "and picks the preset itself -- which leaves the per-preset ratios below indexed\n"
-                       "by a slot you cannot reach. This replaces the answer at the point the game asks,\n"
-                       "so it allocates its own buffers to your choice.\n\n"
-                       "Dynamic resolution is pinned shut while this is set: a forced preset with an open\n"
-                       "DRS range lets the game wander to a size the upscaler was not built for.\n\n"
-                       "Takes effect when the upscaler is next created. Apply does that now; otherwise it\n"
-                       "lands on the next zone change or resolution change.");
-
+        if (FfxivNativeQuality::Available())
+            ShowHelpMarker("Changes FFXIV's scene resolution through its native update path.\n"
+                           "Presets apply automatically while native DLSS is active.\n"
+                           "Game's choice restores the game's dynamic resolution range.");
+        else
+            ShowHelpMarker("Overrides the quality returned when the game asks for optimal settings.\n"
+                           "Some games require a resolution change or restart to apply it.");
         if (forcedIndex != 0)
         {
             ImGui::SameLine(0.0f, 6.0f);
@@ -5626,7 +5642,7 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
                 }
             }
 
-            ImGui::TextDisabled("In force: %s, %ux%u -> %ux%u (%llu quer%s)", forcedQualityNames[answeredIndex],
+            ImGui::TextDisabled("Last sizing response: %s, %ux%u -> %ux%u (%llu quer%s)", forcedQualityNames[answeredIndex],
                                 answered.renderWidth, answered.renderHeight, answered.displayWidth,
                                 answered.displayHeight, answered.queries, answered.queries == 1 ? "y" : "ies");
         }
@@ -5638,22 +5654,16 @@ void MenuCommon::RenderActiveImageSettings(RenderMenuContext& ctx)
                                     currentForced != answered.quality;
 
         if (ImGui::Button("Apply preset"))
-            MARK_ALL_BACKENDS_CHANGED();
-
-        ShowHelpMarker("Rebuilds the upscaler so the new preset is picked up without waiting for the\n"
-                       "game to do it on its own.\n\n"
-                       "Whether that is enough depends on the game. The render resolution is settled when\n"
-                       "the game asks for optimal settings; if it only asks at startup, a rebuild relabels\n"
-                       "the feature and leaves the resolution where it was. Watch the line above -- if it\n"
-                       "does not change, this game needs a restart.");
-
-        if (selectionAhead)
         {
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
-                               "Selected preset is ahead of the one in force. Press Apply; if the line above\n"
-                               "does not follow, this game only asks at startup and needs a restart.");
+            if (FfxivNativeQuality::Available())
+                FfxivNativeQuality::Request(config->ForcePerfQuality.value_or_default());
+            else
+                MARK_ALL_BACKENDS_CHANGED();
         }
-
+        if (FfxivNativeQuality::Available())
+            ImGui::TextDisabled("Native scene update enabled. Presets apply automatically.");
+        else if (selectionAhead)
+            ImGui::TextDisabled("Preset pending a new resolution query; apply or restart the game.");
         ImGui::SeparatorText("Upscale Ratio Override");
 
         if (bool upOverride = config->UpscaleRatioOverrideEnabled.value_or_default();
