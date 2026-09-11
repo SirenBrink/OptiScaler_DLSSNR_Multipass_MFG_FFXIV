@@ -99,6 +99,10 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetLatencyMarker(IUnknown* pDev,
     LOG_FUNC();
 #endif
 
+    // Forward our synthetic markers without recording them as native game input.
+    if (bridgeMarkerCall)
+        return o_NvAPI_D3D_SetLatencyMarker(pDev, pSetLatencyMarkerParams);
+
     _updatesWithoutMarker = 0;
 
     // LOG_DEBUG("frameID: {}, markerType: {}", pSetLatencyMarkerParams->frameID,

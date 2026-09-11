@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <misc/FfxivDynamicMarkers.h>
 #include "Upscaler_Inputs_Dx11wDx12.h"
 
 #include "MathUtils.h"
@@ -182,6 +183,7 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
     InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &jitterY);
 
     fg->StartNewFrame();
+    FfxivDynamicMarkers::Upscale(fg->FrameCount());
     // Sample on toggles and periodically, without changing frame/resource scheduling.
     static thread_local int previousFgEnabled = -1;
     const int fgEnabled = Config::Instance()->FGEnabled.value_or_default() ? 1 : 0;

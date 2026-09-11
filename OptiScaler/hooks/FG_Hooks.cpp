@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <misc/FfxivDynamicMarkers.h>
 #include "FG_Hooks.h"
 #include <Config.h>
 
@@ -1206,6 +1207,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
             {
                 ((IDXGISwapChain4*) This)->GetCurrentBackBufferIndex();
                 const uint32_t frameId = (uint32_t) fg->FrameCount();
+                FfxivDynamicMarkers::BeforePresent(frameId);
                 tokenResult = StreamlineProxy::GetNewFrameToken()(localToken, &frameId);
 
                 if (tokenResult == sl::Result::eOk)
@@ -1293,6 +1295,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
 
         LOG_DEBUG("Calling ReflexSleep");
         StreamlineProxy::ReflexSleep()(*localToken);
+        FfxivDynamicMarkers::NextFrame(fg->FrameCount() + 1);
     }
 
     if (state.swapchainInteropApi == SwapchainInteropApi::None)

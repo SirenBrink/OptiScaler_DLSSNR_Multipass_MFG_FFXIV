@@ -71,6 +71,7 @@ class ReflexHooks
     VALIDATE_MEMBER_HOOK(hkNvAPI_Vulkan_GetLatency, decltype(&NvAPI_Vulkan_GetLatency))
 
   public:
+    inline static thread_local bool bridgeMarkerCall = false;
     static std::optional<TimingEntry> timingData[TimingType::TimingTypeCOUNT];
 
     static void hookReflex(PFN_NvApi_QueryInterface& queryInterface);
