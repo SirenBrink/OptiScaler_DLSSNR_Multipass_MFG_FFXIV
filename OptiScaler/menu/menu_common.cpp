@@ -742,15 +742,15 @@ template <HasDefaultValue B> void MenuCommon::AddDLSSRenderPreset(std::string na
         { NVSDK_NGX_DLSS_Hint_Render_Preset_D, "PRESET D",
             "Default preset for Performance/Balanced/Quality modes;\ngenerally favors image stability.\nRemoved on recent versions!" },
         { NVSDK_NGX_DLSS_Hint_Render_Preset_E, "PRESET E",
-            "DLSS 3.7+, a better D preset\nRemoved on recent versions!" },
+            "Legacy preset E. Deprecated in the DLSS 310.9.1 SDK." },
         { NVSDK_NGX_DLSS_Hint_Render_Preset_F, "PRESET F",
-            "Default preset for Ultra Performance and DLAA modes\nRemoved on recent versions!" },
+            "Legacy preset F. Deprecated in the DLSS 310.9.1 SDK." },
         { NVSDK_NGX_DLSS_Hint_Render_Preset_G, "PRESET G",
-            "Unused" },
+            "Reserved; DLSS 310.9.1 falls back to its default behavior." },
         { NVSDK_NGX_DLSS_Hint_Render_Preset_H_Reserved, "PRESET H",
-            "Unused" },
+            "Reserved; DLSS 310.9.1 falls back to its default behavior." },
         { NVSDK_NGX_DLSS_Hint_Render_Preset_I_Reserved, "PRESET I",
-            "Unused" },
+            "Reserved; DLSS 310.9.1 falls back to its default behavior." },
         { NVSDK_NGX_DLSS_Hint_Render_Preset_J, "PRESET J",
             "Similar to preset K. Preset J might exhibit slightly\nless ghosting...\n1st Gen Transformer" },
         { NVSDK_NGX_DLSS_Hint_Render_Preset_K, "PRESET K",
@@ -760,9 +760,9 @@ template <HasDefaultValue B> void MenuCommon::AddDLSSRenderPreset(std::string na
         { NVSDK_NGX_DLSS_Hint_Render_Preset_M, "PRESET M",
             "Default for Perf mode\n2nd Gen Transformer" },
         { NVSDK_NGX_DLSS_Hint_Render_Preset_N, "PRESET N",
-            "Unused" },
+            "Reserved; DLSS 310.9.1 falls back to its default behavior." },
         { NVSDK_NGX_DLSS_Hint_Render_Preset_O, "PRESET O",
-            "Unused" },
+            "Reserved; DLSS 310.9.1 falls back to its default behavior." },
         { NV_PRESET_LATEST, "Latest",
             "Latest supported by the dll" }
     };
@@ -1363,7 +1363,8 @@ void MenuCommon::HandleMenuShortcuts(RenderMenuContext& ctx)
                 {
                     if (State::Instance().currentFeature->GetUpscalerType() == Upscaler::DLSSD)
                         comboPreset = config->DLSSDRenderPresetForAll.value_or_default();
-                    else if (State::Instance().currentFeature->GetUpscalerType() == Upscaler::DLSS)
+                    else if (State::Instance().currentFeature->GetUpscalerType() == Upscaler::DLSS ||
+                             State::Instance().currentFeature->GetUpscalerType() == Upscaler::DLSS_on12)
                         comboPreset = config->RenderPresetForAll.value_or_default();
                 }
             }
@@ -2905,7 +2906,8 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
         }
 
         // DLSS -----------------
-        if ((config->DLSSEnabled.value_or_default() && currentBackend == Upscaler::DLSS &&
+        if ((config->DLSSEnabled.value_or_default() &&
+             (currentBackend == Upscaler::DLSS || currentBackend == Upscaler::DLSS_on12) &&
              currentFeature->Version().major > 2) ||
             usesDlssd)
         {
@@ -2928,6 +2930,9 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
                 ImGui::Spacing();
             }
+
+            const auto modelPresetBefore = comboPreset.value_or_default();
+            const bool modelOverrideBefore = config->RenderPresetOverride.value_or_default();
 
             if (usesDlssd)
             {
@@ -2964,7 +2969,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
                 ShowHelpMarker("Each render preset has it strengths and weaknesses\n"
                                "Override to potentially improve image quality\n"
-                               "Press Apply after enable/disable");
+                               "Changes apply automatically; rebuilding DLSS may briefly pause rendering.");
 
                 /*
                 auto currentPresetIndex = GetPresetIndex(currentFeature, false);
@@ -2979,7 +2984,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
                 ImGui::PushItemWidth(135.0f * menuResScale);
 
-                AddDLSSRenderPreset("Override Preset", &comboPreset);
+                AddDLSSRenderPreset("Model preset", &comboPreset);
 
                 ImGui::PopItemWidth();
                 ImGui::EndDisabled();
@@ -2987,9 +2992,13 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 
             ImGui::SameLine(0.0f, 6.0f);
 
-            if (ImGui::Button("Apply Changes"))
+            const bool applyModelPreset = ImGui::Button("Apply Changes");
+            const bool liveModelPresetChanged = !usesDlssd &&
+                (modelPresetBefore != comboPreset.value_or_default() ||
+                 modelOverrideBefore != config->RenderPresetOverride.value_or_default());
+            if (applyModelPreset || liveModelPresetChanged)
             {
-                LOG_DEBUG("Applying DLSS/DLSSD preset override changes, preset index: {}",
+                LOG_INFO("Applying DLSS/DLSSD preset override changes, preset index: {}",
                           comboPreset.value_or_default());
 
                 if (usesDlssd)
