@@ -33,7 +33,7 @@
 //
 // Ada also runs a different interpolation kernel: Kernel_EstimateIntermMvecsScatter reads three f32
 // fields of its parameter block on sm_120 and one on sm_89, so every generated frame lands at the
-// same point between the two real ones. The Blackwell image is retargeted in place to answer for Ada.
+// same point between the two real ones. Only the validated Ada temporal program is corrected; other kernels are preserved.
 namespace MfgUnlock
 {
 // What the last attempt found. The signatures are version specific by construction -- they carry the
@@ -51,7 +51,7 @@ struct Status
 
 const Status& LastStatus();
 
-// Applies the patches once per process. Silent and harmless when the config option is off, when
+// Applies the patches once per mapped provider. Silent and harmless when the config option is off, when
 // nvngx_dlssg.dll is not loaded, or when a signature does not match exactly once.
 void TryApply(HMODULE module = nullptr);
 bool Pending();

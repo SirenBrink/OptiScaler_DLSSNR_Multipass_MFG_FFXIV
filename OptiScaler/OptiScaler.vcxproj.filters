@@ -953,6 +953,9 @@
     <ClInclude Include="framegen\dlssg\MfgUnlock.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="framegen\dlssg\AdaTemporal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="shaders\dlssnr\DlssNr_Vk.h">
       <Filter>Header Files</Filter>
     </ClInclude>

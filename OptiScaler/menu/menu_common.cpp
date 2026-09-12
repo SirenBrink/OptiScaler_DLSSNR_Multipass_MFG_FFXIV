@@ -3087,14 +3087,14 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     bool adaUnlock = config->FGDLSSGAdaMfgUnlock.value_or_default();
     if (ImGui::Checkbox("Built-in RTX 40 MFG unlock (experimental; restart)", &adaUnlock))
         config->FGDLSSGAdaMfgUnlock = adaUnlock;
-    ShowHelpMarker("Optional y4my4my4m Ada unlock. Save Settings and restart to enable or remove it."
+    ShowHelpMarker("Ada unlock with targeted temporal correction (dashdogy / Dreamt / mavismmg). Save Settings and restart to enable or remove it."
                    "\nRequires a supported DLSSG runtime and Streamline 2.7.1+ for multiplier overrides."
                    "\nDo not combine with another MFG unlocker. Does not add FG to an unsupported game."
                    "\nNot validated on RTX 40 hardware here; RTX 20/30/50 are left unchanged.");
     if (adaUnlock)
     {
         const auto& status = MfgUnlock::LastStatus();
-        ImGui::TextWrapped("DLSSG %s: capability %s, validation %s, retargeted kernel groups %u",
+        ImGui::TextWrapped("DLSSG %s: capability %s, validation %s, corrected temporal kernels %u",
                            status.SnippetVersion.empty() ? "not patched" : status.SnippetVersion.c_str(),
                            status.AdvertiseMatched ? "matched" : "not matched",
                            status.ValidateMatched ? "matched" : "not matched", status.KernelsRewritten);
