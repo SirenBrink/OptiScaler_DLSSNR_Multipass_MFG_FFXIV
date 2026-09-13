@@ -52,10 +52,22 @@ struct Generation
     DlssNrResidualHold hold;
     ID3D12Resource* zeroMotion = nullptr;
     std::unique_ptr<HalfRate> half;
+    // Experimental FFXIV motion-onset sampling, retired with this generation.
+    ID3D12Resource* motionReadback = nullptr;
+    struct MotionSample
+    {
+        bool pending = false, halfFloat = false;
+        unsigned long long time = 0;
+        float scaleX = 0, scaleY = 0;
+    } motionSamples[MarkerCount];
+    PreSrMotionReset::Gate motionGate;
+    unsigned long long lastMotionTime = 0;
+    bool motionSamplingFailed = false;
 
     bool Idle() const { return !everRecorded || completed[lastMarker] != 0; }
     ~Generation()
     {
+        if (motionReadback) motionReadback->Release();
         half.reset();
         if (zeroMotion) zeroMotion->Release();
         if (feature && NVNGXProxy::D3D12_ReleaseFeature())
@@ -165,6 +177,87 @@ bool Allocate(Generation& g)
     g.completed = static_cast<volatile UINT64*>(mapped);
     for (unsigned i = 0; i < MarkerCount; ++i) g.completed[i] = 0;
     return true;
+}
+
+// Copies nine texels, not a full texture. Use's timestamp follows these copies;
+// consume only completed slots, before Use can recycle their completion marker.
+bool ConsumePanOnset(Generation& g, unsigned long long now)
+{
+    int newest = -1;
+    for (unsigned i = 0; i < MarkerCount; ++i)
+        if (g.motionSamples[i].pending && g.completed[i] != 0 &&
+            (newest < 0 || g.motionSamples[i].time > g.motionSamples[newest].time)) newest = i;
+    if (newest < 0 || !g.motionReadback) return false;
+    const auto sample = g.motionSamples[newest];
+    for (auto& item : g.motionSamples)
+        if (item.time <= sample.time) item.pending = false;
+    const SIZE_T offset = static_cast<SIZE_T>(newest) * 9 * 512;
+    D3D12_RANGE range { offset, offset + 9 * 512 };
+    void* mapped = nullptr;
+    if (FAILED(g.motionReadback->Map(0, &range, &mapped))) return false;
+    std::array<float, 9> xs {}, ys {};
+    for (unsigned i = 0; i < 9; ++i)
+    {
+        const auto* pixel = static_cast<const unsigned char*>(mapped) + offset + i * 512;
+        if (sample.halfFloat)
+        {
+            uint16_t values[2]; std::memcpy(values, pixel, sizeof(values));
+            xs[i] = DirectX::PackedVector::XMConvertHalfToFloat(values[0]) * sample.scaleX;
+            ys[i] = DirectX::PackedVector::XMConvertHalfToFloat(values[1]) * sample.scaleY;
+        }
+        else
+        {
+            float values[2]; std::memcpy(values, pixel, sizeof(values));
+            xs[i] = values[0] * sample.scaleX; ys[i] = values[1] * sample.scaleY;
+        }
+    }
+    D3D12_RANGE written { 0, 0 }; g.motionReadback->Unmap(0, &written);
+    const float speed = PreSrMotionReset::PanSpeed(xs, ys);
+    const bool reset = g.motionGate.Update(speed, sample.time, now);
+    if (reset) LOG_INFO("PreSR motion diagnostic: one private-history reset, panSpeed={:.3f}, sampleAge={}ms",
+                       speed, now - sample.time);
+    return reset;
+}
+
+void SamplePan(Generation& g, ID3D12GraphicsCommandList* cmd, ID3D12Resource* motion,
+               NVSDK_NGX_Parameter* source, unsigned slot, unsigned long long now)
+{
+    auto& sample = g.motionSamples[slot]; sample.pending = false;
+    const auto elapsed = g.lastMotionTime ? now - g.lastMotionTime : 0;
+    g.lastMotionTime = now;
+    if (!motion || !elapsed || elapsed > 150 || g.motionSamplingFailed) return;
+    const auto desc = motion->GetDesc();
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.DepthOrArraySize != 1 ||
+        desc.MipLevels != 1 || desc.SampleDesc.Count != 1 || desc.Width < g.w || desc.Height < g.h ||
+        (desc.Format != DXGI_FORMAT_R16G16_FLOAT && desc.Format != DXGI_FORMAT_R32G32_FLOAT)) return;
+    if (!g.motionReadback)
+    {
+        auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
+        auto buffer = CD3DX12_RESOURCE_DESC::Buffer(MarkerCount * 9 * 512);
+        if (FAILED(g.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&g.motionReadback))))
+        { g.motionSamplingFailed = true; LOG_WARN("PreSR motion diagnostic: readback unavailable"); return; }
+        LOG_INFO("PreSR motion diagnostic: sampling enabled; reset on pan onset only, cooldown 750ms, rearm quiet 250ms");
+    }
+    const auto arrival = (D3D12_RESOURCE_STATES)Config::Instance()->MVResourceBarrier.value_or(
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Barrier(cmd, motion, arrival, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION from {}; from.pResource = motion;
+    from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    for (unsigned i = 0; i < 9; ++i)
+    {
+        const unsigned x = (i % 3 + 1) * g.w / 4, y = (i / 3 + 1) * g.h / 4;
+        D3D12_BOX box { x, y, 0, x + 1, y + 1, 1 };
+        D3D12_TEXTURE_COPY_LOCATION to {}; to.pResource = g.motionReadback;
+        to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        to.PlacedFootprint.Offset = (static_cast<UINT64>(slot) * 9 + i) * 512;
+        to.PlacedFootprint.Footprint = { desc.Format, 1, 1, 1, 256 };
+        cmd->CopyTextureRegion(&to, 0, 0, 0, &from, &box);
+    }
+    Barrier(cmd, motion, D3D12_RESOURCE_STATE_COPY_SOURCE, arrival);
+    sample = { true, desc.Format == DXGI_FORMAT_R16G16_FLOAT, now,
+        Float(source, NVSDK_NGX_Parameter_MV_Scale_X, 1) / g.w * (1000.0f / elapsed),
+        Float(source, NVSDK_NGX_Parameter_MV_Scale_Y, 1) / g.h * (1000.0f / elapsed) };
 }
 
 bool CreateHalfRate(Generation& g, ID3D12GraphicsCommandList* cmd, unsigned long long epoch)
@@ -382,6 +475,11 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
     { g.reset = true; Say("inactive: more than one upscale in a submission epoch"); return; }
     g.began = true;
     g.lastBeginEpoch = epoch;
+    const auto motionNow = GetTickCount64();
+    const bool testMotion = State::Instance().gameExe == "ffxiv_dx11.exe" && !privateJob &&
+        !wantsHalf && (flags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) &&
+        !(flags & NVSDK_NGX_DLSS_Feature_Flags_MVJittered);
+    const bool panReset = testMotion && ConsumePanOnset(g, motionNow);
     Use use(g, cmd);
     if (!use.valid) { Say("waiting for GPU completion slots; clean SR frame retained"); return; }
     if (!g.feature)
@@ -424,6 +522,11 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
     // Synthetic seam ticks cannot prove that a feature's creation commands were submitted.
     if (submittedEpoch == g.createEpoch)
     { LOG_DEBUG("DLSS-NR deferred: waiting after feature creation at submitted epoch {}", submittedEpoch); return; }
+    if (testMotion)
+    {
+        ScopedNrStateEnvelope envelope(cmd);
+        SamplePan(g, cmd, motion, source, use.slot, motionNow);
+    }
 
     if (g.sampleAndHold)
     {
@@ -504,7 +607,7 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
             p->Set(NVSDK_NGX_Parameter_ExposureTexture, g.exposure);
             p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, g.w);
             p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, g.h);
-            p->Set(NVSDK_NGX_Parameter_Reset, (unsigned)(frame.Reset || g.reset));
+            p->Set(NVSDK_NGX_Parameter_Reset, (unsigned)(frame.Reset || g.reset || panReset));
             p->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, Float(source, NVSDK_NGX_Parameter_Jitter_Offset_X, 0));
             p->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, Float(source, NVSDK_NGX_Parameter_Jitter_Offset_Y, 0));
             p->Set(NVSDK_NGX_Parameter_MV_Scale_X, frame.MvScaleX);

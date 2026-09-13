@@ -43,6 +43,9 @@ static DescriptorHeapAllocator g_pd3dSrvDescHeapAlloc;
 static ID3D12CommandQueue* g_pd3dCommandQueue = nullptr;
 static ID3D12GraphicsCommandList* g_pd3dCommandList = nullptr;
 static ID3D12CommandAllocator* g_commandAllocators[NUM_BACK_BUFFERS] = {};
+static ID3D12Fence* g_overlayFence = nullptr;
+static UINT64 g_overlayFenceValue = 0;
+static HANDLE g_overlayFenceEvent = nullptr;
 static ID3D12Resource* g_mainRenderTargetResource[NUM_BACK_BUFFERS] = {};
 static D3D12_CPU_DESCRIPTOR_HANDLE g_mainRenderTargetDescriptor[NUM_BACK_BUFFERS] = {};
 
@@ -136,6 +139,12 @@ static void CleanupRenderTargetDx12(bool clearQueue)
     if (!_isInited || !_dx12Device || State::Instance().isShuttingDown)
         return;
 
+    // Keep the allocators and ImGui upload buffers alive until our submission retires.
+    if (g_overlayFence && g_overlayFence->GetCompletedValue() < g_overlayFenceValue)
+    {
+        LOG_WARN("DX12 overlay cleanup deferred: GPU submission still pending");
+        return;
+    }
     LOG_TRACE("clearQueue: {}", clearQueue);
 
     for (UINT i = 0; i < NUM_BACK_BUFFERS; ++i)
@@ -162,6 +171,10 @@ static void CleanupRenderTargetDx12(bool clearQueue)
         }
 
         SAFE_RELEASE(g_pd3dCommandList);
+        SAFE_RELEASE(g_overlayFence);
+        if (g_overlayFenceEvent) CloseHandle(g_overlayFenceEvent);
+        g_overlayFenceEvent = nullptr;
+        g_overlayFenceValue = 0;
 
         if (g_pd3dCommandQueue != nullptr)
             g_pd3dCommandQueue = nullptr;
@@ -390,6 +403,15 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
             }
         }
 
+        result = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_overlayFence));
+        if (FAILED(result))
+        {
+            LOG_ERROR("DX12 overlay fence creation failed: {:X}", (UINT) result);
+            CleanupRenderTargetDx12(true);
+            pSwapChain->Release();
+            return;
+        }
+        g_overlayFenceValue = 0;
         result = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_commandAllocators[0], NULL,
                                            IID_PPV_ARGS(&g_pd3dCommandList));
         if (result != S_OK)
@@ -449,6 +471,34 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
         {
             _showRenderImGuiDebugOnce = true;
 
+            // Retire our own draw before resetting its allocator and ImGui upload buffers.
+            // Skipping busy frames makes the overlay disappear on generated presents.
+            if (!g_overlayFence || g_overlayFence->GetCompletedValue() == UINT64_MAX)
+            {
+                pSwapChain->Release();
+                return;
+            }
+            if (g_overlayFence->GetCompletedValue() < g_overlayFenceValue)
+            {
+                if (!g_overlayFenceEvent)
+                    g_overlayFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+                const auto waitResult = g_overlayFenceEvent
+                    ? g_overlayFence->SetEventOnCompletion(g_overlayFenceValue, g_overlayFenceEvent)
+                    : E_OUTOFMEMORY;
+                if (FAILED(waitResult) ||
+                    WaitForSingleObject(g_overlayFenceEvent, 2000) != WAIT_OBJECT_0 ||
+                    g_overlayFence->GetCompletedValue() < g_overlayFenceValue)
+                {
+                    LOG_ERROR("DX12 overlay completion wait failed or timed out: {:X}", (UINT) waitResult);
+                    pSwapChain->Release();
+                    return;
+                }
+                if (g_overlayFence->GetCompletedValue() == UINT64_MAX)
+                {
+                    pSwapChain->Release();
+                    return;
+                }
+            }
             ImGui_ImplDX12_NewFrame();
 
             if (MenuOverlayBase::RenderMenu())
@@ -504,6 +554,14 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
 
                 ID3D12CommandList* ppCommandLists[] = { g_pd3dCommandList };
                 ((ID3D12CommandQueue*) currentSCCommandQueue)->ExecuteCommandLists(1, ppCommandLists);
+                result = ((ID3D12CommandQueue*) currentSCCommandQueue)->Signal(
+                    g_overlayFence, ++g_overlayFenceValue);
+                if (FAILED(result))
+                {
+                    // No completion token: prevent unsafe reuse after the submission.
+                    g_overlayFenceValue = UINT64_MAX;
+                    LOG_ERROR("DX12 overlay completion signal failed: {:X}", (UINT) result);
+                }
             }
         }
         else

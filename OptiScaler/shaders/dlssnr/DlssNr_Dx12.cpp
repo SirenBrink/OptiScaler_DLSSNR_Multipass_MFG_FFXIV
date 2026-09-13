@@ -17,6 +17,8 @@
 #include "DlssNr_ActiveColor.h"
 #include "DlssNr_Guides.h"
 #include "DlssNr_SeamClock.h"
+#include "PreSrMotionReset.h"
+#include <DirectXPackedVector.h>
 
 #include <Config.h>
 #include <State.h>
