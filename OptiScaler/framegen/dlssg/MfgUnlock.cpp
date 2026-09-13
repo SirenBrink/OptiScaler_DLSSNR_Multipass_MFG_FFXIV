@@ -4,6 +4,7 @@
 #include "MfgUnlock.h"
 #include "AdaTemporal.h"
 #include <mutex>
+#include <atomic>
 
 #include <Config.h>
 #include <State.h>
@@ -43,18 +44,57 @@ constexpr std::string_view kValidatePattern309 = "3D B0 01 00 00 0F 93 C0";
 
 MfgUnlock::Status g_status {};
 std::mutex g_patchMutex;
+std::mutex g_serviceMutex;
+std::atomic<unsigned> g_unlockedMax { 0 };
+std::atomic<bool> g_settled { false };
+std::atomic<bool> g_rescanRequested { true };
+std::atomic<ULONGLONG> g_discoveryStarted { 0 };
+std::atomic<ULONGLONG> g_nextService { 0 };
+// Each deferred slot owns a loader reference, so an address cannot disappear or be reused.
+std::array<std::atomic<HMODULE>, 32> g_deferred {};
 struct ProviderState
 {
     MfgUnlock::Status status;
     std::vector<mfgunlock::midpoint::Patch> temporalPatches;
     void* temporalAllocation = nullptr;
+    HMODULE retainedModule = nullptr;
+    std::wstring path;
+    bool metadataPending = true;
 };
-// Never dereference cached module addresses: a rejected provider may already be unloaded.
-// The identity includes its mapped base, full path, timestamp and image size.
 std::unordered_map<std::string, ProviderState> g_providers;
-// The provider may retain this address until process exit. Do not free it during DLL teardown.
+// A patched provider and its replacement allocation live together until process exit.
+// Holding a loader reference prevents same-address reloads and stale successful capability state.
+// Rejected providers are not retained. Loader notifications revalidate rejected mappings.
+struct ModuleReference
+{
+    HMODULE module = nullptr;
+    ~ModuleReference() { if (module) FreeLibrary(module); }
+    HMODULE Release() { auto value = module; module = nullptr; return value; }
+};
 
+bool Eligible()
+{
+    if (!Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default() || State::Instance().externalFrameGeneration)
+        return false;
+    const auto& gpu = IdentifyGpu::getPrimaryGpu();
+    return gpu.vendorId == VendorId::Nvidia && gpu.nvidiaArchInfo.architecture_id == NV_GPU_ARCHITECTURE_AD100;
+}
 
+void Defer(ModuleReference& reference)
+{
+    for (auto& slot : g_deferred)
+    {
+        HMODULE empty = nullptr;
+        if (slot.compare_exchange_strong(empty, reference.module))
+        {
+            reference.Release();
+            g_rescanRequested.store(true);
+            return;
+        }
+    }
+    // Fixed-size queue: never grow allocations indefinitely under contention.
+    g_rescanRequested.store(true);
+}
 uintptr_t UniqueAddress(HMODULE module, std::string_view pattern)
 {
     const auto first = scanner::GetAddress(module, pattern);
@@ -63,22 +103,13 @@ uintptr_t UniqueAddress(HMODULE module, std::string_view pattern)
 
 // The module's own file version, for the report. A signature that does not match is expected on a
 // version nobody has looked at, and the version is the one thing that makes such a report actionable.
-std::string ModuleVersion(HMODULE module)
+std::string ModuleVersion(const std::wstring& path)
 {
-    wchar_t path[MAX_PATH] {};
-
-    if (GetModuleFileNameW(module, path, MAX_PATH) == 0)
-        return {};
-
     version_t file {};
     version_t product {};
-
-    if (!Util::GetFileVersion(path, &file, &product))
-        return {};
-
+    if (!Util::GetFileVersion(path.c_str(), &file, &product)) return {};
     return std::format("{}.{}.{}", file.major, file.minor, file.patch);
 }
-
 bool WriteBytes(uintptr_t address, const uint8_t* bytes, size_t count)
 {
     DWORD oldProtect = 0;
@@ -229,36 +260,16 @@ bool PatchValidate(HMODULE module)
 }
 
 
-} // namespace
-
-void MfgUnlock::TryApply(HMODULE requestedModule)
+// Takes ownership of a reference acquired BEFORE taking g_patchMutex. Releasing it happens
+// AFTER unlocking, so a loader callback can never wait on our mutex while we wait on the loader.
+void ProcessProvider(HMODULE ownedModule, bool loaderNotification)
 {
-    if (!Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default() || State::Instance().externalFrameGeneration)
-        return;
-    const auto& gpu = IdentifyGpu::getPrimaryGpu();
-    // The kernel retarget is Ada-specific. Do not patch Ampere/Turing or change Blackwell's working path.
-    if (gpu.vendorId != VendorId::Nvidia || gpu.nvidiaArchInfo.architecture_id != NV_GPU_ARCHITECTURE_AD100)
-        return;
-
-    if (!requestedModule)
-    {
-        // GetModuleHandle with a full path distinguishes identically named local providers.
-        // No module is loaded here, and no continuous process-wide enumeration is needed.
-        const auto configured = Util::DllPath() / L"nvngx_dlssg.dll";
-        const auto game = Util::ExePath().parent_path() / L"nvngx_dlssg.dll";
-        const HMODULE modules[] = { GetModuleHandleW(configured.c_str()), GetModuleHandleW(game.c_str()),
-                                    GetModuleHandleW(L"nvngx_dlssg.dll") };
-        for (auto module : modules)
-            if (module) TryApply(module);
-        return;
-    }
-
-    // Loader callbacks must not wait on a thread that may itself need the loader lock.
-    std::unique_lock lock(g_patchMutex, std::try_to_lock);
-    if (!lock.owns_lock()) return;
-    auto module = requestedModule;
+    ModuleReference reference { ownedModule };
+    auto module = reference.module;
     wchar_t path[32768] {};
     if (!GetModuleFileNameW(module, path, static_cast<DWORD>(std::size(path)))) return;
+    std::unique_lock lock(g_patchMutex, std::try_to_lock);
+    if (!lock.owns_lock()) { Defer(reference); return; }
     const auto base = reinterpret_cast<const uint8_t*>(module);
     const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
@@ -268,24 +279,44 @@ void MfgUnlock::TryApply(HMODULE requestedModule)
     const auto identity = std::format("{}|{:X}|{:X}|{:X}", pathText, reinterpret_cast<uintptr_t>(module),
                                       nt->FileHeader.TimeDateStamp, nt->OptionalHeader.SizeOfImage);
     auto [entry, inserted] = g_providers.try_emplace(identity);
-    if (!inserted) return;
+    if (!inserted)
+    {
+        if (entry->second.retainedModule || !loaderNotification) return;
+        // A rejected address can be reused after unloading. Re-check on each load notification.
+        entry->second = ProviderState {};
+    }
     auto& provider = entry->second;
-    // Keep the existing UI status as a summary of the most recent attempt; logs identify each provider.
+    provider.path = path;
     auto& status = provider.status;
     status.ModuleFound = true;
-    status.SnippetVersion = ModuleVersion(module);
-    struct SummaryOnExit {
-        Status& result;
-        ~SummaryOnExit() {
-            if ((result.AdvertiseMatched && result.ValidateMatched) || !g_status.AdvertiseMatched)
-                g_status = result;
+    // Metadata is read later by Service, never by a loader callback or while holding the patch mutex.
+    status.SnippetVersion = "metadata pending";
+    struct SummaryOnExit
+    {
+        ProviderState& provider;
+        ModuleReference& reference;
+        ~SummaryOnExit()
+        {
+            auto& result = provider.status;
+            if (result.AdvertiseMatched && result.ValidateMatched && result.KernelsRewritten)
+            {
+                provider.retainedModule = reference.Release();
+                g_unlockedMax.store(kMaxGeneratedFrames, std::memory_order_release);
+                g_settled.store(true, std::memory_order_release);
+            }
+            else if (provider.temporalAllocation)
+            {
+                // A failed rollback may still leave descriptors pointing at this allocation.
+                provider.retainedModule = reference.Release();
+            }
+            if (result.AdvertiseMatched || !g_status.AdvertiseMatched) g_status = result;
         }
-    } summary { status };
+    } summary { provider, reference };
     auto& g_temporalPatches = provider.temporalPatches;
     auto& g_temporalAllocation = provider.temporalAllocation;
-    LOG_INFO("MFG diagnostic v2: provider={} module={:X} version={} PE timestamp={:X} imageSize={:X}",
-             pathText, reinterpret_cast<uintptr_t>(module), status.SnippetVersion,
-             nt->FileHeader.TimeDateStamp, nt->OptionalHeader.SizeOfImage);
+    LOG_INFO("MFG lifecycle v3: provider={} module={:X} PE timestamp={:X} imageSize={:X}",
+             pathText, reinterpret_cast<uintptr_t>(module), nt->FileHeader.TimeDateStamp,
+             nt->OptionalHeader.SizeOfImage);
     ReportPattern(module, "advertise 310.9", kAdvertisePattern309);
     ReportPattern(module, "validate 310.9", kValidatePattern309);
     ReportPattern(module, "advertise legacy", kAdvertisePattern);
@@ -344,21 +375,77 @@ void MfgUnlock::TryApply(HMODULE requestedModule)
 
 }
 
-unsigned int MfgUnlock::UnlockedMax()
+void Service()
 {
-    const auto& status = LastStatus();
+    const auto now = GetTickCount64();
+    ULONGLONG zero = 0;
+    g_discoveryStarted.compare_exchange_strong(zero, now);
+    if (now < g_nextService.load() && !g_rescanRequested.load()) return;
+    std::unique_lock serviceLock(g_serviceMutex, std::try_to_lock);
+    if (!serviceLock.owns_lock()) return;
+    g_nextService.store(now + 1000);
+    g_rescanRequested.store(false);
+    for (auto& slot : g_deferred)
+        if (auto module = slot.exchange(nullptr)) ProcessProvider(module, true);
 
-    return status.AdvertiseMatched && status.ValidateMatched && status.KernelsRewritten > 0
-               ? kMaxGeneratedFrames : 0;
+    // Local discovery is bounded to once per second; load callbacks still patch synchronously.
+    const auto configured = Util::DllPath() / L"nvngx_dlssg.dll";
+    const auto game = Util::ExePath().parent_path() / L"nvngx_dlssg.dll";
+    const std::wstring paths[] = { configured.wstring(), game.wstring(), L"nvngx_dlssg.dll" };
+    for (const auto& path : paths)
+    {
+        HMODULE module = nullptr;
+        if (GetModuleHandleExW(0, path.c_str(), &module)) ProcessProvider(module, false);
+    }
+
+    std::vector<std::pair<std::string, std::wstring>> reports;
+    {
+        std::unique_lock lock(g_patchMutex, std::try_to_lock);
+        if (!lock.owns_lock()) { g_rescanRequested.store(true); return; }
+        for (auto& [identity, provider] : g_providers)
+            if (provider.metadataPending)
+            {
+                provider.metadataPending = false;
+                reports.emplace_back(identity, provider.path);
+            }
+    }
+    for (const auto& [identity, path] : reports)
+    {
+        const auto version = ModuleVersion(path);
+        LOG_INFO("MFG lifecycle v3: provider={} fileVersion={}", std::filesystem::path(path).string(), version);
+        std::lock_guard lock(g_patchMutex);
+        if (auto entry = g_providers.find(identity); entry != g_providers.end())
+        {
+            entry->second.status.SnippetVersion = version;
+            if (entry->second.status.AdvertiseMatched || !g_status.AdvertiseMatched)
+                g_status = entry->second.status;
+        }
+    }
+    // Stop postponing the Streamline ceiling cache if no compatible provider appears.
+    // Future loader notifications remain enabled and a later success can still raise the ceiling.
+    if (!g_settled.load() && now - g_discoveryStarted.load() >= 10000)
+    {
+        g_settled.store(true);
+        LOG_INFO("MFG lifecycle v3: capability discovery settled without an unlocked provider");
+    }
+}
+} // namespace
+
+void MfgUnlock::TryApply(HMODULE module)
+{
+    if (!Eligible()) return;
+    if (!module) { Service(); return; }
+    HMODULE reference = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                          reinterpret_cast<LPCWSTR>(module), &reference))
+        ProcessProvider(reference, true);
 }
 
-bool MfgUnlock::Pending()
+unsigned int MfgUnlock::UnlockedMax() { return g_unlockedMax.load(std::memory_order_acquire); }
+bool MfgUnlock::Pending() { return Eligible() && !g_settled.load(std::memory_order_acquire); }
+bool MfgUnlock::Watching() { return Eligible(); }
+MfgUnlock::Status MfgUnlock::LastStatus()
 {
-    if (!Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default() ||
-        State::Instance().externalFrameGeneration)
-        return false;
-    const auto& gpu = IdentifyGpu::getPrimaryGpu();
-    return gpu.vendorId == VendorId::Nvidia && gpu.nvidiaArchInfo.architecture_id == NV_GPU_ARCHITECTURE_AD100;
+    std::lock_guard lock(g_patchMutex);
+    return g_status;
 }
-
-const MfgUnlock::Status& MfgUnlock::LastStatus() { return g_status; }

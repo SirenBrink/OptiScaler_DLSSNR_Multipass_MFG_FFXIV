@@ -1152,12 +1152,12 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
         MfgUnlock::TryApply();
 
         // nvngx_dlssg.dll can load after this runs, and the ceiling read before it does is Ada's
-        // 1. Caching that holds it for the session and clamps the override to it. ModuleFound
-        // means the patches have been attempted, so from there the answer is final either way.
+        // 1. Avoid caching that provisional answer. Capability discovery settles independently
+        // of watching for later providers; a later successful unlock refreshes this cache.
         const bool unlockPending = MfgUnlock::Pending();
 
         // Populate dlssgMfgMax once
-        if (!state.dlssgMfgMax.has_value() && !unlockPending)
+        if ((!state.dlssgMfgMax.has_value() || static_cast<int>(MfgUnlock::UnlockedMax()) > state.dlssgMfgMax.value()) && !unlockPending)
         {
             sl::DLSSGState localState {};
             sl::DLSSGOptions localOptions {};
@@ -1281,7 +1281,7 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
         // Provisional until the snippet has been seen. See the note in hkslDLSSGSetOptions.
         const bool unlockPending = MfgUnlock::Pending();
 
-        if (!optiState.dlssgMfgMax.has_value() && !unlockPending)
+        if ((!optiState.dlssgMfgMax.has_value() || static_cast<int>(MfgUnlock::UnlockedMax()) > optiState.dlssgMfgMax.value()) && !unlockPending)
         {
             sl::DLSSGState localState {};
             sl::DLSSGOptions localOptions {};

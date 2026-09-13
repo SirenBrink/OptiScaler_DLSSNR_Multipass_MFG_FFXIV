@@ -49,12 +49,13 @@ struct Status
     std::string SnippetVersion; // file version of nvngx_dlssg.dll, empty if it could not be read
 };
 
-const Status& LastStatus();
+Status LastStatus(); // Thread-safe snapshot; no reference into mutable shared state.
 
 // Applies the patches once per mapped provider. Silent and harmless when the config option is off, when
 // nvngx_dlssg.dll is not loaded, or when a signature does not match exactly once.
 void TryApply(HMODULE module = nullptr);
-bool Pending();
+bool Pending(); // Capability discovery is still provisional.
+bool Watching(); // Keep receiving provider loads even after discovery settles.
 
 // The generated frame ceiling the patches opened, or 0 when they did not land.
 unsigned int UnlockedMax();
