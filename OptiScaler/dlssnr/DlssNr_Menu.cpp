@@ -4,6 +4,7 @@
 #include "DlssNr.h"
 #include "DlssNr_ExposureScan.h"
 #include "DlssNrNative.h"
+#include "NrUserPresets.h"
 
 
 #include <Config.h>
@@ -20,6 +21,7 @@
 
 namespace DlssNr
 {
+#include "NrUserPresetsMenu.inl"
 
 // The "(?)" marker every control carries, matching the rest of the menu.
 static void HelpMarker(const char* tip)
@@ -125,6 +127,8 @@ void RenderMenu(Config* config, float menuResScale)
     {
         ScopedIndent indent {};
         ImGui::Spacing();
+
+        RenderUserPresets(*config);
 
         bool enabled = config->DlssNrEnabled.value_or_default();
         if (ImGui::Checkbox("Enable Neural Rendering", &enabled))
