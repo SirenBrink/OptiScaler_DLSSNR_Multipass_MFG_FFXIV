@@ -343,9 +343,12 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Shutdown()
             // FG instance. Keep that instance alive for its remaining presents and cleanup.
             if (D3D11Device != nullptr && NVNGXProxy::D3D11_Shutdown1() != nullptr)
             {
-                result = NVNGXProxy::D3D11_Shutdown1()(D3D11Device);
-                LOG_INFO("FFXIV device-specific NGX shutdown: DX11 device {:X}, result {:X}",
-                         (size_t) D3D11Device, (UINT) result);
+                unsigned int remainingInstances = 0;
+                LOG_INFO("FFXIV device-specific NGX shutdown: calling driver with DX11 device {:X}",
+                         (size_t) D3D11Device);
+                result = NVNGXProxy::D3D11_Shutdown1()(D3D11Device, &remainingInstances);
+                LOG_INFO("FFXIV device-specific NGX shutdown: DX11 device {:X}, result {:X}, remaining={}",
+                         (size_t) D3D11Device, (UINT) result, remainingInstances);
             }
             else
                 LOG_ERROR("FFXIV NGX shutdown deferred: device-specific shutdown unavailable; DX12 still alive");
@@ -387,7 +390,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Shutdown1(ID3D11Device* InDevice)
     if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::IsDx11Inited() &&
         NVNGXProxy::D3D11_Shutdown1() != nullptr)
     {
-        auto result = NVNGXProxy::D3D11_Shutdown1()(InDevice);
+        unsigned int remainingInstances = 0;
+        auto result = NVNGXProxy::D3D11_Shutdown1()(InDevice, &remainingInstances);
         NVNGXProxy::SetDx11Inited(false);
     }
 

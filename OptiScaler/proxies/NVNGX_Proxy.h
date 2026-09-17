@@ -226,7 +226,9 @@ typedef NVSDK_NGX_Result (*PFN_D3D11_Init_Ext)(unsigned long long InApplicationI
                                                ID3D11Device* InDevice, NVSDK_NGX_Version InSDKVersion,
                                                const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo);
 typedef NVSDK_NGX_Result (*PFN_D3D11_Shutdown)(void);
-typedef NVSDK_NGX_Result (*PFN_D3D11_Shutdown1)(ID3D11Device* InDevice);
+// Driver _nvngx.dll ABI, not the SDK's one-argument public wrapper.
+// Shutdown1 writes a 32-bit remaining-instance count through its second argument.
+typedef NVSDK_NGX_Result (*PFN_D3D11_Shutdown1)(ID3D11Device* InDevice, unsigned int* OutRemainingInstances);
 typedef NVSDK_NGX_Result (*PFN_D3D11_GetParameters)(NVSDK_NGX_Parameter** OutParameters);
 typedef NVSDK_NGX_Result (*PFN_D3D11_AllocateParameters)(NVSDK_NGX_Parameter** OutParameters);
 typedef NVSDK_NGX_Result (*PFN_D3D11_GetCapabilityParameters)(NVSDK_NGX_Parameter** OutParameters);

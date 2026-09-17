@@ -15,6 +15,14 @@ void IFeature::SetHandle(unsigned int InHandleId)
 #include <TlHelp32.h>
 namespace
 {
+// FFXIV executable updated 2026-09-17 (SHA256 5bbc501dd5c7f22f...).
+// Verified against Ghidra: code moved by -0x3a0; the globals and accessed fields stayed put.
+// Keep exact instruction guards, including RIP displacements, before enabling native hooks.
+constexpr uintptr_t kFfxivSettingsInstructionsRva = 0x374387;
+constexpr uintptr_t kFfxivSelectSizeRva = 0x2db4f0;
+constexpr uintptr_t kFfxivQuerySizeRva = 0x352100;
+constexpr uintptr_t kFfxivRendererUpdateRva = 0x2da3f0;
+constexpr uintptr_t kFfxivResizeCallbacksRva = 0x236900;
 constexpr uintptr_t kFfxivSettingsPointerRva = 0x28f6470;
 
 bool ReadFfxivMemory(const void* address, void* output, size_t bytes)
@@ -28,13 +36,13 @@ bool MatchesFfxivSettingsInstructions(uintptr_t base)
     // RIP-relative settings load, then gates +0x54/+0x44/+0x45 and selector +0x55.
     // Includes the displacement to the expected global; fail closed after an incompatible update.
     constexpr unsigned char expected[] = {
-        0x4c, 0x8b, 0x05, 0x42, 0x1d, 0x58, 0x02, 0x45, 0x33, 0xe4,
+        0x4c, 0x8b, 0x05, 0xe2, 0x20, 0x58, 0x02, 0x45, 0x33, 0xe4,
         0x41, 0x80, 0x78, 0x54, 0x02, 0x74, 0x06, 0x45, 0x38, 0x60,
         0x44, 0x74, 0x71, 0x45, 0x38, 0x60, 0x45, 0x74, 0x6b,
         0x41, 0x0f, 0xb6, 0x40, 0x55, 0x83, 0xf8, 0x06
     };
     unsigned char actual[sizeof(expected)] {};
-    return base != 0 && ReadFfxivMemory((const void*) (base + 0x374727), actual, sizeof(actual)) &&
+    return base != 0 && ReadFfxivMemory((const void*) (base + kFfxivSettingsInstructionsRva), actual, sizeof(actual)) &&
            memcmp(actual, expected, sizeof(expected)) == 0;
 }
 
@@ -168,31 +176,31 @@ void InstallFfxivSceneDiagnostic(uintptr_t base)
         constexpr unsigned char selectBytes[] = {0x48,0x89,0x5c,0x24,0x18,0x55,0x56,0x57,
             0x41,0x56,0x41,0x57,0x48,0x83,0xec,0x20,0x8b,0x42,0x04,0x0f,0x57,0xc0,0x48,0x8b,0xd9};
         constexpr unsigned char queryBytes[] = {0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,
-            0x48,0x89,0x7c,0x24,0x18,0x41,0x56,0x48,0x83,0xec,0x20,0x48,0x8b,0x05,0xdc,0x3f,0x5a,0x02};
+            0x48,0x89,0x7c,0x24,0x18,0x41,0x56,0x48,0x83,0xec,0x20,0x48,0x8b,0x05,0x7c,0x43,0x5a,0x02};
         unsigned char actualSelect[sizeof(selectBytes)] {}, actualQuery[sizeof(queryBytes)] {};
-        if (!ReadFfxivMemory((void*) (base + 0x2db890), actualSelect, sizeof(actualSelect)) ||
-            !ReadFfxivMemory((void*) (base + 0x3524a0), actualQuery, sizeof(actualQuery)) ||
+        if (!ReadFfxivMemory((void*) (base + kFfxivSelectSizeRva), actualSelect, sizeof(actualSelect)) ||
+            !ReadFfxivMemory((void*) (base + kFfxivQuerySizeRva), actualQuery, sizeof(actualQuery)) ||
             memcmp(actualSelect, selectBytes, sizeof(selectBytes)) != 0 ||
             memcmp(actualQuery, queryBytes, sizeof(queryBytes)) != 0)
         {
             LOG_WARN("FFXIV scene diagnostic: instruction mismatch; hooks disabled");
             return;
         }
-        constexpr unsigned char updateBytes[] = {0x4c,0x8b,0xdc,0x57,0x48,0x81,0xec,0xd0,0x00,0x00,0x00,0x48,0x8b,0x05,0xd6,0x94,0x5f,0x02};
+        constexpr unsigned char updateBytes[] = {0x4c,0x8b,0xdc,0x57,0x48,0x81,0xec,0xd0,0x00,0x00,0x00,0x48,0x8b,0x05,0x96,0x98,0x5f,0x02};
         constexpr unsigned char dispatchBytes[] = {0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x6c,0x24,0x18,0x48,0x89,0x74,0x24,0x20,0x57,0x48,0x83,0xec,0x20};
         unsigned char updateActual[sizeof(updateBytes)] {}, dispatchActual[sizeof(dispatchBytes)] {};
-        if (!ReadFfxivMemory((void*) (base + 0x2da790), updateActual, sizeof(updateActual)) ||
-            !ReadFfxivMemory((void*) (base + 0x236ca0), dispatchActual, sizeof(dispatchActual)) ||
+        if (!ReadFfxivMemory((void*) (base + kFfxivRendererUpdateRva), updateActual, sizeof(updateActual)) ||
+            !ReadFfxivMemory((void*) (base + kFfxivResizeCallbacksRva), dispatchActual, sizeof(dispatchActual)) ||
             memcmp(updateActual, updateBytes, sizeof(updateBytes)) != 0 ||
             memcmp(dispatchActual, dispatchBytes, sizeof(dispatchBytes)) != 0)
         {
             LOG_WARN("FFXIV native quality: update instruction mismatch; hooks disabled");
             return;
         }
-        originalRendererUpdate = (FfxivRendererUpdate) (base + 0x2da790);
-        dispatchResizeCallbacks = (FfxivResizeCallbacks) (base + 0x236ca0);
-        originalSelectSize = (FfxivSelectSize) (base + 0x2db890);
-        originalQuerySize = (FfxivQuerySize) (base + 0x3524a0);
+        originalRendererUpdate = (FfxivRendererUpdate) (base + kFfxivRendererUpdateRva);
+        dispatchResizeCallbacks = (FfxivResizeCallbacks) (base + kFfxivResizeCallbacksRva);
+        originalSelectSize = (FfxivSelectSize) (base + kFfxivSelectSizeRva);
+        originalQuerySize = (FfxivQuerySize) (base + kFfxivQuerySizeRva);
         // Enlist existing game threads so Detours can relocate any instruction pointer in a patched prologue.
         std::vector<HANDLE> threads;
         HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
