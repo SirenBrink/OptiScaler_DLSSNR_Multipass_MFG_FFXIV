@@ -2,7 +2,6 @@
 #include "pch.h"
 
 #include "MfgUnlock.h"
-#include "AdaTemporal.h"
 #include <mutex>
 #include <atomic>
 
@@ -52,17 +51,22 @@ std::atomic<ULONGLONG> g_discoveryStarted { 0 };
 std::atomic<ULONGLONG> g_nextService { 0 };
 // Each deferred slot owns a loader reference, so an address cannot disappear or be reused.
 std::array<std::atomic<HMODULE>, 32> g_deferred {};
+struct KernelPatch
+{
+    uintptr_t address;
+    std::vector<uint8_t> original;
+};
+
 struct ProviderState
 {
     MfgUnlock::Status status;
-    std::vector<mfgunlock::midpoint::Patch> temporalPatches;
-    void* temporalAllocation = nullptr;
+    std::vector<KernelPatch> kernelPatches;
     HMODULE retainedModule = nullptr;
     std::wstring path;
     bool metadataPending = true;
 };
 std::unordered_map<std::string, ProviderState> g_providers;
-// A patched provider and its replacement allocation live together until process exit.
+// A patched provider is retained until process exit.
 // Holding a loader reference prevents same-address reloads and stale successful capability state.
 // Rejected providers are not retained. Loader notifications revalidate rejected mappings.
 struct ModuleReference
@@ -260,6 +264,155 @@ bool PatchValidate(HMODULE module)
 }
 
 
+// Broad rewrite adapted from ShyVortex/OptiScaler-DLSSNR-PreSR-Multipass
+// revision db6cc0e (GPL-3.0), with rollback journaling for our provider lifecycle.
+bool RestoreKernels(std::vector<KernelPatch>& patches)
+{
+    bool restored = true;
+    for (auto it = patches.rbegin(); it != patches.rend(); ++it)
+        restored = WriteBytes(it->address, it->original.data(), it->original.size()) && restored;
+    if (restored) patches.clear();
+    return restored;
+}
+
+// Gives Ada the Blackwell kernels the module already carries.
+//
+// nvngx_dlssg.dll ships two builds of the interpolation kernels. Kernel_EstimateIntermMvecsScatter
+// reads three f32 fields of its parameter block on sm_120 and one on sm_89, so on Ada every generated
+// frame is placed at the same point between the two real ones: the world does not advance between
+// them while the interface, composited once per present, does. At 2X there is one frame and nothing
+// to distinguish; above it that is the whole symptom.
+//
+// The sm_120 module uses no instruction Ada lacks. So per container: the Blackwell PTX image is
+// relabelled sm_89, its .target directive is rewritten in place (".target sm_120" and
+// ".target sm_89 " are both fourteen bytes, and the directive sits in the literal run at the head of
+// the LZ4 stream), and the images that were sm_89 -- the Ada PTX and its SASS -- are relabelled to an
+// architecture that does not exist so the driver cannot select them. The driver then JITs Blackwell's
+// kernel when it asks for Ada's.
+//
+// Nothing is copied in and no payload changes length. A container without both images is left alone.
+constexpr uint32_t kArchAda = 89;
+constexpr uint32_t kArchBlackwell = 120;
+
+// No such shader model. Parks an image where nothing will ask for it.
+constexpr uint32_t kArchParked = 122;
+
+// Offsets inside a fatbin image header: payload length, and the architecture the image answers for.
+constexpr size_t kImagePayloadSize = 8;
+constexpr size_t kImageArch = 28;
+
+unsigned int RewriteBlackwellKernels(HMODULE module, std::vector<KernelPatch>& patches)
+{
+    auto base = reinterpret_cast<uint8_t*>(module);
+    auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    auto nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    auto section = IMAGE_FIRST_SECTION(nt);
+
+    const uint8_t magic[] = { 0x50, 0xED, 0x55, 0xBA };
+    unsigned int rewritten = 0;
+
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+    {
+        const auto& s = section[i];
+
+        if (s.Characteristics & IMAGE_SCN_MEM_EXECUTE)
+            continue;
+
+        uint8_t* start = base + s.VirtualAddress;
+        uint8_t* end = start + s.Misc.VirtualSize;
+
+        for (uint8_t* c = std::search(start, end, magic, magic + sizeof(magic)); c < end;
+             c = std::search(c + 1, end, magic, magic + sizeof(magic)))
+        {
+            if (end - c < 16)
+                break;
+
+            const auto headerSize = *reinterpret_cast<const uint16_t*>(c + 6);
+            const auto fatSize = *reinterpret_cast<const uint64_t*>(c + 8);
+
+            if (headerSize != 0x10 || fatSize == 0 || fatSize > (uint64_t) (end - c - 16))
+                continue;
+
+            uint8_t* blackwell = nullptr;
+            size_t blackwellHeader = 0;
+            size_t blackwellPayload = 0;
+            std::vector<uint8_t*> ada;
+            bool valid = true;
+
+            for (uint8_t* image = c + 16; image < c + 16 + fatSize;)
+            {
+                const auto remaining = (uint64_t) (c + 16 + fatSize - image);
+                if (remaining < kImageArch + sizeof(uint32_t))
+                {
+                    valid = false;
+                    break;
+                }
+                const auto kind = *reinterpret_cast<const uint16_t*>(image);
+                const auto imageHeader = *reinterpret_cast<const uint32_t*>(image + 4);
+                const auto payload = *reinterpret_cast<const uint64_t*>(image + kImagePayloadSize);
+                const auto arch = *reinterpret_cast<const uint32_t*>(image + kImageArch);
+
+                if (imageHeader < kImageArch + sizeof(uint32_t) || imageHeader > remaining ||
+                    payload == 0 || payload > remaining - imageHeader)
+                {
+                    valid = false;
+                    break;
+                }
+
+                // kind 1 is PTX, 2 is a cubin. Only the PTX can be retargeted; the cubin is parked.
+                if (kind == 1 && arch == kArchBlackwell)
+                {
+                    if (blackwell != nullptr) { valid = false; break; }
+                    blackwell = image;
+                    blackwellHeader = imageHeader;
+                    blackwellPayload = payload;
+                }
+                else if (arch == kArchAda)
+                {
+                    ada.push_back(image);
+                }
+
+                image += imageHeader + payload;
+            }
+
+            if (!valid || blackwell == nullptr || ada.empty())
+                continue;
+
+            const char from[] = ".target sm_120";
+            const char to[] = ".target sm_89 ";
+            static_assert(sizeof(from) == sizeof(to), "the directive rewrite must not change length");
+
+            uint8_t* body = blackwell + blackwellHeader;
+            uint8_t* bodyEnd = body + blackwellPayload;
+            auto at = std::search(body, bodyEnd, from, from + sizeof(from) - 1);
+
+            if (at == bodyEnd)
+                continue;
+
+            const uint32_t ada89 = kArchAda;
+            const uint32_t parked = kArchParked;
+            // Prepare one complete container first. A failed protection change must not leave
+            // its PTX target and architecture headers disagreeing, or count a partial rewrite.
+            std::vector<uint8_t> patched(c, c + 16 + fatSize);
+            std::memcpy(patched.data() + (at - c), to, sizeof(to) - 1);
+            std::memcpy(patched.data() + (blackwell + kImageArch - c), &ada89, sizeof(ada89));
+            for (uint8_t* image : ada)
+                std::memcpy(patched.data() + (image + kImageArch - c), &parked, sizeof(parked));
+            patches.push_back({reinterpret_cast<uintptr_t>(c), std::vector<uint8_t>(c, c + 16 + fatSize)});
+            if (!WriteBytes(reinterpret_cast<uintptr_t>(c), patched.data(), patched.size()))
+            {
+                RestoreKernels(patches);
+                return 0;
+            }
+            ++rewritten;
+        }
+    }
+
+    LOG_INFO("MFG unlock: {} kernel containers answer Ada with the Blackwell image", rewritten);
+
+    return rewritten;
+}
+
 // Takes ownership of a reference acquired BEFORE taking g_patchMutex. Releasing it happens
 // AFTER unlocking, so a loader callback can never wait on our mutex while we wait on the loader.
 void ProcessProvider(HMODULE ownedModule, bool loaderNotification)
@@ -304,16 +457,15 @@ void ProcessProvider(HMODULE ownedModule, bool loaderNotification)
                 g_unlockedMax.store(kMaxGeneratedFrames, std::memory_order_release);
                 g_settled.store(true, std::memory_order_release);
             }
-            else if (provider.temporalAllocation)
+            else if (!provider.kernelPatches.empty())
             {
-                // A failed rollback may still leave descriptors pointing at this allocation.
+                // Retain a provider if any in-place kernel changes could not be rolled back.
                 provider.retainedModule = reference.Release();
             }
             if (result.AdvertiseMatched || !g_status.AdvertiseMatched) g_status = result;
         }
     } summary { provider, reference };
-    auto& g_temporalPatches = provider.temporalPatches;
-    auto& g_temporalAllocation = provider.temporalAllocation;
+
     LOG_INFO("MFG lifecycle v3: provider={} module={:X} PE timestamp={:X} imageSize={:X}",
              pathText, reinterpret_cast<uintptr_t>(module), nt->FileHeader.TimeDateStamp,
              nt->OptionalHeader.SizeOfImage);
@@ -333,16 +485,14 @@ void ProcessProvider(HMODULE ownedModule, bool loaderNotification)
         return;
     }
 
-    // Replace only the validated Ada temporal program. The former broad Blackwell
-    // retarget and AdaBlackwellKernels configuration are intentionally no longer used.
-    std::string detail;
-    if (!mfgunlock::midpoint::Apply(module, g_temporalPatches, g_temporalAllocation, detail))
+    status.KernelsRewritten = RewriteBlackwellKernels(module, provider.kernelPatches);
+    if (status.KernelsRewritten == 0)
     {
-        LOG_WARN("MFG unlock: targeted Ada temporal correction rejected: {}; gates left unchanged", detail);
+        LOG_WARN("MFG unlock: ShyVortex broad kernel rewrite found no complete compatible containers; gates left unchanged");
         return;
     }
-    status.KernelsRewritten = 1;
-    LOG_INFO("MFG unlock: targeted Ada temporal correction applied: {}; provider={}", detail, pathText);
+    LOG_INFO("MFG unlock: ShyVortex broad kernel rewrite applied to {} containers; provider={}",
+             status.KernelsRewritten, pathText);
 
     // Save both gate regions so any partial capability patch can be rolled back.
     auto advertiseAt = UniqueAddress(module, kAdvertisePattern309);
@@ -365,7 +515,7 @@ void ProcessProvider(HMODULE ownedModule, bool loaderNotification)
         const bool restoredAdvertise = WriteBytes(advertiseAt, advertiseOriginal.data(), advertiseOriginal.size());
         const bool restoredValidate = WriteBytes(validateAt, validateOriginal.data(), validateOriginal.size());
         if (restoredAdvertise && restoredValidate)
-            mfgunlock::midpoint::Restore(g_temporalPatches, g_temporalAllocation);
+            RestoreKernels(provider.kernelPatches);
         status.AdvertiseMatched = false;
         status.ValidateMatched = false;
         status.KernelsRewritten = 0;
