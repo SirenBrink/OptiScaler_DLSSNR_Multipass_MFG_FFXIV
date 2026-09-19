@@ -63,6 +63,7 @@ class SpinLock
     std::atomic<bool> _lock = { false };
 
   public:
+    static bool HookLateNrQueue(ID3D12Device* device);
     void lock()
     {
         int backoff = 1;
@@ -545,6 +546,7 @@ class ResTrack_Dx12
     static ULONG hkRelease(ID3D12Resource* This);
 
     static void HookCommandList(ID3D12Device* InDevice);
+
     static void HookToQueue(ID3D12Device* InDevice);
     static void HookResource(ID3D12Device* InDevice);
 
@@ -582,6 +584,7 @@ class ResTrack_Dx12
     }
 
   public:
+    static bool HookLateNrQueue(ID3D12Device* device);
     static void HookDevice(ID3D12Device* device);
     static void ReleaseHooks();
     static void ReleaseDeviceHooks();

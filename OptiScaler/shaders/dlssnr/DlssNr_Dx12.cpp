@@ -4,6 +4,9 @@
 #include <set>
 
 #include <dlssnr/DlssNr.h>
+#include <dlssnr/DlssNr_GpuLifetime.h>
+#include <dlssnr/amd/AmdBridge.h>
+#include <resource_tracking/ResTrack_dx12.h>
 #include <dlssnr/DlssNrNative.h>
 #include <dlssnr/ResidualFg.h>
 #include <DirectXMath.h>
@@ -384,7 +387,8 @@ struct NrState
     const char* reason = "";
 };
 
-NrState g_nr;
+NrState& g_nr = *new NrState; // Retain unresolved GPU ownership at process teardown.
+DlssNr::GpuLifetime& g_nrLifetime = *new DlssNr::GpuLifetime;
 std::unique_ptr<DlssNr_Dx12> g_compose;
 
 // What the pass costs on the GPU, for the breakdown in the overlay.
@@ -697,60 +701,28 @@ void DiscoverFloatSlot(NVSDK_NGX_Parameter* params)
 // clamps linear HDR into an 8-bit texture -- wrong brightness until something forces a rebuild -- or
 // hands CopyResource mismatched formats, which fails silently and makes the whole pass appear to do
 // nothing. So the set is torn down whenever the format it was built for is not the format needed now.
-// Retired model features and surfaces are parked and freed a comfortable number of evaluates later.
+// Retired model features and surfaces are freed only after tracked recordings and GPU fences finish.
 // Releasing them immediately was the device hang: with frame generation the GPU runs several frames
 // behind, this work rides the game's own queue that no module fence covers, and an NGX feature or
 // scratch texture freed under in-flight work kills the device.
-struct NrRetired
-{
-    void* feature = nullptr;
-    ID3D12Resource* resource = nullptr;
-    int framesLeft = 32;
-};
-
-std::vector<NrRetired> g_nrRetired;
-
 void ParkNrFeature(void*& feature)
 {
-    if (feature == nullptr)
-        return;
-
-    NrRetired r;
-    r.feature = feature;
+    if (!feature) return;
+    const auto retired = feature;
+    const auto release = g_nr.release;
     feature = nullptr;
-    g_nrRetired.push_back(r);
+    g_nrLifetime.Retire([retired, release] { if (release) release(retired); });
 }
 
 void ParkNrResource(ID3D12Resource*& res)
 {
-    if (res == nullptr)
-        return;
-
-    NrRetired r;
-    r.resource = res;
+    if (!res) return;
+    const auto retired = res;
     res = nullptr;
-    g_nrRetired.push_back(r);
+    g_nrLifetime.Retire([retired] { retired->Release(); });
 }
 
-void TickNrRetired()
-{
-    for (size_t i = 0; i < g_nrRetired.size();)
-    {
-        if (--g_nrRetired[i].framesLeft > 0)
-        {
-            ++i;
-            continue;
-        }
-
-        if (g_nrRetired[i].feature != nullptr && g_nr.release != nullptr)
-            g_nr.release(g_nrRetired[i].feature);
-
-        if (g_nrRetired[i].resource != nullptr)
-            g_nrRetired[i].resource->Release();
-
-        g_nrRetired.erase(g_nrRetired.begin() + i);
-    }
-}
+void TickNrRetired() { g_nrLifetime.Collect(); }
 
 // The inject point decides which buffer is being measured -- the upscaler's linear output or the
 // finished frame in swapchain format -- so a reading taken before a change describes a different
@@ -1618,6 +1590,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ReportSkipOnce("the output texture belongs to no D3D12 device");
         return;
     }
+
+    if (!ResTrack_Dx12::HookLateNrQueue(device))
+    {
+        ReportSkipOnce("GPU lifetime submission/reset hooks are unavailable");
+        device->Release();
+        return;
+    }
+    g_nrLifetime.Record(cmdList);
 
     const D3D12_RESOURCE_DESC desc = target->GetDesc();
     const auto active = frame.BeforeUpscale
@@ -2919,6 +2899,25 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         DeferredSr::Cancel();
         lastPrecision = precision;
     }
+    if (cfg.DlssNrEnabled.value_or_default() && cmdList && params)
+    {
+        Microsoft::WRL::ComPtr<ID3D12Device> device;
+        if (SUCCEEDED(cmdList->GetDevice(IID_PPV_ARGS(&device))))
+        {
+            static Microsoft::WRL::ComPtr<ID3D12Device> checkedDevice;
+            static bool amd = false;
+            if (checkedDevice.Get() != device.Get())
+            {
+                checkedDevice = device;
+                amd = DlssNr::AmdBridge::IsAmdDevice(device.Get());
+            }
+            if (amd)
+            {
+                DlssNr::AmdBridge::CanUse(device.Get()); // Surface missing prerequisites in the menu.
+                return; // AMD never enters NVIDIA's runtime path, including missing prerequisites.
+            }
+        }
+    }
     DlssNrNative::SetPrecision(precision);
     if (!cfg.DlssNrEnabled.value_or_default() || !cfg.DlssNrDeferredDlss.value_or_default() || rayReconstruction)
         DeferredSr::Cancel();
@@ -3414,21 +3413,32 @@ void RequestCapture(unsigned int frames)
 
 bool CaptureInProgress() { return g_capture.isActive(); }
 
+void NotifyGpuSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    g_nrLifetime.Submitted(queue, count, lists);
+}
+
+void NotifyGpuReset(ID3D12CommandList* commands)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    g_nrLifetime.ResetRecording(commands);
+}
+
 void Shutdown()
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
-    DeferredSr::Shutdown();
-
-    for (auto& r : g_nrRetired)
+    if (!g_nrLifetime.Idle())
     {
-        if (r.feature != nullptr && g_nr.release != nullptr)
-            g_nr.release(r.feature);
-
-        if (r.resource != nullptr)
-            r.resource->Release();
+        LOG_WARN("DLSS-NR: retaining GPU ownership at shutdown; recordings or fences remain unresolved");
+        g_nr.failed = true;
+        g_compose.release();
+        g_gpuTime.release();
+        g_ngxTime.release();
+        return;
     }
-
-    g_nrRetired.clear();
+    DeferredSr::Shutdown();
+    g_nrLifetime.Collect();
 
     if (g_nr.feature != nullptr && g_nr.release != nullptr)
         g_nr.release(g_nr.feature);

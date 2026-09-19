@@ -2,6 +2,7 @@
 #include "DlssNrFeature_Vk.h"
 
 #include "DlssNr.h"
+#include "amd/AmdBridge.h"
 #include "DlssNr_ExposureScan.h"
 #include "DlssNrNative.h"
 #include "NrUserPresets.h"
@@ -130,6 +131,13 @@ void RenderMenu(Config* config, float menuResScale)
 
         RenderUserPresets(*config);
 
+        const auto amdStatus = DlssNr::AmdBridge::Status();
+        const auto amdPrerequisite = DlssNr::AmdBridge::PrerequisiteError();
+        if (!amdStatus.empty())
+        {
+            ImGui::TextWrapped("%s", amdPrerequisite.empty() ? amdStatus.c_str() : amdPrerequisite.c_str());
+            ImGui::TextWrapped("AMD experimental: enable Run before upscaling. NVIDIA model/style controls do not apply.");
+        }
         bool enabled = config->DlssNrEnabled.value_or_default();
         if (ImGui::Checkbox("Enable Neural Rendering", &enabled))
             config->DlssNrEnabled = enabled;
@@ -195,6 +203,10 @@ void RenderMenu(Config* config, float menuResScale)
         if (!enabled)
         {
             ImGui::TextDisabled("NR off.");
+        }
+        else if (!amdStatus.empty())
+        {
+            // AMD status and prerequisites are displayed above; NVIDIA NGX state does not apply.
         }
         else if (!DlssNr::IsRunning() && !vulkan)
         {

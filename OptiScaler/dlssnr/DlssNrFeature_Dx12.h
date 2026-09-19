@@ -20,6 +20,9 @@ class Config;
 
 namespace DlssNr
 {
+void NotifyGpuSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
+void NotifyGpuReset(ID3D12CommandList* commands);
+
 inline constexpr unsigned int MaxPassCount = 30;
 inline constexpr unsigned int DefaultMaxPassCount = 3;
 

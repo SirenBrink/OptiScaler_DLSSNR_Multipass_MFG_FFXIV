@@ -243,7 +243,13 @@ bool IFeature_Dx11wDx12::ProcessDx11Textures(const NVSDK_NGX_Parameter* InParame
     }
 
     const auto allocatorFenceValue = Dx12CommandAllocatorFenceValue[frame];
-    if (allocatorFenceValue != 0 && Dx12Fence->GetCompletedValue() < allocatorFenceValue)
+    const auto completedBefore = Dx12Fence->GetCompletedValue();
+    if (completedBefore == UINT64_MAX)
+    {
+        LOG_ERROR("Dx11wDx12 allocator fence reports device removal");
+        return false;
+    }
+    if (allocatorFenceValue != 0 && completedBefore < allocatorFenceValue)
     {
         result = Dx12Fence->SetEventOnCompletion(allocatorFenceValue, Dx12FenceEvent);
         if (result != S_OK)
@@ -253,13 +259,21 @@ bool IFeature_Dx11wDx12::ProcessDx11Textures(const NVSDK_NGX_Parameter* InParame
             return false;
         }
 
-        const auto waitResult = WaitForSingleObject(Dx12FenceEvent, INFINITE);
+        const auto waitResult = WaitForSingleObject(Dx12FenceEvent, 5000);
         if (waitResult != WAIT_OBJECT_0)
         {
             LOG_ERROR("WaitForSingleObject failed for allocator {} fence {}: {:X}", frame, allocatorFenceValue,
                       (UINT) waitResult);
             return false;
         }
+    }
+
+    const auto completedAfter = Dx12Fence->GetCompletedValue();
+    if (completedAfter == UINT64_MAX || completedAfter < allocatorFenceValue)
+    {
+        LOG_ERROR("Dx11wDx12 allocator remains in flight or device removed; required {}, completed {}",
+                  allocatorFenceValue, completedAfter);
+        return false;
     }
 
     result = Dx12CommandAllocator[frame]->Reset();
@@ -561,7 +575,7 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
         DlssNr::EvaluateBeforeUpscale(cmdList, InParameters, Dx12CommandQueue, _frameCount,
                                       upscaler == Upscaler::DLSSD, nrGuideSourceWidth,
                                       nrGuideSourceHeight);
-        dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters);
+        dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters, Dx12CommandQueue);
 
         // DLSS 5 Neural Rendering rides the bridge: at this moment the block carries the D3D12 copies
         // of every input, the list is still recording, and the model's edit lands on the D3D12 output

@@ -5,6 +5,8 @@
 
 #include "IFeature_Dx12.h"
 #include "State.h"
+#include <dlssnr/amd/AmdBridge.h>
+#include <resource_tracking/ResTrack_dx12.h>
 
 void IFeature_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
                                     D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState) const
@@ -44,7 +46,7 @@ bool IFeature_Dx12::Init(ID3D12Device* InDevice, ID3D12GraphicsCommandList* InCo
     return result;
 }
 
-bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
+bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters, ID3D12CommandQueue* timingQueue)
 {
     if (!IsInited())
     {
@@ -244,6 +246,30 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
         ID3D12Resource* output;
         ~RestoreOutput() { params->Set(NVSDK_NGX_Parameter_Output, output); }
     } restoreOutput { InParameters, paramOutput };
+
+    ID3D12Resource* originalColor = nullptr;
+    InParameters->Get(NVSDK_NGX_Parameter_Color, &originalColor);
+    struct RestoreColor
+    {
+        NVSDK_NGX_Parameter* parameters;
+        ID3D12Resource* original;
+        bool changed = false;
+        ~RestoreColor() { if (changed) parameters->Set(NVSDK_NGX_Parameter_Color, original); }
+    } restoreColor { InParameters, originalColor };
+    if (Config::Instance()->DlssNrEnabled.value_or_default() &&
+        Config::Instance()->DlssNrRunBeforeSr.value_or_default() && upscaler != Upscaler::DLSSD &&
+        DlssNr::AmdBridge::CanUse(Device) && ResTrack_Dx12::HookLateNrQueue(Device))
+    {
+        if (auto* edited = DlssNr::AmdBridge::Prepare(InCommandList, InParameters, timingQueue,
+                                                    GetFeatureFlags(), timingQueue != nullptr))
+        {
+            if (Config::Instance()->DlssNrApplyModel.value_or_default())
+            {
+            restoreColor.changed = true;
+            InParameters->Set(NVSDK_NGX_Parameter_Color, edited);
+            }
+        }
+    }
 
     UpscalerTime->Start(InCommandList);
 
