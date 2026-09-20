@@ -33,7 +33,7 @@
 //
 // Ada also runs a different interpolation kernel: Kernel_EstimateIntermMvecsScatter reads three f32
 // fields of its parameter block on sm_120 and one on sm_89, so every generated frame lands at the
-// same point between the two real ones. Compatible Blackwell PTX images are retargeted to Ada using the broad ShyVortex rewrite.
+// same point between the two real ones. Only the validated Ada temporal program is corrected; other kernels are preserved.
 namespace MfgUnlock
 {
 // What the last attempt found. The signatures are version specific by construction -- they carry the

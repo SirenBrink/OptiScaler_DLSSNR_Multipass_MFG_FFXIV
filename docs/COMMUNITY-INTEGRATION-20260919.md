@@ -1,5 +1,7 @@
 # Community integration — September 19, 2026
 
+**Update 2026-09-20:** The broad Ada rewrite described below was subsequently reverted to targeted temporal correction; see [ADA-TARGETED-RESTORE.md](ADA-TARGETED-RESTORE.md). The remaining integration is preserved.
+
 This is a selective source integration into the FFXIV branch, not a replacement of its rendering pipeline.
 
 ## Sources and changes
