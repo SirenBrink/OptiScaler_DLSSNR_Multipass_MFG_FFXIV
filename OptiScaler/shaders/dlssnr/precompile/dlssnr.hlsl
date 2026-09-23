@@ -35,6 +35,8 @@ cbuffer Params : register(b0)
     float gSkinColour;
     float gEnvironmentDetail;
     float gEnvironmentColour;
+    uint gResidualRejection;
+    float gReferencePreExposure;
 };
 
 // Bringing an impossible colour back into a possible one.
@@ -523,7 +525,56 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         // Limit the inverse near its poles: DLSS can ring outside the carrier's [0,1] range.
         float3 signedEdit = clamp(2.0 * encoded - 1.0, -0.999, 0.999);
         float3 edit = signedEdit / (1.0 - abs(signedEdit)) * max(gExposurePreMul, 1e-4);
+        if (gMode == 10 && gResidualRejection != 0)
+        {
+            // This is a conservative screen-space change test, not reprojection
+            // or a disocclusion detector. Never transport the clean scene or NR
+            // edit. Only reduce a generated edit that has weak scene support.
+            float3 reference = gOriginal.Load(int3(id.xy, 0)).rgb;
+            bool valid = all(isfinite(base.rgb)) && all(isfinite(reference));
+            float3 a = max(SanitizeFinite3(base.rgb, 0.0), 0.0) / max(gExposurePreMul, 1e-4);
+            float3 b = max(SanitizeFinite3(reference, 0.0), 0.0) / max(gReferencePreExposure, 1e-4);
+            float3 relative = abs(a - b) / (0.04 + max(a, b));
+            float change = max(relative.r, max(relative.g, relative.b));
+            // One weight for RGB preserves the edit's hue. No history is added.
+            // Modest motion differences reduce NR by at most 35%, avoiding a
+            // near on/off alternation against fully evaluated anchor frames.
+            // Strong changes still reach full rejection. This is a softer
+            // spatial confidence curve, not a temporal confidence accumulator.
+            float rejection = 0.35 * smoothstep(0.15, 0.50, change)
+                            + 0.65 * smoothstep(0.50, 0.90, change);
+            float confidence = valid ? saturate(1.0 - rejection) : 0.0;
+            edit *= confidence;
+        }
         gTarget[id.xy] = float4(max(SanitizeFinite3(base.rgb + edit, base.rgb), 0.0), base.a);
+        return;
+    }
+    // Bound only the reconstructed edit, never the clean raster. Current NR
+    // neighbourhoods admit subpixel/detail variation but cannot support a long
+    // trail after an edit has moved away. No additional temporal accumulation.
+    if (gMode == 12)
+    {
+        int2 size = max(int2(gGuideWidth, gGuideHeight), 1);
+        int2 centre = min(int2(uv * size), size - 1);
+        float3 lo = 1.0, hi = 0.0;
+        [unroll] for (int y = -1; y <= 1; ++y)
+        [unroll] for (int x = -1; x <= 1; ++x)
+        {
+            int2 p = clamp(centre + int2(x, y), int2(0, 0), size - 1);
+            float3 v = saturate(SanitizeFinite3(gModel.Load(int3(p, 0)).rgb, 0.5));
+            lo = min(lo, v); hi = max(hi, v);
+        }
+        float3 reference = clamp(SanitizeFinite3(gModel.SampleLevel(gLinear, uv, 0).rgb, 0.5), lo, hi);
+        float3 candidate = SanitizeFinite3(gSource.Load(int3(id.xy, 0)).rgb, reference);
+        float3 delta = candidate - reference;
+        float fraction = 1.0;
+        [unroll] for (int c = 0; c < 3; ++c)
+        {
+            if (delta[c] > 1e-7) fraction = min(fraction, (hi[c] - reference[c]) / delta[c]);
+            else if (delta[c] < -1e-7) fraction = min(fraction, (lo[c] - reference[c]) / delta[c]);
+        }
+        // A single fraction avoids independently clipping RGB components.
+        gTarget[id.xy] = float4(reference + saturate(fraction) * delta, 1.0);
         return;
     }
     if (gMode == 7)

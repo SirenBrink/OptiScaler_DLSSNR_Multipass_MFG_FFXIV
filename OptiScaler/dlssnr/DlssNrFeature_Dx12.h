@@ -28,6 +28,9 @@ void NotifyGpuReset(ID3D12CommandList* commands);
 // NGX reinitialization can resume without changing the user's saved NR setting.
 void SuspendForBridgeShutdown();
 void ResumeAfterBridgeInit();
+// Consumed once by the DX11 bridge immediately after the matching upscale.
+// -1 means current scene; 0..2 means alternating NR and its actual scene age.
+int ConsumePresentationGuideDelay();
 
 inline constexpr unsigned int MaxPassCount = 30;
 inline constexpr unsigned int DefaultMaxPassCount = 3;

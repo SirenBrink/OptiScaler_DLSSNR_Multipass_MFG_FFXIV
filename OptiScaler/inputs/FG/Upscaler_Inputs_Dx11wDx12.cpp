@@ -3,6 +3,7 @@
 #include "Upscaler_Inputs_Dx11wDx12.h"
 
 #include "MathUtils.h"
+#include <dlssnr/DlssNrFeature_Dx12.h>
 
 #include <with_dx12/with_dx12.h>
 #include "shaders/depth_scale/DS_Dx12.h"
@@ -183,6 +184,8 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
     InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &jitterY);
 
     fg->StartNewFrame();
+    fg->SetPresentationGuideDelay(State::Instance().gameExe == "ffxiv_dx11.exe" ?
+        DlssNr::ConsumePresentationGuideDelay() : -1);
     FfxivDynamicMarkers::Upscale(fg->FrameCount());
     // Sample on toggles and periodically, without changing frame/resource scheduling.
     static thread_local int previousFgEnabled = -1;

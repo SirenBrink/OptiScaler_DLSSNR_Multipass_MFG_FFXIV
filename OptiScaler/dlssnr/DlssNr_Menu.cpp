@@ -172,6 +172,10 @@ void RenderMenu(Config* config, float menuResScale)
         if (deferredDlss)
             ImGui::TextWrapped("Residual DLSS: %s", DlssNr::DeferredDlssStatus().c_str());
         ImGui::BeginDisabled(!deferredDlss);
+        bool trailGuard = config->DlssNrPreSrTrailGuard.value_or_default();
+        if (ImGui::Checkbox("Reduce PreSR trailing (experimental)", &trailGuard))
+            config->DlssNrPreSrTrailGuard = trailGuard;
+        HelpMarker("Limits reconstructed NR edits to the current frame's local range before residual FG.\nAlso reduces interpolated edits where the clean scene changes strongly.\nMay reduce trails, but can reduce fine detail or expose flicker. Applies live.\nAdds a GPU pass and one output-sized texture. Test with NR every second frame off first.");
         bool residualFg = config->DlssNrResidualFg.value_or_default();
         if (ImGui::Checkbox("NR every second frame (NVIDIA FG, experimental)", &residualFg))
             config->DlssNrResidualFg = residualFg;
@@ -179,7 +183,13 @@ void RenderMenu(Config* config, float menuResScale)
         bool approxCamera = config->DlssNrResidualFgApproxCamera.value_or_default();
         if (ImGui::Checkbox("Allow approximate FG camera guides (experimental)", &approxCamera))
             config->DlssNrResidualFgApproxCamera = approxCamera;
-        HelpMarker("Use estimated camera data when the game does not provide it. May cause artifacts during camera movement.");
+        HelpMarker("Allows the every-second-frame mode to run its separate NVIDIA FG pass using estimated camera data.\nThis adds FG and image-history work; it is not just a cheap guide toggle. May cause artifacts during camera movement.\nThe GPU breakdown reports cost per call. Normally NR and residual FG run together on NR anchors; the split-work option separates them.");
+        ImGui::BeginDisabled(!residualFg || !approxCamera || State::Instance().gameExe != "ffxiv_dx11.exe");
+        bool splitWork = config->DlssNrSplitFrameWork.value_or_default();
+        if (ImGui::Checkbox("Spread alternating NR across two frames (experimental)", &splitWork))
+            config->DlssNrSplitFrameWork = splitWork;
+        HelpMarker("FFXIV: run NR on one frame and its private DLSS/FG on the next.\nRetains matching guides and scene images. Adds one extra rendered frame of buffering (two total).\nMay improve pacing but increases latency and memory use. Applies live and restarts private history.");
+        ImGui::EndDisabled();
         ImGui::EndDisabled();
 
         // The toggle can be bound to a key, and nobody would think to look for it under Keybinds
@@ -1144,4 +1154,3 @@ void RenderMenu(Config* config, float menuResScale)
 }
 
 } // namespace DlssNr
-

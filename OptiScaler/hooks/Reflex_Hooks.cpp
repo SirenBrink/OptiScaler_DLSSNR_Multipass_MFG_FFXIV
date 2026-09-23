@@ -31,13 +31,14 @@ NvAPI_Status ReflexHooks::hkNvAPI_D3D_SetSleepMode(IUnknown* pDev, NV_SET_SLEEP_
     if (State::Instance().gameQuirks & GameQuirk::HitmanReflexHacks)
         _lastSetSleepThread = std::this_thread::get_id();
 
+    auto effectiveParams = *pSetSleepModeParams;
     if (_minimumIntervalUs != 0)
-        pSetSleepModeParams->minimumIntervalUs = _minimumIntervalUs;
+        effectiveParams.minimumIntervalUs = _minimumIntervalUs;
 
     if (State::Instance().activeFgOutput == FGOutput::XeFG)
-        return nvapi_calls::NvAPI_D3D_SetSleepMode(pDev, pSetSleepModeParams);
+        return nvapi_calls::NvAPI_D3D_SetSleepMode(pDev, &effectiveParams);
 
-    return o_NvAPI_D3D_SetSleepMode(pDev, pSetSleepModeParams);
+    return o_NvAPI_D3D_SetSleepMode(pDev, &effectiveParams);
 }
 
 NvAPI_Status ReflexHooks::hkNvAPI_D3D_Sleep(IUnknown* pDev)
@@ -385,10 +386,11 @@ NvAPI_Status ReflexHooks::hkNvAPI_Vulkan_SetSleepMode(HANDLE vkDevice,
     memcpy(&_lastVkSleepParams, pSetSleepModeParams, sizeof(NV_VULKAN_SET_SLEEP_MODE_PARAMS));
     _lastVkSleepDev = vkDevice;
 
+    auto effectiveParams = *pSetSleepModeParams;
     if (_minimumIntervalUs != 0)
-        pSetSleepModeParams->minimumIntervalUs = _minimumIntervalUs;
+        effectiveParams.minimumIntervalUs = _minimumIntervalUs;
 
-    return o_NvAPI_Vulkan_SetSleepMode(vkDevice, pSetSleepModeParams);
+    return o_NvAPI_Vulkan_SetSleepMode(vkDevice, &effectiveParams);
 }
 
 NvAPI_Status ReflexHooks::hkNvAPI_Vulkan_GetLatency(HANDLE vkDevice, NV_VULKAN_LATENCY_RESULT_PARAMS* pGetLatencyParams)
@@ -578,11 +580,11 @@ void ReflexHooks::update(bool fgActive, bool isVulkan)
 
     if (_updatesWithoutMarker > 20 || !_inited)
     {
+        // Continue through the transition reset so the old driver cap is cleared
+        // before the software limiter takes over.
         State::Instance().reflexLimitsFps = false;
-        return;
     }
-
-    if (isVulkan && _lastVkSleepDev)
+    else if (isVulkan && _lastVkSleepDev)
     {
         // fgActive doesn't matter for vulkan
         // isUsingAsMainNvapi() because fakenvapi might override the reflex' setting and we don't know it
@@ -618,11 +620,16 @@ void ReflexHooks::update(bool fgActive, bool isVulkan)
     static float lastFps = 0;
     static bool lastReflexLimitsFps = State::Instance().reflexLimitsFps;
     static LowLatencyMode lastLowLatencyMode = fakenvapi::getCurrentMode();
+    static IUnknown* lastLimitDevice = nullptr;
+    static HANDLE lastLimitVkDevice = nullptr;
 
     // Reset required when toggling Reflex
-    if (State::Instance().reflexLimitsFps != lastReflexLimitsFps)
+    if (State::Instance().reflexLimitsFps != lastReflexLimitsFps ||
+        _lastSleepDev != lastLimitDevice || _lastVkSleepDev != lastLimitVkDevice)
     {
         lastReflexLimitsFps = State::Instance().reflexLimitsFps;
+        lastLimitDevice = _lastSleepDev;
+        lastLimitVkDevice = _lastVkSleepDev;
         lastFps = 0;
         setFPSLimit(0);
     }

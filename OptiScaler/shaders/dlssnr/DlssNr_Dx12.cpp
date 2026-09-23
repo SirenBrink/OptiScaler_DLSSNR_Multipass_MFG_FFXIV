@@ -21,6 +21,9 @@
 #include "DlssNr_Guides.h"
 #include "DlssNr_SeamClock.h"
 #include "PreSrMotionReset.h"
+#include "PreSrTiming.h"
+#include "PreSrCadence.h"
+#include "PreSrSplitSchedule.h"
 #include <DirectXPackedVector.h>
 
 #include <Config.h>
@@ -34,6 +37,7 @@
 
 #include <mutex>
 #include <atomic>
+#include <format>
 #include <algorithm>
 #include <cstring>
 #include "precompile/DlssNr_Shader.h"
@@ -2982,6 +2986,13 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
 
     if (!cfg.DlssNrEnabled.value_or_default())
     {
+        // Features remain allocated across the toggle, but their last image may
+        // now belong to another camera/scene. Restart only when they run again.
+        if (State::Instance().gameExe == "ffxiv_dx11.exe")
+        {
+            g_nr.reset = true;
+            for (auto& pendingReset : g_nr.passNeedsReset) pendingReset = true;
+        }
         ReportSkipOnce("it is switched off");
         return;
     }
@@ -3273,6 +3284,14 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     g_compose->Dispatch(cmdList, target, depth, motion, target, frame, timingQueue);
 }
 
+int ConsumePresentationGuideDelay()
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    const int age = DeferredSr::presentationGuideDelay;
+    DeferredSr::presentationGuideDelay = -1;
+    return age;
+}
+
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                           ID3D12CommandQueue* timingQueue, bool rayReconstruction,
                           unsigned long long submissionEpoch, unsigned int guideSourceWidth,
@@ -3287,6 +3306,10 @@ void EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramet
                             bool rayReconstruction, unsigned int guideSourceWidth,
                             unsigned int guideSourceHeight)
 {
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+        DeferredSr::presentationGuideDelay = -1;
+    }
     EvaluateInternal(cmdList, params, true, timingQueue, rayReconstruction, submissionEpoch,
                      guideSourceWidth, guideSourceHeight);
 }

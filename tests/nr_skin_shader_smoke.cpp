@@ -143,6 +143,55 @@ int wmain(int argc, wchar_t** argv) try {
     result=run(); expect(same(result[0],carrierEdit[0]) && same(result[1],carrierEdit[1]),
                          "Allowed FG residual was not composed");
     std::puts("PASS: rejected FG output preserves the clean frame");
+    static_assert(offsetof(DlssNrConstants, ResidualRejection) == 116);
+    static_assert(offsetof(DlssNrConstants, ReferencePreExposure) == 120);
+    auto referenceDesc=desc;referenceDesc.Usage=D3D11_USAGE_DEFAULT;referenceDesc.CPUAccessFlags=0;
+    referenceDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> reference;ComPtr<ID3D11ShaderResourceView> referenceSrv;
+    check(device->CreateTexture2D(&referenceDesc,nullptr,&reference));
+    check(device->CreateShaderResourceView(reference.Get(),nullptr,&referenceSrv));
+    ctx->CSSetShaderResources(2,1,referenceSrv.GetAddressOf());
+    auto referencePixels=carrierBase;referencePixels[1]={3,0,4,1};
+    ctx->UpdateSubresource(reference.Get(),0,nullptr,referencePixels.data(),sizeof(referencePixels),0);
+    settings.ResidualRejection=1;settings.ReferencePreExposure=2;
+    result=run();expect(same(result[0],carrierEdit[0])&&same(result[1],carrierBase[1]),
+        "Interpolated rejection changed stable edit or retained unsupported edit");
+    referencePixels=carrierBase;for(auto& p:referencePixels){p.r*=0.5f;p.g*=0.5f;p.b*=0.5f;}
+    ctx->UpdateSubresource(reference.Get(),0,nullptr,referencePixels.data(),sizeof(referencePixels),0);
+    settings.ReferencePreExposure=1;
+    result=run();expect(same(result[0],carrierEdit[0])&&same(result[1],carrierEdit[1]),
+        "Pre-exposure change incorrectly rejected stable NR");
+    referencePixels=carrierBase;referencePixels[0].b=NAN;
+    ctx->UpdateSubresource(reference.Get(),0,nullptr,referencePixels.data(),sizeof(referencePixels),0);
+    settings.ReferencePreExposure=2;
+    result=run();expect(same(result[0],carrierBase[0]),"Invalid reference retained interpolated edit");
+    referencePixels=carrierBase;referencePixels[0].r*=1.45f;
+    ctx->UpdateSubresource(reference.Get(),0,nullptr,referencePixels.data(),sizeof(referencePixels),0);
+    result=run();
+    float wr=(result[0].r-carrierBase[0].r)/(carrierEdit[0].r-carrierBase[0].r);
+    float wg=(result[0].g-carrierBase[0].g)/(carrierEdit[0].g-carrierBase[0].g);
+    expect(wr>0&&wr<1&&std::abs(wr-wg)<0.0001f&&result[0].a==carrierBase[0].a,
+        "Partial rejection changed hue/alpha or failed to soften confidence");
+    expect(wr >= 0.65f, "Moderate scene change weakened NR beyond the flicker budget");
+    float previousWeight=1;
+    // Invert the relative-change equation to sweep the actual shader curve.
+    for(unsigned step=0;step<=90;++step){
+        const float change=step/100.0f;
+        referencePixels=carrierBase;
+        referencePixels[0].r=(carrierBase[0].r + 0.08f*change)/(1-change);
+        ctx->UpdateSubresource(reference.Get(),0,nullptr,referencePixels.data(),sizeof(referencePixels),0);
+        result=run();
+        const float weight=(result[0].r-carrierBase[0].r)/(carrierEdit[0].r-carrierBase[0].r);
+        expect(weight>=-0.0001f&&weight<=previousWeight+0.0001f&&previousWeight-weight<0.04f,
+               "Confidence curve is discontinuous, nonmonotonic or out of bounds");
+        if(change<=0.5f)expect(weight>=0.6499f,"Moderate rejection exceeded 35 percent");
+        previousWeight=weight;
+    }
+    expect(previousWeight<0.0001f,"Strong changes no longer fully reject interpolated edits");
+    settings.Mode=DlssNrMode_ApplyResidual;result=run();
+    expect(same(result[0],carrierEdit[0]),"Midpoint guard changed a real NR anchor");
+    settings.ResidualRejection=0;ctx->CSSetShaderResources(2,1,originalSrv.GetAddressOf());
+    std::puts("PASS: midpoint rejection preserves stable/anchor edits, clean pixels, alpha, hue and exposure; rejects invalid support");
     DlssNrResidualHold hold;
     expect(!hold.CanReuse(0), "Uninitialized hold was reused");
     hold.SampleSucceeded(0);

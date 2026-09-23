@@ -266,6 +266,9 @@ class Config
     // Generate NR before SR, upscale its signed contribution with a private DLSS feature,
     // and apply it after the game's upscaler. Takes precedence over RunBeforeSR; opt-in.
     CustomOptional<bool> DlssNrDeferredDlss { false };
+    // Experimental current-frame bounds for the private PreSR contribution.
+    CustomOptional<bool> DlssNrPreSrTrailGuard { false };
+    CustomOptional<bool> DlssNrSplitFrameWork { false };
     CustomOptional<bool> DlssNrResidualFg { false };
     CustomOptional<uint32_t> DlssNrPrecision { 0 }; // 0 NVIDIA FP8 (default), 4 Experimental NVFP4 hybrid
     CustomOptional<bool> DlssNrResidualFgApproxCamera { false };

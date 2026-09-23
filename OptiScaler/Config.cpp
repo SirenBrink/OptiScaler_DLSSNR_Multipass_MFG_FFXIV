@@ -323,6 +323,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrEnabled.set_from_config(readBool("DlssNr", "Enabled"));
             DlssNrRunBeforeSr.set_from_config(readBool("DlssNr", "RunBeforeSR"));
             DlssNrDeferredDlss.set_from_config(readBool("DlssNr", "DeferredDLSS"));
+            DlssNrPreSrTrailGuard.set_from_config(readBool("DlssNr", "PreSRTrailGuard"));
+            DlssNrSplitFrameWork.set_from_config(readBool("DlssNr", "SplitFrameWork"));
             DlssNrResidualFg.set_from_config(readBool("DlssNr", "ResidualFG"));
             DlssNrPrecision.set_from_config(readUInt("DlssNr", "Precision"));
             if (DlssNrPrecision.value_or_default() != 4) DlssNrPrecision = 0u;
@@ -1250,6 +1252,8 @@ bool Config::SaveIni()
                  GetBoolValue(Instance()->DlssNrRunBeforeSr.value_for_config()).c_str());
     ini.SetValue("DlssNr", "DeferredDLSS",
                  GetBoolValue(Instance()->DlssNrDeferredDlss.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "PreSRTrailGuard", GetBoolValue(Instance()->DlssNrPreSrTrailGuard.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SplitFrameWork", GetBoolValue(Instance()->DlssNrSplitFrameWork.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ResidualFG", GetBoolValue(Instance()->DlssNrResidualFg.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Precision", GetIntValue(Instance()->DlssNrPrecision.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ResidualFGApproxCamera", GetBoolValue(Instance()->DlssNrResidualFgApproxCamera.value_for_config()).c_str());

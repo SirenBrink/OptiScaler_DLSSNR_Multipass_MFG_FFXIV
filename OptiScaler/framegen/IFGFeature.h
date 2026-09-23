@@ -133,6 +133,7 @@ class IFGFeature
     bool IsInvertedDepth();
     bool IsInfiniteDepth();
 
+    virtual void SetPresentationGuideDelay(int age) {}
     void SetFrameCount(UINT64 frameId);
     void SetJitter(float x, float y, int index = -1);
     void SetMVScale(float x, float y, int index = -1);
@@ -150,6 +151,8 @@ class IFGFeature
     UINT GetInterpolatedFrameCount() const;
     int GetMaxInterpolationCount() const;
     bool GetDMFGSupport() const;
+    // Latest observed presentation multiplier; zero means unavailable/stale.
+    virtual unsigned GetObservedFrameMultiplier() const { return 0; }
 
     void ResetCounters();
     void UpdateTarget();

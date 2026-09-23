@@ -4204,6 +4204,14 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 }
 
                 ImGui::BeginDisabled(!config->FGDLSSGForceDMFG.value_or_default());
+                const auto observedMultiplier = fgOutput->GetObservedFrameMultiplier();
+                if (observedMultiplier)
+                    ImGui::Text("Current DMFG: %uX (observed)", observedMultiplier);
+                else
+                    ImGui::TextDisabled("Current DMFG: waiting for presentation data");
+                ShowHelpMarker("Latest observed output frames per real frame, including the real frame. "
+                               "May differ from the driver's next selection during transitions. "
+                               "This reads cached telemetry and does not change factor selection.");
                 static float fpsTarget = config->FGDLSSGFramerateTargetDMFG.value_or_default();
                 ImGui::SliderFloat("DMFG FPS Target", &fpsTarget, 0, 200, "%.0f");
 

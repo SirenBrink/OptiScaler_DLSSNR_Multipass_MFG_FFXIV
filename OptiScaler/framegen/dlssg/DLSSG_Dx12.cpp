@@ -288,6 +288,11 @@ void DLSSG_Dx12::Activate()
 
 void DLSSG_Dx12::Deactivate()
 {
+    _historyFrames.Invalidate();
+    _sceneHistory.Invalidate();
+    for (auto& slot : _guideSnapshots) for (auto& guide : slot) guide.valid = false;
+    _observedMultiplier.store(0, std::memory_order_relaxed);
+    _sampleMode = -1;
     LOG_DEBUG("");
 
     if (_isActive)
@@ -384,7 +389,23 @@ bool DLSSG_Dx12::Dispatch()
 
     StreamlineHooks::applyMenuDlssgInterlock(options, true);
     auto dlssgSetOptionsResult = StreamlineProxy::DLSSGSetOptions()(viewport, options);
-    // Sample runtime telemetry on this dispatch thread; presented count resets on each query.
+    // Query once per real dispatch, on the existing serialized SL thread. Do not query
+    // from ImGui: GetState is not thread safe and consumes presentation telemetry.
+    // This is an observed output multiplier, not a prediction of the driver's next factor.
+    sl::DLSSGState runtimeState {};
+    const auto queryResult = StreamlineProxy::DLSSGGetState()(viewport, runtimeState, nullptr);
+    const auto sampleTime = GetTickCount64();
+    const auto mode = static_cast<int>(options.mode);
+    const auto count = runtimeState.numFramesActuallyPresented;
+    if (_sampleMode == mode && options.mode == sl::DLSSGMode::eDynamic &&
+        dlssgSetOptionsResult == sl::Result::eOk && queryResult == sl::Result::eOk &&
+        static_cast<unsigned>(runtimeState.status) == 0 && count >= 1 &&
+        count <= static_cast<unsigned>(_maxInterpolationCount + 1))
+        _observedMultiplier.store((sampleTime << 8) | count, std::memory_order_relaxed);
+    else
+        _observedMultiplier.store(0, std::memory_order_relaxed);
+    _sampleMode = queryResult == sl::Result::eOk ? mode : -1;
+
     static thread_local ULONGLONG lastDiagnosticTime = 0;
     static thread_local int lastDiagnosticMode = -1;
     static thread_local float lastDiagnosticTarget = -1.0f;
@@ -393,8 +414,6 @@ bool DLSSG_Dx12::Dispatch()
     if (diagnosticMode != lastDiagnosticMode || options.dynamicTargetFrameRate != lastDiagnosticTarget ||
         diagnosticTime - lastDiagnosticTime >= 2000)
     {
-        sl::DLSSGState runtimeState {};
-        const auto queryResult = StreamlineProxy::DLSSGGetState()(viewport, runtimeState, nullptr);
         LOG_INFO("DLSSG runtime diagnostic: mode={} target={} requestedGenerated={} setResult={} queryResult={} status={} presentedSinceQuery={} sampleMs={} frame={}",
                  diagnosticMode, options.dynamicTargetFrameRate, options.numFramesToGenerate,
                  magic_enum::enum_name(dlssgSetOptionsResult), magic_enum::enum_name(queryResult),
@@ -455,6 +474,8 @@ bool DLSSG_Dx12::Dispatch()
         }
     }
 
+    const int age = _guideAge[fIndex];
+    const auto sceneFrame = willDispatchFrame - (age < 0 ? 0 : age);
     sl::Constants constData = {};
 
     if (IsInfiniteDepth() && _cameraFar[fIndex] > _cameraNear[fIndex])
@@ -558,8 +579,12 @@ bool DLSSG_Dx12::Dispatch()
     //              1.0f / (float) fResY);
     //}
 
+    // The dispatch selector advances even when input readiness later prevents FG.
+    // FFXIV must not reuse pre-pause/pre-gap history on the next accepted frame.
+    const bool discontinuity = state.gameExe == "ffxiv_dx11.exe" &&
+        (_historyFrames.NeedsReset(willDispatchFrame) || _sceneHistory.NeedsReset(sceneFrame));
     if (!Config::Instance()->FGSkipReset.value_or_default())
-        constData.reset = _reset[fIndex] != 0 ? sl::Boolean::eTrue : sl::Boolean::eFalse;
+        constData.reset = (_reset[fIndex] != 0 || discontinuity) ? sl::Boolean::eTrue : sl::Boolean::eFalse;
     else
         constData.reset = sl::Boolean::eFalse;
 
@@ -596,6 +621,17 @@ bool DLSSG_Dx12::Dispatch()
 
         return false;
     }
+
+    if (dlssgSetOptionsResult == sl::Result::eOk && options.mode != sl::DLSSGMode::eOff)
+    {
+        if (discontinuity && constData.reset == sl::Boolean::eTrue)
+            LOG_INFO("DLSSG history restart: accepted frame {} after {} (hadHistory={})",
+                     willDispatchFrame, _historyFrames.last, _historyFrames.valid);
+        _historyFrames.Commit(willDispatchFrame);
+        _sceneHistory.Commit(sceneFrame);
+    }
+    else
+        _historyFrames.Invalidate();
 
     LOG_DEBUG("Result: Ok");
 
@@ -679,6 +715,11 @@ void DLSSG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
 
 void DLSSG_Dx12::ReleaseObjects()
 {
+    CollectGuides();
+    for (auto& slot : _guideSnapshots) for (auto& guide : slot)
+    { RetireGuide(guide.resource); guide.valid = false; }
+    // Unfinished copies are deliberately retained through shutdown, not freed
+    // while an unsubmitted/driver-owned command may still reference them.
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
         SAFE_RELEASE(_uiCommandAllocator[i]);
@@ -948,6 +989,105 @@ bool DLSSG_Dx12::Present()
     return Dispatch();
 }
 
+// These copies are recorded on the existing FG UI list/queue. Streamline is
+// tagged OnlyValidNow, so later consumption uses its own frame-owned copy.
+void DLSSG_Dx12::RetireGuide(ID3D12Resource*& resource)
+{
+    if (!resource) return;
+    if (_uiFence) _uiFence->AddRef();
+    _retiredGuides.push_back({resource, _uiFence, _uiFenceValue});
+    resource = nullptr;
+}
+void DLSSG_Dx12::CollectGuides()
+{
+    std::erase_if(_retiredGuides, [&](const RetiredGuide& item) {
+        if (!item.fence || item.fence->GetCompletedValue() == UINT64_MAX ||
+            item.fence->GetCompletedValue() < item.value) return false;
+        // A higher signaled fence cannot prove that an older, still-open list
+        // has executed. Keep any snapshots those unsubmitted lists may reference.
+        if (item.fence == _uiFence)
+            for (unsigned i=0; i<BUFFER_COUNT; ++i)
+                if (_uiCommandListResetted[i] && _uiAllocatorFenceValues[i] <= item.value) return false;
+        item.resource->Release(); item.fence->Release(); return true;
+    });
+}
+void DLSSG_Dx12::SetPresentationGuideDelay(int age)
+{
+    const int index = GetIndex();
+    age = age >= 0 && age <= 2 ? age : -1;
+    if (age < 0)
+        for (auto& slot : _guideSnapshots) for (auto& guide : slot) guide.valid = false;
+    _guideAge[index] = age;
+    CollectGuides();
+}
+bool DLSSG_Dx12::MatchPresentationGuide(Dx12Resource& input, int index)
+{
+    const auto kind = input.type == FG_ResourceType::Velocity ? 0 : 1;
+    auto& current = _guideSnapshots[index][kind];
+    const int age = _guideAge[index];
+    if (!input.cmdList || input.cmdList != _uiCommandList[index] ||
+        input.validity != FG_ResourceValidity::ValidNow || _frameCount < UINT64(age)) return false;
+    if (_reset[index] && _guideResetFrame != _frameCount)
+    {
+        for (auto& slot : _guideSnapshots) for (auto& guide : slot) guide.valid = false;
+        _guideResetFrame = _frameCount;
+    }
+    if (kind == 0)
+    {
+        auto& m = _guideMetadata[index];
+        m = {{_jitterX[index],_jitterY[index],_mvScaleX[index],_mvScaleY[index],
+              _cameraNear[index],_cameraFar[index],_cameraVFov[index],_cameraAspectRatio[index],_meterFactor[index]}, {},
+              _ftDelta[index], _reset[index]};
+        const float* vectors[] {_cameraPosition[index],_cameraUp[index],_cameraRight[index],_cameraForward[index]};
+        for (unsigned v=0;v<4;++v) std::copy_n(vectors[v],3,m.vectors[v]);
+    }
+    const auto desc = input.resource->GetDesc();
+    auto sameShape = [](const D3D12_RESOURCE_DESC& a, const D3D12_RESOURCE_DESC& b) {
+        return a.Dimension == b.Dimension && a.Width == b.Width && a.Height == b.Height &&
+            a.Format == b.Format && a.DepthOrArraySize == b.DepthOrArraySize &&
+            a.MipLevels == b.MipLevels && a.SampleDesc.Count == b.SampleDesc.Count &&
+            a.SampleDesc.Quality == b.SampleDesc.Quality && a.Flags == b.Flags;
+    };
+    if (current.resource && !sameShape(current.resource->GetDesc(), desc))
+        RetireGuide(current.resource);
+    current.valid = false;
+    if (current.resource)
+        ResourceBarrier(input.cmdList, current.resource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        D3D12_RESOURCE_STATE_COPY_DEST);
+    if (!CopyResource(input.cmdList, input.resource, &current.resource, input.state)) return false;
+    ResourceBarrier(input.cmdList, current.resource, D3D12_RESOURCE_STATE_COPY_DEST,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    current.view = input;
+    current.view.resource = current.resource;
+    current.view.copy = nullptr;
+    current.view.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    current.frame = _frameCount;
+    current.valid = true;
+    const auto& selected = _guideSnapshots[(index + BUFFER_COUNT - age) % BUFFER_COUNT][kind];
+    if (!selected.valid || selected.frame != _frameCount - age ||
+        !sameShape(selected.resource->GetDesc(), desc) || selected.view.width != input.width ||
+        selected.view.height != input.height || selected.view.left != input.left || selected.view.top != input.top)
+        return false; // Warm-up, gap or resize: do not tag mismatched guides.
+    if (kind == 1)
+    {
+        const auto& m = _guideMetadata[(index + BUFFER_COUNT - age) % BUFFER_COUNT];
+        SetJitter(m.values[0],m.values[1],index); SetMVScale(m.values[2],m.values[3],index);
+        SetCameraValues(m.values[4],m.values[5],m.values[6],m.values[7],m.values[8],index);
+        float* vectors[] {_cameraPosition[index],_cameraUp[index],_cameraRight[index],_cameraForward[index]};
+        for (unsigned v=0;v<4;++v) std::copy_n(m.vectors[v],3,vectors[v]);
+        SetFrameTimeDelta(m.delta,index); SetReset(_reset[index] | m.reset,index);
+    }
+    const auto commands = input.cmdList;
+    input = selected.view;
+    input.cmdList = commands;
+    input.frameIndex = index;
+    input.validity = FG_ResourceValidity::ValidNow;
+    if (kind == 1 && (_frameCount % 240 == 0 || age == 0))
+        LOG_INFO("DLSSG matched NR guides: frame={} scene={} age={} render={}x{}", _frameCount,
+                 selected.frame, age, input.width, input.height);
+    return true;
+}
+
 bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
 {
     if (inputResource == nullptr || inputResource->resource == nullptr ||
@@ -962,6 +1102,14 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
     if (fIndex < 0)
         fIndex = GetIndex();
 
+    Dx12Resource matched;
+    if (_guideAge[fIndex] >= 0 && (inputResource->type == FG_ResourceType::Depth ||
+                                  inputResource->type == FG_ResourceType::Velocity))
+    {
+        matched = *inputResource;
+        if (!MatchPresentationGuide(matched, fIndex)) return false;
+        inputResource = &matched;
+    }
     auto& type = inputResource->type;
 
     std::unique_lock<std::shared_mutex> lock(_resourceMutex[fIndex]);
@@ -1035,6 +1183,7 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
     fResource->state = inputResource->state;
     fResource->validity = inputResource->validity;
     fResource->resource = inputResource->resource;
+    if (type == FG_ResourceType::Depth || type == FG_ResourceType::Velocity) fResource->copy = nullptr;
     fResource->top = inputResource->top;
     fResource->left = inputResource->left;
     fResource->width = inputResource->width;

@@ -16,6 +16,9 @@
 #include <dlssnr/ResidualFg.h>
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <shaders/dlssnr/PreSrMotionReset.h>
+#include <shaders/dlssnr/PreSrTiming.h>
+#include <shaders/dlssnr/PreSrCadence.h>
+#include <shaders/dlssnr/PreSrSplitSchedule.h>
 
 #define LOG_INFO(...) ((void)0)
 static bool runtimeAlive = true;
