@@ -6,6 +6,7 @@
 #include "DlssNr_ExposureScan.h"
 #include "DlssNrNative.h"
 #include "NrUserPresets.h"
+#include <misc/FfxivLightingCapture.h>
 
 
 #include <Config.h>
@@ -521,8 +522,72 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::TreePop();
         }
 
-        ImGui::TextDisabled("HDR input settings. Adjust the brightness range presented to NR.");
+        const bool nativeLighting = State::Instance().gameExe == "ffxiv_dx11.exe" &&
+            State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+        if (nativeLighting)
+            ImGui::TextWrapped("FFXIV applies exposure before NR. Native scanned lighting can detect abrupt lighting changes for history rejection.");
+        else
+            ImGui::TextDisabled("HDR input settings. Adjust the brightness range presented to NR.");
 
+        if (State::Instance().gameExe == "ffxiv_dx11.exe" && ImGui::TreeNode("Native DX11 lighting capture (diagnostic)"))
+        {
+            ImGui::TextWrapped("Capture a stationary bright view, a stationary dark view, then a lighting transition. Each capture lasts 12 seconds. Turn NR off for the first set.");
+            ImGui::TextDisabled("Recognized lighting shaders loaded: %u / 9", FfxivLightingCapture::Loaded());
+            ImGui::BeginDisabled(!FfxivLightingCapture::installed.load() || FfxivLightingCapture::Busy());
+            if (ImGui::Button("Capture bright view")) FfxivLightingCapture::Request(1);
+            if (ImGui::Button("Capture dark view")) FfxivLightingCapture::Request(2);
+            if (ImGui::Button("Capture transition")) FfxivLightingCapture::Request(3);
+            ImGui::EndDisabled();
+            ImGui::TextWrapped("%s", FfxivLightingCapture::Status().c_str());
+            ImGui::TextWrapped("Saved under OptiScaler_LightingCaptures in the game folder. This records diagnostic data; it does not adjust exposure.");
+            ImGui::TreePop();
+        }
+
+
+        if (nativeLighting)
+        {
+            static const char* sources[] { "Manual paper white", "Game exposure", "Scanned exposure (native DX11)" };
+            int source = (int) std::min(config->DlssNrWhitePointSource.value_or_default(), 2u);
+            if (ImGui::Combo("Exposure source", &source, sources, IM_ARRAYSIZE(sources)))
+                config->DlssNrWhitePointSource = (uint32_t) source;
+            HelpMarker("Scanned exposure follows FFXIV's verified native DX11 lighting shaders.\nThe game has already applied exposure: no additional brightness correction or calibration is used.");
+            if (source == 2)
+            {
+                bool history = config->DlssNrLightingHistory.value_or_default();
+                if (ImGui::Checkbox("Reject abrupt lighting history (experimental)", &history))
+                    config->DlssNrLightingHistory = history;
+                HelpMarker("Restart NR and its private PreSR reconstruction history when native tone response changes abruptly.\nGradual adaptation and stale readings do not trigger resets. Turn this off to compare while keeping the scan active.");
+                const auto light = FfxivLightingScan::Latest();
+                const auto now = GetTickCount64();
+                if (light.failed)
+                    ImGui::TextWrapped("Native lighting scan stopped after a readback error or timeout. Lighting rejection is inactive until restart.");
+                else if (!FfxivLightingCapture::installed.load())
+                    ImGui::TextWrapped("Native lighting hooks unavailable. Lighting rejection is inactive.");
+                else if (FfxivLightingScan::Fresh(light, now))
+                {
+                    ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
+                        "Native DX11 lighting: active | adapted gain %.3fx", light.gain);
+                    ImGui::TextDisabled("%llu readings | %llu lighting cuts detected | %llu ms old",
+                        light.samples, light.events, now - light.sampleTime);
+                    if (!config->DlssNrEnabled.value_or_default() || !history || config->DlssNrHoldFrame.value_or_default())
+                        ImGui::TextDisabled("Monitoring only; lighting history rejection is inactive.");
+                }
+                else
+                    ImGui::TextWrapped("Lighting rejection is inactive: %s", light.valid ? "last reading is stale." : light.reason);
+            }
+            else if (source == 1)
+                ImGui::TextWrapped("FFXIV supplies no separate game exposure texture. Select Scanned exposure for native lighting tracking.");
+            else
+                ImGui::TextWrapped("Paper-white correction is bypassed for FFXIV's already tone-mapped input. Native lighting tracking is off.");
+
+            float maxRatio = config->DlssNrMaxRatio.value_or_default();
+            if (ImGui::SliderFloat("Highlight guard", &maxRatio, 1.0f, unlockPasses ? (float) MaxPassCount : 8.0f, "%.1fx"))
+                config->DlssNrMaxRatio = maxRatio;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset##guard")) config->DlssNrMaxRatio = 2.0f;
+            HelpMarker("Limit how much NR can brighten or darken a pixel. Independent of native exposure tracking.");
+        }
+        else
         {
         // Logarithmic, because the useful range is not linear. A quarter to 240: the low end because
         // a frame the game already tone mapped wants roughly 1, the high end because there is no

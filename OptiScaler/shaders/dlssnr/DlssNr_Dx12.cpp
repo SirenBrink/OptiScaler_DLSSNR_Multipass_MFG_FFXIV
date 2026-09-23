@@ -25,6 +25,7 @@
 
 #include <Config.h>
 #include <State.h>
+#include <misc/FfxivLightingScan.h>
 #include <Util.h>
 
 #include <proxies/NVNGX_Proxy.h>
@@ -1025,8 +1026,8 @@ float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer)
 {
     const float slider = cfg.DlssNrWhitePointScale.value_or_default();
 
-    // A frame the game already tone mapped is display-referred: white is at 1 by definition and there
-    // is nothing to measure. The slider stays available as a manual exposure on that path.
+    // Already-tone-mapped input bypasses WhitePoint in encode/resolve. This value
+    // remains available for the comparison divider; it is not manual exposure on that path.
     if (!isHdrBuffer)
         return slider;
 
@@ -1648,15 +1649,26 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     g_nr.guideMvScaleX = frame.MvScaleX;
     g_nr.guideMvScaleY = frame.MvScaleY;
 
-    if (frame.Reset)
+    static uint64_t lightingEvent = 0;
+    const bool lightingReset = !frame.ColourIsLinearHdr &&
+        State::Instance().gameExe == "ffxiv_dx11.exe" &&
+        State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 &&
+        cfg.DlssNrWhitePointSource.value_or_default() == 2 && cfg.DlssNrLightingHistory.value_or_default() &&
+        !cfg.DlssNrHoldFrame.value_or_default() && FfxivLightingScan::ConsumeReset(lightingEvent);
+    if (lightingReset)
+        LOG_INFO("DLSS-NR: native lighting event {} invalidates model history", lightingEvent);
+    if (frame.Reset || lightingReset)
     {
         g_nr.reset = true;
+        // Keep resets pending for passes that cannot evaluate this frame.
+        // Clearing the shared reset after pass 0 must not lose a cut for pass N.
+        for (auto& pendingReset : g_nr.passNeedsReset) pendingReset = true;
 
         static unsigned long long resets = 0;
         ++resets;
 
         if (resets <= 3 || resets % 100 == 0)
-            LOG_INFO("DLSS-NR: the game asked for a history reset ({} so far)", resets);
+            LOG_INFO("DLSS-NR: frame/history reset ({} so far)", resets);
     }
 
     // Logged whenever it changes, not once per session.

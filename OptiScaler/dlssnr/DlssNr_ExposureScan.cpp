@@ -3,6 +3,7 @@
 #include "DlssNr_ExposureScan.h"
 
 #include <Config.h>
+#include <State.h>
 #include <Util.h>
 
 #include <algorithm>
@@ -204,8 +205,16 @@ bool EnsureReadback(ID3D12Device* device)
 // to want: watching the scan in a game that supplies a REAL exposure, so the two can be
 // compared in the log. That is validation work, not a control, and it does not belong in a
 // panel.
+bool NativeBridge()
+{
+    return State::Instance().gameExe == "ffxiv_dx11.exe" &&
+           State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+}
 bool Wanted()
 {
+    // The bridge's DX12 allocations do not contain FFXIV's native adaptation.
+    // Source 2 uses the verified DX11 shader chain instead, including with NR off.
+    if (NativeBridge()) return false;
     return Config::Instance()->DlssNrWhitePointSource.value_or_default() == 2 ||
            Config::Instance()->DlssNrScanExposure.value_or_default();
 }
@@ -305,6 +314,7 @@ void Adopt(ID3D12Resource* resource, const std::string& shape, unsigned int byte
 
 void NoteResource(const D3D12_RESOURCE_DESC* desc, ID3D12Resource* resource)
 {
+    if (NativeBridge()) return;
     if (!Config::Instance()->DlssNrEnabled.value_or_default())
         return;
 
@@ -349,6 +359,7 @@ unsigned int Examined()
 
 void NoteUav(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc)
 {
+    if (NativeBridge()) return;
     // Deliberately NOT gated on the scan setting, and that was a real bug rather than a nicety.
     //
     // An engine creates its eye adaptation view once, when it builds its render targets, which is

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "D3D11_Hooks.h"
+#include <misc/FfxivLightingCapture.h>
 
 #include <Util.h>
 #include <Config.h>
@@ -88,6 +89,7 @@ static inline D3D11_FILTER UpgradeToAF(D3D11_FILTER f)
 
 static void HookToDeviceLocal(ID3D11Device* InDevice)
 {
+    FfxivLightingCapture::Install(InDevice);
     if (o_CreateSamplerState != nullptr || InDevice == nullptr)
         return;
 
@@ -566,6 +568,7 @@ void D3D11Hooks::Hook(HMODULE dx11Module)
 
 void D3D11Hooks::Unhook()
 {
+    FfxivLightingCapture::Detach();
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 

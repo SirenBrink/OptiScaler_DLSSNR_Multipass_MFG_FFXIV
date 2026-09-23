@@ -359,6 +359,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             if (!DlssNrWhitePointSource.has_value() && DlssNrWhitePointFromExposure.has_value())
                 DlssNrWhitePointSource = DlssNrWhitePointFromExposure.value() ? 1u : 0u;
             DlssNrScanMeter.set_from_config(readBool("DlssNr", "ScanMeter"));
+            DlssNrLightingHistory.set_from_config(readBool("DlssNr", "LightingHistory"));
             DlssNrScanTrim.set_from_config(readFloat("DlssNr", "ScanTrim"));
             DlssNrPasses.set_from_config(readUInt("DlssNr", "Passes"));
             DlssNrScanAnchorValue.set_from_config(readFloat("DlssNr", "ScanAnchorValue"));
@@ -1294,6 +1295,7 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "ScanAnchors", Instance()->DlssNrScanAnchors.value_for_config_or("").c_str());
     ini.SetValue("DlssNr", "ScanInverted", GetBoolValue(Instance()->DlssNrScanInverted.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanMeter", GetBoolValue(Instance()->DlssNrScanMeter.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "LightingHistory", GetBoolValue(Instance()->DlssNrLightingHistory.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Passes", GetIntValue(Instance()->DlssNrPasses.value_for_config()).c_str());
     ini.SetValue("DlssNr", "UseProxy", GetBoolValue(Instance()->DlssNrUseProxy.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ProxyProbe", GetBoolValue(Instance()->DlssNrProxyProbe.value_for_config()).c_str());

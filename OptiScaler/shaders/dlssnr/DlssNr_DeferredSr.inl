@@ -62,6 +62,7 @@ struct Generation
     } motionSamples[MarkerCount];
     PreSrMotionReset::Gate motionGate;
     unsigned long long lastMotionTime = 0;
+    uint64_t lightingEvent = 0;
     bool motionSamplingFailed = false;
 
     bool Idle() const { return !everRecorded || completed[lastMarker] != 0; }
@@ -526,6 +527,19 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
     {
         ScopedNrStateEnvelope envelope(cmd);
         SamplePan(g, cmd, motion, source, use.slot, motionNow);
+    }
+
+    // Clear both the private reconstruction and any held/alternate-frame NR edit
+    // on the same lighting event. Main-game DLSS and FG parameters are untouched.
+    if (State::Instance().gameExe == "ffxiv_dx11.exe" &&
+        State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 &&
+        cfg.DlssNrWhitePointSource.value_or_default() == 2 && cfg.DlssNrLightingHistory.value_or_default() &&
+        !cfg.DlssNrHoldFrame.value_or_default() &&
+        !(UInt(source, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags) & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) &&
+        FfxivLightingScan::ConsumeReset(g.lightingEvent))
+    {
+        g.reset = true; g.hold.Reset(); if (g.half) g.half->Reset();
+        LOG_INFO("DLSS-NR PreSR: native lighting event {} invalidates residual history", g.lightingEvent);
     }
 
     if (g.sampleAndHold)

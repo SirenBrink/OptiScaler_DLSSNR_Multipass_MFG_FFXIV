@@ -457,7 +457,8 @@ class Config
     //
     //   0  the paper white slider, and nothing else
     //   1  the exposure the game hands the upscaler
-    //   2  a buffer the scan found, anchored to a white point the user chose once
+    //   2  scanned exposure; FFXIV DX11 bridge uses verified native lighting for
+    //      history rejection only, other games use anchored white-point estimation
     //
     // This replaces two independent checkboxes that could both be on. They were made exclusive by
     // greying, which deadlocked -- each disabled the other, so once both were set the only way out
@@ -467,6 +468,9 @@ class Config
     CustomOptional<uint32_t> DlssNrWhitePointSource { 1 };
 
     CustomOptional<bool> DlssNrScanMeter { false };
+    // FFXIV native DX11 scanned lighting: reset NR history on abrupt tone changes.
+    // Has no effect unless WhitePointSource=2 and the verified bridge scan is fresh.
+    CustomOptional<bool> DlssNrLightingHistory { true };
 
     CustomOptional<float> DlssNrScanAnchorValue { 0.0f };       // legacy single anchor, migrated then unused
     CustomOptional<float> DlssNrScanAnchorWhitePoint { 0.0f };  // legacy single anchor, migrated then unused

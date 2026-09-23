@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <misc/FfxivLightingCapture.h>
 #include "dx11_with_dx12_sc.h"
 
 #include <with_dx12/with_dx12.h>
@@ -136,6 +137,10 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
 
 Dx11wDx12SC::~Dx11wDx12SC()
 {
+    // Drain completed tiny native readbacks on normal bridge teardown. Never
+    // block for unfinished GPU work or release them from DLL detach/loader lock.
+    if (_dx11Context && _dx11Context == FfxivLightingScan::State().context)
+        FfxivLightingScan::Tick(_dx11Context, false);
     MenuOverlayDx::CleanupRenderTarget(true, _handle);
     _ReleaseInteropObjects();
 
@@ -303,6 +308,10 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     if (!_InitInteropObjects())
         return DXGI_ERROR_DEVICE_REMOVED;
+
+    FfxivLightingCapture::Tick(_dx11Context);
+    if (State::Instance().gameExe == "ffxiv_dx11.exe" && FfxivLightingCapture::installed.load())
+        FfxivLightingScan::Tick(_dx11Context, Config::Instance()->DlssNrWhitePointSource.value_or_default() == 2);
 
     auto dx11Index = _GetDx11BackBufferIndexForPresent();
 
