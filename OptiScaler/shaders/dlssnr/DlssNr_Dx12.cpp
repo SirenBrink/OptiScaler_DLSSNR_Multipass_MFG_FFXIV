@@ -33,6 +33,7 @@
 #include <gpu_time/GpuTime_Dx12.h>
 
 #include <mutex>
+#include <atomic>
 #include <algorithm>
 #include <cstring>
 #include "precompile/DlssNr_Shader.h"
@@ -390,10 +391,12 @@ struct NrState
 
 NrState& g_nr = *new NrState; // Retain unresolved GPU ownership at process teardown.
 DlssNr::GpuLifetime& g_nrLifetime = *new DlssNr::GpuLifetime;
-std::unique_ptr<DlssNr_Dx12> g_compose;
+// GPU-owning helpers follow g_nr's process lifetime. Explicit Shutdown still
+// releases safe ownership; DLL/CRT teardown must not invoke driver callbacks.
+std::unique_ptr<DlssNr_Dx12>& g_compose = *new std::unique_ptr<DlssNr_Dx12>;
 
 // What the pass costs on the GPU, for the breakdown in the overlay.
-std::unique_ptr<GpuTime_Dx12> g_gpuTime;
+std::unique_ptr<GpuTime_Dx12>& g_gpuTime = *new std::unique_ptr<GpuTime_Dx12>;
 
 // A second timer, around the model's evaluate and nothing else.
 //
@@ -406,7 +409,7 @@ std::unique_ptr<GpuTime_Dx12> g_gpuTime;
 //
 // Splitting them says how much of the pass is the model and how much is ours -- and ours is the half
 // we can actually do something about.
-std::unique_ptr<GpuTime_Dx12> g_ngxTime;
+std::unique_ptr<GpuTime_Dx12>& g_ngxTime = *new std::unique_ptr<GpuTime_Dx12>;
 std::optional<double> g_lastNgxTime;
 std::optional<double> g_lastGpuTime;
 
@@ -1358,6 +1361,7 @@ void RecordBuiltPrimaryTuning(const Config& cfg)
 // holding two threads apart -- but the D3D11-on-D3D12 bridge enters from its own call site, and the
 // cost is a CPU-side lock on a path that already records command lists.
 std::recursive_mutex g_nrMutex;
+std::atomic_bool g_bridgeSuspended {false};
 
 // Runs the pass inside the same state envelope every other OptiScaler compute pass runs in.
 //
@@ -1542,6 +1546,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                            const DlssNrFrameInfo& frame, ID3D12CommandQueue* timingQueue)
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
+    if (g_bridgeSuspended.load()) return;
     const Config& cfg = *Config::Instance();
 
     if (g_nr.failed || cmdList == nullptr || colour == nullptr || depth == nullptr ||
@@ -2881,6 +2886,32 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 namespace DlssNr
 {
 #include "DlssNr_DeferredSr.inl"
+
+void SuspendForBridgeShutdown()
+{
+    std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
+    if (g_bridgeSuspended.exchange(true)) return;
+    // This runs BEFORE the game's device-specific NGX shutdown, outside DllMain.
+    // The NR forwarder's model allocations already have process lifetime. PreSR
+    // additionally owns a private SR feature in the driver's NGX runtime.
+    LOG_INFO("DLSS-NR bridge shutdown: new NR/PreSR work suspended before NGX shutdown");
+    DeferredSr::Shutdown();
+    g_nr.reset = true;
+    for (auto& pendingReset : g_nr.passNeedsReset) pendingReset = true;
+    g_lastGpuTime.reset();
+    g_lastNgxTime.reset();
+}
+
+void ResumeAfterBridgeInit()
+{
+    std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
+    if (!g_bridgeSuspended.exchange(false)) return;
+    // A device reinitialization is allowed to resume. Never persist this stop in
+    // the user's NR setting, nor mistake an ordinary NR/quality toggle for exit.
+    g_nr.reset = true;
+    for (auto& pendingReset : g_nr.passNeedsReset) pendingReset = true;
+    LOG_INFO("DLSS-NR bridge shutdown: resumed after NGX initialization");
+}
 std::string DeferredDlssStatus() { return SynchronousDeferredDlssStatus(); }
 
 void RetryAfterFailure()
@@ -2902,6 +2933,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
                        unsigned int guideSourceHeight)
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
+    if (g_bridgeSuspended.load()) return;
     const Config& cfg = *Config::Instance();
     static unsigned lastPrecision=0;
     const unsigned precision=cfg.DlssNrPrecision.value_or_default();
@@ -2916,7 +2948,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         Microsoft::WRL::ComPtr<ID3D12Device> device;
         if (SUCCEEDED(cmdList->GetDevice(IID_PPV_ARGS(&device))))
         {
-            static Microsoft::WRL::ComPtr<ID3D12Device> checkedDevice;
+            static auto& checkedDevice = *new Microsoft::WRL::ComPtr<ID3D12Device>;
             static bool amd = false;
             if (checkedDevice.Get() != device.Get())
             {
@@ -3396,9 +3428,12 @@ CalibrationReading Calibration()
     return r;
 }
 
-bool IsRunning() { return g_nr.feature != nullptr && !g_nr.failed; }
+bool IsRunning() { return !g_bridgeSuspended.load() && g_nr.feature != nullptr && !g_nr.failed; }
 
-const char* FailureReason() { return g_nr.failed ? g_nr.reason : ""; }
+const char* FailureReason()
+{
+    return g_bridgeSuspended.load() ? "the graphics bridge is shutting down" : (g_nr.failed ? g_nr.reason : "");
+}
 
 // What the game offers by way of exposure, and what has been read from it. For the menu, so a user
 // can see whether this game supplies one at all without having to read a log.

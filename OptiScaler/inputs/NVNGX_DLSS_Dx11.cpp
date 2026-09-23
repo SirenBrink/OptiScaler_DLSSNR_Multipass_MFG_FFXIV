@@ -16,6 +16,7 @@
 #include <ankerl/unordered_dense.h>
 #include <imgui/ImGuiNotify.hpp>
 #include <misc/IdentifyGpu.h>
+#include <dlssnr/DlssNr.h>
 
 static ID3D11Device* D3D11Device = nullptr;
 static ankerl::unordered_dense::map<unsigned int, ContextData<IFeature_Dx11>> Dx11Contexts;
@@ -201,6 +202,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Init_Ext(unsigned long long InApp
     State::Instance().currentD3D11Device = InDevice;
     State::Instance().nvngxDx11Inited = true;
 
+    if (State::Instance().gameExe == "ffxiv_dx11.exe")
+        DlssNr::ResumeAfterBridgeInit();
+
     return NVSDK_NGX_Result_Success;
 }
 
@@ -323,6 +327,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Init_with_ProjectID(
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Shutdown()
 {
     shutdown = true;
+
+    if (State::Instance().gameExe == "ffxiv_dx11.exe" && WithDx12::IsInited())
+        DlssNr::SuspendForBridgeShutdown();
 
     // for (auto const& [key, val] : Dx11Contexts)
     //{

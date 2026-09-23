@@ -31,7 +31,7 @@ Release x64 compilation and local WARP tests with the D3D11 debug layer exercise
 
 In game, confirm the status reads **Native DX11 lighting: active** and the reading count advances. Play normally, then move between substantially different lighting conditions. Toggle **Reject abrupt lighting history** for comparison, keeping Scanned exposure selected. Watch for reduced lighting trails, any flash/blotching at a detected cut, and FPS impact. A zero cut count during gradual or modest changes is expected. Logs contain `FFXIV native lighting` and `DLSS-NR ... native lighting event` entries; no manual capture is needed.
 
-The separate NR-dependent Dalamud exit crash remains unresolved.
+The separate NR-dependent exit crash was subsequently addressed by the [PreSR lifetime fix](FFXIV-NR-EXIT.md), with its own successful live test. Exposure validation alone did not establish that fix.
 
 ## Sampler compatibility follow-up
 

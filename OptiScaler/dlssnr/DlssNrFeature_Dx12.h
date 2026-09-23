@@ -23,6 +23,12 @@ namespace DlssNr
 void NotifyGpuSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
 void NotifyGpuReset(ID3D12CommandList* commands);
 
+// FFXIV bridge lifecycle: stop new work and retire completed PreSR generations
+// before calling the driver's NGX shutdown. Never call from DllMain. A genuine
+// NGX reinitialization can resume without changing the user's saved NR setting.
+void SuspendForBridgeShutdown();
+void ResumeAfterBridgeInit();
+
 inline constexpr unsigned int MaxPassCount = 30;
 inline constexpr unsigned int DefaultMaxPassCount = 3;
 

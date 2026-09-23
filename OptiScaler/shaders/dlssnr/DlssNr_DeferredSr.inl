@@ -111,8 +111,12 @@ struct Use
     }
 };
 
-std::unique_ptr<Generation> current;
-std::vector<std::unique_ptr<Generation>> retired;
+// A generation owns NGX features. Its destructor must never run from the CRT's
+// DLL unload callbacks, where NVIDIA may already have torn down its runtime.
+// Normal retirement and explicit shutdown below still release completed work.
+// Unresolved ownership survives until OS process cleanup, as it does for g_nr.
+std::unique_ptr<Generation>& current = *new std::unique_ptr<Generation>;
+std::vector<std::unique_ptr<Generation>>& retired = *new std::vector<std::unique_ptr<Generation>>;
 std::string status = "not started";
 struct Pending
 {
@@ -816,11 +820,15 @@ void Shutdown()
 {
     Cancel();
     if (current) retired.push_back(std::move(current));
+    const auto total = retired.size();
     Collect();
+    const auto retained = retired.size();
     // Never free feature histories, descriptors or surfaces referenced by an unsubmitted/in-flight
     // list. At shutdown only, retain uncompleted generations for process teardown rather than UAF.
     for (auto& g : retired) (void)g.release();
     retired.clear();
+    LOG_INFO("DLSS-NR PreSR shutdown: released {} completed generations; retained {} pending generations",
+             total - retained, retained);
 }
 } // namespace DeferredSr
 
