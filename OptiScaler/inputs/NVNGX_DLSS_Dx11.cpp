@@ -716,6 +716,27 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_ReleaseFeature(NVSDK_NGX_Handle* 
             auto upscaleQueue = WithDx12::GetD3D12CommandQueue();
             if (upscaleQueue != fgQueue && !WaitForFfxivReleaseQueue(upscaleQueue))
                 return NVSDK_NGX_Result_FAIL_PlatformError;
+
+            // The upscaler is rebuilt from here and the caller then sleeps 500 ms. XeFG keeps
+            // running straight across that hole: CancelPendingUpscalerWork only switches it off
+            // and back on, so the provider's presentation timing history survives a large
+            // discontinuity. It can then settle onto the display's fixed refresh grid and stay
+            // there, which defeats VRR until some later disruption happens to shake it loose -
+            // the reason a quality or NR change flips variable refresh on and off at random.
+            //
+            // Upstream OptiScaler destroys the FG context on this event instead, so frame
+            // generation restarts with a clean history. Do the same, after the queues above have
+            // drained: XeFG_Dx12 recreates the context on the next frame when _fgContext is null.
+            if (!shutdown && State::Instance().activeFgOutput == FGOutput::XeFG &&
+                Config::Instance()->FGXeFGResetOnUpscalerChange.value_or_default() &&
+                deviceContext == State::Instance().currentFeature && fg != nullptr &&
+                State::Instance().activeFgInput == FGInput::Upscaler)
+            {
+                OwnedLockGuard guard(fg->Mutex, 5);
+                LOG_INFO("FFXIV upscaler release: rebuilding FG context so pacing restarts clean");
+                State::Instance().fgChanged = true;
+                fg->DestroyFGContext();
+            }
         }
 
         if (!shutdown)

@@ -1,6 +1,7 @@
 #pragma once
 #include "SysUtils.h"
 #include "IFGFeature.h"
+#include <misc/TemporalContinuity.h>
 
 #include <upscalers/IFeature.h>
 
@@ -54,6 +55,25 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     bool SubmitUICommandList(UINT index);
 
   protected:
+    struct GuideSnapshot
+    {
+        ID3D12Resource* resource = nullptr;
+        Dx12Resource view {};
+        UINT64 frame = 0;
+        bool valid = false;
+    };
+    struct GuideMetadata { float values[9] {}; float vectors[4][3] {}; double delta=0; UINT reset=0; };
+    GuideMetadata _guideMetadata[BUFFER_COUNT] {};
+    GuideSnapshot _guideSnapshots[BUFFER_COUNT][2] {};
+    int _guideAge[BUFFER_COUNT] {-1,-1,-1,-1};
+    struct RetiredGuide { ID3D12Resource* resource; ID3D12Fence* fence; UINT64 value; };
+    std::vector<RetiredGuide> _retiredGuides;
+    TemporalContinuity::SuccessfulFrames _sceneHistory;
+    UINT64 _guideResetFrame = UINT64_MAX;
+    void RetireGuide(ID3D12Resource*& resource);
+    void CollectGuides();
+    bool MatchPresentationGuide(Dx12Resource& resource, int index);
+    // End presentation guide history.
     ID3D12Device* _device = nullptr;
     IDXGISwapChain* _swapChain = nullptr;
     ID3D12CommandQueue* _gameCommandQueue = nullptr;
@@ -104,6 +124,7 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     virtual void CreateObjects(ID3D12Device* InDevice) = 0;
 
   public:
+    void SetPresentationGuideDelay(int age) override;
     virtual void* FrameGenerationContext() = 0;
     virtual void* SwapchainContext() = 0;
     virtual HWND Hwnd() = 0;

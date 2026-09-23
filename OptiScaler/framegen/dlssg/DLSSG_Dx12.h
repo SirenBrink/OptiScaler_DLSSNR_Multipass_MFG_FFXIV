@@ -22,24 +22,6 @@ class DLSSG_Dx12 : public virtual IFGFeature_Dx12
     int _sampleMode = -1;
     TemporalContinuity::SuccessfulFrames _historyFrames;
 
-    struct GuideSnapshot
-    {
-        ID3D12Resource* resource = nullptr;
-        Dx12Resource view {};
-        UINT64 frame = 0;
-        bool valid = false;
-    };
-    struct GuideMetadata { float values[9] {}; float vectors[4][3] {}; double delta=0; UINT reset=0; };
-    GuideMetadata _guideMetadata[BUFFER_COUNT] {};
-    GuideSnapshot _guideSnapshots[BUFFER_COUNT][2] {};
-    int _guideAge[BUFFER_COUNT] {-1,-1,-1,-1};
-    struct RetiredGuide { ID3D12Resource* resource; ID3D12Fence* fence; UINT64 value; };
-    std::vector<RetiredGuide> _retiredGuides;
-    TemporalContinuity::SuccessfulFrames _sceneHistory;
-    UINT64 _guideResetFrame = UINT64_MAX;
-    void RetireGuide(ID3D12Resource*& resource);
-    void CollectGuides();
-    bool MatchPresentationGuide(Dx12Resource& resource, int index);
     bool Dispatch();
 
   protected:
@@ -48,7 +30,6 @@ class DLSSG_Dx12 : public virtual IFGFeature_Dx12
 
   public:
     // IFGFeature
-    void SetPresentationGuideDelay(int age) override;
     const char* Name() override final { return "DLSSG"; };
     feature_version Version() override final;
     HWND Hwnd() override final;

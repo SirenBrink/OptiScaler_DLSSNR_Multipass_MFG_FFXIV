@@ -664,6 +664,8 @@ void XeFG_Dx12::Activate()
 
 void XeFG_Dx12::Deactivate()
 {
+    _sceneHistory.Invalidate();
+    for (auto& slot : _guideSnapshots) for (auto& guide : slot) guide.valid = false;
     LOG_DEBUG("");
 
     if (_isActive)
@@ -923,15 +925,28 @@ bool XeFG_Dx12::Dispatch()
     constData.motionVectorScaleX = _mvScaleX[fIndex];
     constData.motionVectorScaleY = _mvScaleY[fIndex];
 
+    const int sceneAge = _guideAge[fIndex];
+    const auto sceneFrame = willDispatchFrame - (sceneAge < 0 ? 0 : sceneAge);
     if (!Config::Instance()->FGSkipReset.value_or_default())
-        constData.resetHistory = _reset[fIndex];
+        constData.resetHistory = _reset[fIndex] ||
+            (state.gameExe == "ffxiv_dx11.exe" && _sceneHistory.NeedsReset(sceneFrame));
     else
         constData.resetHistory = false;
+
+    // The FFXIV bridge DOES supply _ftDelta, but it is the present interval
+    // and can include provider pacing. Prefer fresh pacing-adjusted telemetry
+    // for this bridge; preserve genuine input timing in other integrations.
+    auto frameRenderTime = _ftDelta[fIndex];
+    const auto pacedTime = XeFGPacing::RenderTimeMs();
+    if (pacedTime > 0.0 && (state.gameExe == "ffxiv_dx11.exe" || !(frameRenderTime > 0.0)))
+        frameRenderTime = pacedTime;
+    if (!(frameRenderTime > 0.0) || !std::isfinite(frameRenderTime))
+        frameRenderTime = state.lastFGFrameTime;
 
     switch (Config::Instance()->FTInput.value_or_default())
     {
     case FrameTimeSource::Input:
-        constData.frameRenderTime = (float) _ftDelta[fIndex];
+        constData.frameRenderTime = static_cast<float>(frameRenderTime);
         break;
 
     case FrameTimeSource::Opti:
@@ -943,8 +958,12 @@ bool XeFG_Dx12::Dispatch()
         break;
     }
 
-    LOG_DEBUG("Reset: {}, Opti FT: {}, Source FT: {}, Set FT: {}, Opti Id: {}, Reflex Id: {}", _reset[fIndex],
-              constData.frameRenderTime, _ftDelta[fIndex], constData.frameRenderTime, _frameCount,
+    // Report what the provider actually got, next to the period it came out of.
+    // The two numbers together are what says whether the loop above is real.
+    XeFGPacing::NoteFedFrameTime(constData.frameRenderTime);
+
+    LOG_DEBUG("Reset: {}, Input FT: {}, Opti FT: {}, Set FT: {} ms, Opti Id: {}, Reflex Id: {}", _reset[fIndex],
+              _ftDelta[fIndex], state.lastFGFrameTime, constData.frameRenderTime, _frameCount,
               State::Instance().reflexFrameId);
 
     auto frameId = static_cast<uint32_t>(willDispatchFrame);
@@ -1020,9 +1039,11 @@ bool XeFG_Dx12::Dispatch()
             state.fgChanged = true;
             UpdateTarget();
             Deactivate();
+            return false;
         }
     }
 
+    _sceneHistory.Commit(sceneFrame);
     LOG_DEBUG("Result: Ok");
 
     return true;
@@ -1115,6 +1136,9 @@ void XeFG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
 
 void XeFG_Dx12::ReleaseObjects()
 {
+    CollectGuides();
+    for (auto& slot : _guideSnapshots) for (auto& guide : slot)
+    { RetireGuide(guide.resource); guide.valid = false; }
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
         SAFE_RELEASE(_uiCommandAllocator[i]);
@@ -1398,6 +1422,14 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
     if (fIndex < 0)
         fIndex = GetIndex();
 
+    Dx12Resource matched;
+    if (_guideAge[fIndex] >= 0 && (inputResource->type == FG_ResourceType::Depth ||
+                                  inputResource->type == FG_ResourceType::Velocity))
+    {
+        matched = *inputResource;
+        if (!MatchPresentationGuide(matched, fIndex)) return false;
+        inputResource = &matched;
+    }
     auto& type = inputResource->type;
 
     std::unique_lock<std::shared_mutex> lock(_resourceMutex[fIndex]);
@@ -1479,6 +1511,7 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
     fResource->state = inputResource->state;
     fResource->validity = inputResource->validity;
     fResource->resource = inputResource->resource;
+    if (type == FG_ResourceType::Depth || type == FG_ResourceType::Velocity) fResource->copy = nullptr;
     fResource->top = inputResource->top;
     fResource->left = inputResource->left;
     fResource->width = inputResource->width;
