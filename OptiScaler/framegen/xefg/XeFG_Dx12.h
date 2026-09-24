@@ -1,4 +1,5 @@
 #pragma once
+#include "XeFGDynamic.h"
 
 #include <framegen/IFGFeature_Dx12.h>
 
@@ -16,6 +17,9 @@
 class XeFG_Dx12 : public virtual IFGFeature_Dx12
 {
   private:
+    XeFGDynamic _dynamic;
+    bool _dynamicWasEnabled = false;
+    float _dynamicLastTarget = 0;
     xefg_swapchain_handle_t _swapChainContext = nullptr;
     xefg_swapchain_handle_t _fgContext = nullptr;
 

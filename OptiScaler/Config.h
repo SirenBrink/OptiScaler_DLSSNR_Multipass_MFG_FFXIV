@@ -950,6 +950,8 @@ class Config
 
     CustomOptional<bool> FGXeFGIgnoreInitChecks { false };
     CustomOptional<int> FGXeFGInterpolationCount { 1 };
+    CustomOptional<bool> FGXeFGDynamic { false };
+    CustomOptional<float> FGXeFGDynamicTarget { 138.0f };
     CustomOptional<bool> FGXeFGUnlockEnabled { true };
     // What the unlock patch reports to the provider as its maximum, and what
     // the multiplier menu lets you pick. Those are not two settings: the number

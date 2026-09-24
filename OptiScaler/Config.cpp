@@ -217,6 +217,8 @@ bool Config::Reload(std::filesystem::path iniPath)
 
         {
             FGXeFGInterpolationCount.set_from_config(readInt("XeFG", "InterpolationCount"));
+            FGXeFGDynamic.set_from_config(readBool("XeFG", "DynamicMFG"));
+            FGXeFGDynamicTarget.set_from_config(readFloat("XeFG", "DynamicTargetFPS"));
             // Anything in range here survives a reload; out of range is reset to
             // the default rather than clamped, so an over-large value would look
             // like the setting silently reverting to 2X.
@@ -1111,6 +1113,8 @@ bool Config::SaveIni()
     {
         ini.SetValue("XeFG", "InterpolationCount",
                      GetIntValue(Instance()->FGXeFGInterpolationCount.value_for_config()).c_str());
+        ini.SetValue("XeFG", "DynamicMFG", GetBoolValue(Instance()->FGXeFGDynamic.value_for_config()).c_str());
+        ini.SetValue("XeFG", "DynamicTargetFPS", GetFloatValue(Instance()->FGXeFGDynamicTarget.value_for_config()).c_str());
         ini.SetValue("XeFG", "UnlockMFG", GetBoolValue(Instance()->FGXeFGUnlockEnabled.value_for_config()).c_str());
         ini.SetValue("XeFG", "MaxInterpolatedFrames",
                      GetIntValue(Instance()->FGXeFGMaxInterpolatedFrames.value_for_config()).c_str());

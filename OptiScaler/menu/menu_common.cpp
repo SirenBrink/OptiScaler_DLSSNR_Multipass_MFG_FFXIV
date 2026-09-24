@@ -4018,6 +4018,22 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
             // Remembers what was last typed, so leaving and re-entering the custom
             // slot does not silently drop back to the first custom multiplier.
+            bool dynamicXe = config->FGXeFGDynamic.value_or_default();
+            ImGui::BeginDisabled(XeFGProxy::SetNumInterpolatedFrames() == nullptr);
+            if (ImGui::Checkbox("Dynamic XeMFG (max 4X)", &dynamicXe))
+                config->FGXeFGDynamic = dynamicXe;
+            ImGui::EndDisabled();
+            float targetXe = config->FGXeFGDynamicTarget.value_or_default();
+            ImGui::BeginDisabled(!dynamicXe);
+            if (ImGui::SliderFloat("Target FPS##XeDynamic", &targetXe, 30.0f, 240.0f, "%.0f"))
+                config->FGXeFGDynamicTarget = targetXe;
+            if (currentCount >= 1)
+                ImGui::Text("Current XeMFG: %dX (selected)", currentCount + 1);
+            ShowHelpMarker("Automatically selects 2X-4X using real-frame timing.\n"
+                           "Respects the configured FPS limit. Changes are spaced out to avoid oscillation.\n"
+                           "At a frame cap, limited timing can prevent detecting headroom to lower the factor.");
+            ImGui::EndDisabled();
+            ImGui::BeginDisabled(dynamicXe);
             static int customMultiplier = firstCustomMultiplier;
 
             char currentLabel[32];
@@ -4110,6 +4126,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                           maxMultiplier);
 
             ShowHelpMarker(mfgTip);
+            ImGui::EndDisabled();
         }
 
         ImGui::SameLine(0.0f, 16.0f);

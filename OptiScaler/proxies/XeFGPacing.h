@@ -302,6 +302,39 @@ inline int64_t g_lastMultiplier = 0;
 inline int64_t g_burstBlockQpc = 0;
 inline std::atomic<int64_t> g_renderTimeNs {0};
 inline std::atomic<ULONGLONG> g_renderSampleMs {0};
+// Short, present-thread-only work window. A median resists one-off stalls
+// and alternating NR workload differences without growing a pacing backlog.
+inline int64_t g_workSamples[5] {};
+inline uint32_t g_workCount = 0, g_workPos = 0;
+inline uint64_t g_rejectedTimingSamples = 0;
+constexpr int64_t MaxTimingIntervalNs = 250000000;
+
+inline void ObserveWorkInterval(int64_t elapsedNs, int64_t blockedNs)
+{
+    if (elapsedNs <= 0 || elapsedNs > MaxTimingIntervalNs || blockedNs < 0 || blockedNs >= elapsedNs)
+    {
+        ++g_rejectedTimingSamples;
+        // Do not learn a loading/rebuild pause as rendering work. Expire the
+        // old window so its timing cannot survive a long configuration change.
+        g_workCount = g_workPos = 0;
+        g_renderTimeNs.store(0, std::memory_order_relaxed);
+        g_renderSampleMs.store(0, std::memory_order_release);
+        return;
+    }
+    g_workSamples[g_workPos] = elapsedNs - blockedNs;
+    g_workPos = (g_workPos + 1) % 5;
+    if (g_workCount < 5) ++g_workCount;
+    int64_t sorted[5];
+    for (uint32_t i = 0; i < g_workCount; ++i) sorted[i] = g_workSamples[i];
+    for (uint32_t i = 1; i < g_workCount; ++i)
+        for (uint32_t j = i; j > 0 && sorted[j] < sorted[j - 1]; --j)
+        {
+            const auto value = sorted[j]; sorted[j] = sorted[j - 1]; sorted[j - 1] = value;
+        }
+    g_renderTimeNs.store(sorted[g_workCount / 2], std::memory_order_relaxed);
+    g_renderSampleMs.store(GetTickCount64(), std::memory_order_release);
+}
+
 
 // What the provider was handed as `frameRenderTime`, in milliseconds.
 // XeFG_Dx12.cpp is the only caller. Recorded rather than returned because the
@@ -332,6 +365,26 @@ inline int64_t g_nextDeadlineNs = 0;
 inline int64_t g_burstStepNs = 0;
 inline uint32_t g_lastTsIndex = 0;
 inline uint32_t g_lastTsCountPlus1 = 0;
+// Lifecycle requests may originate on the game thread. Apply only at a
+// generated-burst boundary on the present thread, never mid-burst.
+inline std::atomic<bool> g_recoveryRequested {false};
+inline uint32_t g_recoveryBursts = 0;
+inline void RequestRecovery() { g_recoveryRequested.store(true, std::memory_order_release); }
+
+inline void BeginRecovery()
+{
+    g_lastBurstQpc = g_burstBlockQpc = 0;
+    g_periodNs = g_intervalQpc = g_targetQpc = 0;
+    g_sampleCount = g_samplePos = 0;
+    g_workCount = g_workPos = 0;
+    g_renderTimeNs.store(0, std::memory_order_relaxed);
+    g_renderSampleMs.store(0, std::memory_order_release);
+    g_nextDeadlineNs = g_burstStepNs = 0;
+    g_lastTsIndex = g_lastTsCountPlus1 = 0;
+    g_recoveryBursts = 32;
+    LOG_INFO("XeFG pacing recovery: fresh timing window; tracking next 32 generated bursts");
+}
+
 
 inline int64_t g_tsCalls = 0;
 inline int64_t g_tsRebased = 0;
@@ -472,6 +525,89 @@ inline void PushPeriod(int64_t ns)
     g_periodNs = sorted[g_sampleCount / 2];
 }
 
+// Diagnostic accounting only. All fields are owned by the present thread.
+// Scheduler/present durations can include GPU waits; "other" is uninstrumented
+// wall time, NOT GPU render time. Windows never combine different factors.
+struct BurstTiming
+{
+    int64_t begin = 0, scheduler[8] {}, present = 0;
+    uint32_t factor = 0, presentCalls = 0;
+    int64_t providerMedianNs = 0, scheduledStepNs = 0;
+    bool recovery = false;
+};
+inline BurstTiming g_burstTiming;
+// These calls are disjoint from ScheduleFrame/SchedForwarder. Include their
+// duration in blocked-call accounting so DXGI backpressure is not fed back as
+// render time. This estimates time outside provider calls, not GPU workload.
+inline void NoteGeneratedPresentDuration(int64_t duration)
+{
+    if (duration < 0) return;
+    g_burstTiming.present += duration;
+    ++g_burstTiming.presentCalls;
+    if (g_burstTiming.begin > 0) g_burstBlockQpc += duration;
+}
+
+inline BurstTiming g_timingWindow;
+inline uint32_t g_timingBursts = 0;
+inline int64_t g_timingElapsed = 0, g_timingMax = 0, g_timingStart = 0;
+
+inline int64_t SchedulerTotal(const BurstTiming& timing)
+{
+    int64_t total = 0;
+    for (auto duration : timing.scheduler) total += duration;
+    return total;
+}
+
+inline void BeginDiagnosticBurst(uint32_t factor, int64_t now)
+{
+    const auto previous = g_burstTiming;
+    // Keep startup, factor changes and long rebuild gaps out of steady averages.
+    if (previous.begin > 0 && now > previous.begin && previous.factor == factor &&
+        NsFromQpc(now - previous.begin) <= MaxTimingIntervalNs)
+    {
+        if (g_timingWindow.factor != factor)
+        {
+            g_timingWindow = {}; g_timingWindow.factor = factor;
+            g_timingBursts = 0; g_timingElapsed = g_timingMax = 0; g_timingStart = previous.begin;
+        }
+        const auto elapsed = now - previous.begin;
+        g_timingElapsed += elapsed;
+        if (elapsed > g_timingMax) g_timingMax = elapsed;
+        for (int i = 0; i < 8; ++i) g_timingWindow.scheduler[i] += previous.scheduler[i];
+        g_timingWindow.present += previous.present;
+        g_timingWindow.presentCalls += previous.presentCalls;
+        g_timingWindow.providerMedianNs += previous.providerMedianNs;
+        g_timingWindow.scheduledStepNs += previous.scheduledStepNs;
+        g_timingWindow.recovery |= previous.recovery;
+        ++g_timingBursts;
+        if (NsFromQpc(now - g_timingStart) >= 5000000000LL)
+        {
+            const auto sched = SchedulerTotal(g_timingWindow);
+            const double divisor = g_timingBursts;
+            LOG_INFO("XeFG burst timing: {}X {} bursts; avg/max {:.2f}/{:.2f} ms; "
+                     "scheduler {:.2f} ms [1 {:.2f}, 2 {:.2f}, 3 {:.2f}, 4 {:.2f}, 5 {:.2f}, 6 {:.2f}, 7 {:.2f}]; "
+                     "generated-present {:.2f} ms ({:.2f} calls/burst); other {:.2f} ms; "
+                     "provider median {:.2f} ms, scheduled step {:.2f} ms; recovery included={}; CPU wall times, not GPU timings",
+                     factor, g_timingBursts, MsFromQpc(g_timingElapsed) / divisor, MsFromQpc(g_timingMax),
+                     MsFromQpc(sched) / divisor,
+                     MsFromQpc(g_timingWindow.scheduler[1]) / divisor, MsFromQpc(g_timingWindow.scheduler[2]) / divisor,
+                     MsFromQpc(g_timingWindow.scheduler[3]) / divisor, MsFromQpc(g_timingWindow.scheduler[4]) / divisor,
+                     MsFromQpc(g_timingWindow.scheduler[5]) / divisor, MsFromQpc(g_timingWindow.scheduler[6]) / divisor,
+                     MsFromQpc(g_timingWindow.scheduler[7]) / divisor,
+                     MsFromQpc(g_timingWindow.present) / divisor, g_timingWindow.presentCalls / divisor,
+                     MsFromQpc(g_timingElapsed - sched - g_timingWindow.present) / divisor,
+                     g_timingWindow.providerMedianNs / divisor / 1e6, g_timingWindow.scheduledStepNs / divisor / 1e6,
+                     g_timingWindow.recovery);
+            g_timingWindow = {}; g_timingBursts = 0;
+        }
+    }
+    else
+    {
+        g_timingWindow = {}; g_timingBursts = 0;
+    }
+    g_burstTiming = {}; g_burstTiming.begin = now; g_burstTiming.factor = factor;
+}
+
 // Burst bookkeeping, shared by both pacing paths: the gap between two burst
 // starts is one real frame, and the median of recent ones divided by the
 // multiplier is the interval they are both aiming at.
@@ -480,32 +616,26 @@ inline void NoteFrame(uint64_t index, uint64_t count, int64_t nowQpc)
     if (index > 1)
         return;
 
-    if (g_lastBurstQpc != 0)
-        PushPeriod(NsFromQpc(nowQpc - g_lastBurstQpc));
+    BeginDiagnosticBurst(static_cast<uint32_t>(count + 1), nowQpc);
 
-    // The period just measured is taken at the present, so it contains the
-    // blocking the pacing itself did. Handing that back to the provider is
-    // what locks the real frame rate: it is asked to fill a period that only
-    // exists because it was asked to fill it, and the fixed point is
-    //
-    //     period = renderTime + period * count / (count + 1)
-    //
-    // so the higher the multiplier, the longer the "real" frame gets. Taking
-    // the block back out leaves the part of the frame the game actually got
-    // to spend rendering - the quantity the provider means by
-    // `frameRenderTime` and sizes the generated interval from.
-    //
-    // It is an upper bound on that quantity, not an equality: the provider's
-    // own wait on the burst's last frame happens inside this window too and
-    // is not measured here. Under-reporting would be the dangerous direction
-    // (it would ask for a burst shorter than the frames can be produced in),
-    // over-reporting only leaves some of the lock in place.
-    if (g_periodNs > 0)
+    if (g_recoveryRequested.exchange(false, std::memory_order_acq_rel))
+        BeginRecovery();
+
+    if (g_lastBurstQpc != 0 && nowQpc > g_lastBurstQpc)
     {
-        const int64_t blockNs = NsFromQpc(g_burstBlockQpc);
-
-        g_renderTimeNs.store(g_periodNs > blockNs ? g_periodNs - blockNs : 0, std::memory_order_relaxed);
-        g_renderSampleMs.store(GetTickCount64(), std::memory_order_release);
+        const int64_t elapsedQpc = nowQpc - g_lastBurstQpc;
+        const auto elapsedNs = NsFromQpc(elapsedQpc);
+        if (elapsedNs <= MaxTimingIntervalNs)
+            PushPeriod(elapsedNs);
+        else
+        {
+            BeginRecovery();
+        }
+        // Subtract the wait from the SAME measured interval, not from a
+        // median of unrelated intervals. Native final-frame scheduling is
+        // included by SchedForwarder, as well as our intermediate waits.
+        // This remains a CPU timing estimate, not measured GPU render time.
+        ObserveWorkInterval(elapsedNs, NsFromQpc(g_burstBlockQpc));
     }
 
     g_burstBlockQpc = 0;
@@ -516,11 +646,12 @@ inline void NoteFrame(uint64_t index, uint64_t count, int64_t nowQpc)
         g_intervalQpc = QpcFromNs(g_periodNs / (static_cast<int64_t>(count) + 1));
 }
 
-// Milliseconds of frame the game actually got to render, i.e. the measured
-// period with this burst's blocking taken back out. Zero until a burst has
-// been measured, which is the caller's signal to keep its own fallback.
+// CPU time outside measured provider scheduler/present calls. This is not
+// GPU execution time; GPU work can overlap these calls. Zero until measured,
+// which is the caller's signal to keep its own fallback.
 inline double RenderTimeMs()
 {
+    if (g_recoveryRequested.load(std::memory_order_acquire)) return 0.0;
     const auto sampled = g_renderSampleMs.load(std::memory_order_acquire);
     if (!sampled || GetTickCount64() - sampled > 1000) return 0.0;
     const auto ns = g_renderTimeNs.load(std::memory_order_relaxed);
@@ -651,6 +782,7 @@ inline void ScheduleFrame(void* ctx, uint8_t* burst, uint64_t index)
     LARGE_INTEGER after;
     QueryPerformanceCounter(&after);
 
+    if (index < 8) g_burstTiming.scheduler[index] += after.QuadPart - before.QuadPart;
     g_schedCalls++;
 
     if (!scheduled)
@@ -779,24 +911,39 @@ inline void TryPace(void* ctx, void* arg5, void* arg6, uint64_t arg7, bool isLas
 
 inline int64_t Detour(void* ctx, uint32_t a2, uint32_t a3, uint64_t a4, void* arg5, void* arg6, uint64_t arg7)
 {
-    if (g_enabled)
-    {
-        auto* caller = reinterpret_cast<uint8_t*>(_ReturnAddress());
-
-        if (caller == g_base + PacedCallerRva)
-            TryPace(ctx, arg5, arg6, arg7, false);
-        else if (caller == g_base + LastFrameCallerRva)
-            TryPace(ctx, arg5, arg6, arg7, true);
-    }
-
-    return g_native(ctx, a2, a3, a4, arg5, arg6, arg7);
+    auto* caller = reinterpret_cast<uint8_t*>(_ReturnAddress());
+    const bool generated = g_enabled && (caller == g_base + PacedCallerRva || caller == g_base + LastFrameCallerRva);
+    if (!generated)
+        return g_native(ctx, a2, a3, a4, arg5, arg6, arg7);
+    TryPace(ctx, arg5, arg6, arg7, caller == g_base + LastFrameCallerRva);
+    LARGE_INTEGER before, after;
+    QueryPerformanceCounter(&before);
+    const auto result = g_native(ctx, a2, a3, a4, arg5, arg6, arg7);
+    QueryPerformanceCounter(&after);
+    NoteGeneratedPresentDuration(after.QuadPart - before.QuadPart);
+    return result;
 }
 
-// The provider's own call for the burst's last frame still enters through
-// this thunk, so it has to keep working. Nothing to add: go on through.
+// Native final-frame scheduling bypasses ScheduleFrame. Include its wait
+// exactly once; our inserted intermediate calls invoke g_schedNative directly.
 inline bool SchedForwarder(void* ctx, void* burst, uint8_t gate, void* timing, uint32_t index)
 {
-    return g_schedNative != nullptr && g_schedNative(ctx, burst, gate, timing, index);
+    if (g_schedNative == nullptr)
+        return false;
+    const auto count = burst ? *reinterpret_cast<const uint64_t*>(static_cast<uint8_t*>(burst) + 8) : 0;
+    if (!g_enabled || !ctx || count < 1 || count > Config::XeFGMaxInterpolations || index != count)
+        return g_schedNative(ctx, burst, gate, timing, index);
+
+    g_ring = static_cast<uint8_t*>(ctx) + RingOffset;
+    LARGE_INTEGER before, after;
+    QueryPerformanceCounter(&before);
+    // At 2X this is the only scheduled frame, so it also starts the burst.
+    NoteFrame(index, count, before.QuadPart);
+    const bool result = g_schedNative(ctx, burst, gate, timing, index);
+    QueryPerformanceCounter(&after);
+    g_burstBlockQpc += after.QuadPart - before.QuadPart;
+    if (index < 8) g_burstTiming.scheduler[index] += after.QuadPart - before.QuadPart;
+    return result;
 }
 
 // The provider's deadline is `base + min(step, clamped) - recv`, and both of
@@ -859,8 +1006,17 @@ inline void* TsDetour(void* a1, int64_t* out, void* lookup, void* timing, uint32
             }
         }
 
-        g_nextDeadlineNs = *out + static_cast<int64_t>(index) * (unit - nativeUnit);
-        g_burstStepNs = unit;
+        // Retain Intel's clamped interval in normal gameplay too: adding
+        // the paced median back here reintroduces our scheduling delay.
+        // Keep subsequent frames evenly spaced; preserve all native waits.
+        const auto scheduledUnit = nativeUnit;
+        g_burstTiming.providerMedianNs = median;
+        g_burstTiming.scheduledStepNs = scheduledUnit;
+        g_burstTiming.recovery = g_recoveryBursts > 0;
+        g_nextDeadlineNs = *out + static_cast<int64_t>(index) * (scheduledUnit - nativeUnit);
+        g_burstStepNs = scheduledUnit;
+        if (g_recoveryBursts > 0 && --g_recoveryBursts == 0)
+            LOG_INFO("XeFG pacing recovery: warmup complete");
         g_tsRebased++;
     }
     else

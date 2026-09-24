@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "XeFGCamera.h"
 #include "XeFG_Dx12.h"
 #include <hudfix/Hudfix_Dx12.h>
 #include <menu/menu_overlay_dx.h>
@@ -654,6 +655,7 @@ void XeFG_Dx12::Activate()
 
         if (result == XEFG_SWAPCHAIN_RESULT_SUCCESS)
         {
+            XeFGPacing::RequestRecovery();
             _isActive = true;
             _lastDispatchedFrame = 0;
         }
@@ -780,34 +782,37 @@ bool XeFG_Dx12::Dispatch()
 
     if (XeFGProxy::SetNumInterpolatedFrames() != nullptr)
     {
-        if (Config::Instance()->FGXeFGInterpolationCount.value_or_default() > _maxInterpolationCount)
+        auto& cfg = *Config::Instance();
+        const int supported = std::max(1, static_cast<int>(_maxInterpolationCount));
+        int requested = std::clamp(cfg.FGXeFGInterpolationCount.value_or_default(), 1, supported);
+        const bool dynamic = cfg.FGXeFGDynamic.value_or_default();
+        float target = cfg.FGXeFGDynamicTarget.value_or_default();
+        if (!std::isfinite(target)) target = 138.0f;
+        target = std::clamp(target, 30.0f, 500.0f);
+        const float limit = cfg.FramerateLimit.value_or_default();
+        if (std::isfinite(limit) && limit > 0) target = std::min(target, limit);
+        if (dynamic != _dynamicWasEnabled || target != _dynamicLastTarget)
         {
-            Config::Instance()->FGXeFGInterpolationCount = _maxInterpolationCount;
-            LOG_WARN("Requested interpolation count is higher than max supported, setting to max: {}",
-                     _maxInterpolationCount);
+            _dynamic.Reset(); _dynamicWasEnabled = dynamic; _dynamicLastTarget = target;
         }
-
-        if (_framesToInterpolate != Config::Instance()->FGXeFGInterpolationCount.value_or_default())
+        if (dynamic)
+            requested = _dynamic.Select(state.lastFGFrameTime, target, GetTickCount64(),
+                _framesToInterpolate + 1, std::min(4, supported + 1)) - 1;
+        if (_framesToInterpolate != requested)
         {
-            LOG_INFO("Interpolation count changed {} -> {}", _framesToInterpolate,
-                     Config::Instance()->FGXeFGInterpolationCount.value_or_default());
-
-            state.WAR_xefgRequestFGToggle = true;
-
 #ifndef DONT_USE_XMX
             ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
-#endif // !DONT_USE_XMX
-
-            auto intResult = XeFGProxy::SetNumInterpolatedFrames()(
-                _swapChainContext, Config::Instance()->FGXeFGInterpolationCount.value_or_default());
-
-            _framesToInterpolate = Config::Instance()->FGXeFGInterpolationCount.value_or_default();
-
-            if (intResult != XEFG_SWAPCHAIN_RESULT_SUCCESS)
+#endif
+            const auto result = XeFGProxy::SetNumInterpolatedFrames()(_swapChainContext, requested);
+            if (result == XEFG_SWAPCHAIN_RESULT_SUCCESS)
             {
-                LOG_ERROR("SetNumInterpolatedFrames error: {} ({})", magic_enum::enum_name(intResult),
-                          (UINT) intResult);
+                LOG_INFO("XeFG factor: {}X -> {}X, dynamic={}, target={} FPS, real interval={} ms",
+                         _framesToInterpolate + 1, requested + 1, dynamic, target, state.lastFGFrameTime);
+                _framesToInterpolate = requested;
+                state.WAR_xefgRequestFGToggle = true;
             }
+            else
+                LOG_ERROR("SetNumInterpolatedFrames error: {} ({})", magic_enum::enum_name(result), (UINT)result);
         }
     }
 
@@ -875,44 +880,33 @@ bool XeFG_Dx12::Dispatch()
 
     xefg_swapchain_frame_constant_data_t constData = {};
 
-    if (_cameraPosition[fIndex][0] != 0.0f || _cameraPosition[fIndex][1] != 0.0f || _cameraPosition[fIndex][2] != 0.0f)
-    {
-        XMVECTOR right = XMLoadFloat3(reinterpret_cast<const XMFLOAT3*>(_cameraRight[fIndex]));
-        XMVECTOR up = XMLoadFloat3(reinterpret_cast<const XMFLOAT3*>(_cameraUp[fIndex]));
-        XMVECTOR forward = XMLoadFloat3(reinterpret_cast<const XMFLOAT3*>(_cameraForward[fIndex]));
-        XMVECTOR pos = XMLoadFloat3(reinterpret_cast<const XMFLOAT3*>(_cameraPosition[fIndex]));
-
-        float x = -XMVectorGetX(XMVector3Dot(pos, right));
-        float y = -XMVectorGetX(XMVector3Dot(pos, up));
-        float z = -XMVectorGetX(XMVector3Dot(pos, forward));
-
-        XMMATRIX view = { XMVectorSet(XMVectorGetX(right), XMVectorGetX(up), XMVectorGetX(forward), 0.0f),
-                          XMVectorSet(XMVectorGetY(right), XMVectorGetY(up), XMVectorGetY(forward), 0.0f),
-                          XMVectorSet(XMVectorGetZ(right), XMVectorGetZ(up), XMVectorGetZ(forward), 0.0f),
-                          XMVectorSet(x, y, z, 1.0f) };
-
-        memcpy(constData.viewMatrix, view.r, sizeof(view));
-    }
+    const bool havePose = XeFGCamera::BuildView(constData.viewMatrix, _cameraPosition[fIndex],
+        _cameraRight[fIndex], _cameraUp[fIndex], _cameraForward[fIndex]);
+    if (!havePose && _frameCount % 240 == 0)
+        LOG_INFO("XeFG camera: stationary view fallback; pose unavailable, scene age={}", _guideAge[fIndex]);
+    // Projection conversion must not mutate the matched source metadata.
+    auto cameraNear = _cameraNear[fIndex];
+    auto cameraFar = _cameraFar[fIndex];
 
     if (Config::Instance()->FGXeFGDepthInverted.value_or_default())
-        std::swap(_cameraNear[fIndex], _cameraFar[fIndex]);
+        std::swap(cameraNear, cameraFar);
 
-    if (_infiniteDepth && _cameraFar[fIndex] > _cameraNear[fIndex])
-        _cameraFar[fIndex] = std::numeric_limits<float>::infinity();
-    else if (_infiniteDepth && _cameraNear[fIndex] > _cameraFar[fIndex])
-        _cameraNear[fIndex] = std::numeric_limits<float>::infinity();
+    if (_infiniteDepth && cameraFar > cameraNear)
+        cameraFar = std::numeric_limits<float>::infinity();
+    else if (_infiniteDepth && cameraNear > cameraFar)
+        cameraNear = std::numeric_limits<float>::infinity();
 
     // Cyberpunk seems to be sending LH so do the same
     // it also sends some extra data in usually empty spots but no idea what that is
-    if (_cameraNear[fIndex] > 0.f && _cameraFar[fIndex] > 0.f &&
+    if (cameraNear > 0.f && cameraFar > 0.f &&
         !XMScalarNearEqual(_cameraVFov[fIndex], 0.0f, 0.00001f) &&
         !XMScalarNearEqual(_cameraAspectRatio[fIndex], 0.0f, 0.00001f))
     {
-        if (XMScalarNearEqual(_cameraNear[fIndex], _cameraFar[fIndex], 0.00001f))
-            _cameraFar[fIndex]++;
+        if (XMScalarNearEqual(cameraNear, cameraFar, 0.00001f))
+            cameraFar++;
 
         auto projectionMatrix = XMMatrixPerspectiveFovLH(_cameraVFov[fIndex], _cameraAspectRatio[fIndex],
-                                                         _cameraNear[fIndex], _cameraFar[fIndex]);
+                                                         cameraNear, cameraFar);
         memcpy(constData.projectionMatrix, projectionMatrix.r, sizeof(projectionMatrix));
     }
     else
@@ -960,6 +954,16 @@ bool XeFG_Dx12::Dispatch()
 
     // Report what the provider actually got, next to the period it came out of.
     // The two numbers together are what says whether the loop above is real.
+    // Rebuild/loading pauses are discontinuities, not a frame-time target.
+    // Zero is the existing provider-estimated timing mode used by this integration.
+    if (!std::isfinite(constData.frameRenderTime) || constData.frameRenderTime < 0.0f ||
+        constData.frameRenderTime > 250.0f)
+    {
+        LOG_INFO("XeFG timing discontinuity: discarding {} ms frame-time sample", constData.frameRenderTime);
+        constData.frameRenderTime = 0.0f;
+        if (!Config::Instance()->FGSkipReset.value_or_default()) constData.resetHistory = true;
+    }
+
     XeFGPacing::NoteFedFrameTime(constData.frameRenderTime);
 
     LOG_DEBUG("Reset: {}, Input FT: {}, Opti FT: {}, Set FT: {} ms, Opti Id: {}, Reflex Id: {}", _reset[fIndex],
