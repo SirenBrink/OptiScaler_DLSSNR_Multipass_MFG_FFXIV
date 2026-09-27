@@ -8,6 +8,8 @@
 #include <cstring>
 #include <filesystem>
 #include "FfxivLightingScan.h"
+#include "companion/CompanionGpu.h"
+#include "companion/CompanionLayer.h"
 
 // Native exposure scan hooks. Signatures identify the game's
 // shaders, extracted read-only from SqPack on 2026-09-23. No engine RVA is hooked.
@@ -51,6 +53,14 @@ inline UINT Identify(const void* input, size_t size)
     return 0;
 }
 using Create = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*,const void*,SIZE_T,ID3D11ClassLinkage*,ID3D11PixelShader**);
+using CreateLayout = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*,const D3D11_INPUT_ELEMENT_DESC*,UINT,const void*,SIZE_T,ID3D11InputLayout**);
+inline CreateLayout createLayout=nullptr;
+inline HRESULT STDMETHODCALLTYPE OnCreateLayout(ID3D11Device* d,const D3D11_INPUT_ELEMENT_DESC* desc,UINT count,const void* code,SIZE_T size,ID3D11InputLayout** out)
+{
+    auto hr=createLayout(d,desc,count,code,size,out);
+    if(SUCCEEDED(hr) && out && *out) FfxivCompanion::Layer::TagLayout(*out,desc,count,code,size);
+    return hr;
+}
 using Draw = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT);
 using Indexed = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT,INT);
 using Instanced = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT,UINT,UINT);
@@ -62,6 +72,8 @@ inline Indirect indirect=nullptr,indexedIndirect=nullptr;
 inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,SIZE_T size,ID3D11ClassLinkage* link,ID3D11PixelShader** out)
 {
     auto hr=create(d,code,size,link,out);
+    if (SUCCEEDED(hr) && out && *out) FfxivCompanion::Gpu::TagShader(*out, code, size);
+    if (SUCCEEDED(hr) && out && *out) FfxivCompanion::Layer::TagPixel(*out, code, size);
     if (SUCCEEDED(hr) && out && *out)
         if (auto id=Identify(code,size))
         {
@@ -71,6 +83,7 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
 }
 template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&& original)
 {
+    if(c==context && !inside) FfxivCompanion::Layer::Observe(c);
     if (!FfxivLightingScan::armed.load(std::memory_order_relaxed) || c!=context || inside)
     { original(); return; }
     struct Guard { Guard(){inside=true;} ~Guard(){inside=false;} } guard;
@@ -82,9 +95,20 @@ template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&&
     FfxivLightingScan::After(c, id);
 }
 inline void STDMETHODCALLTYPE OnDraw(ID3D11DeviceContext* c,UINT n,UINT start) { Around(c,"Draw",[&]{draw(c,n,start);}); }
-inline void STDMETHODCALLTYPE OnIndexed(ID3D11DeviceContext* c,UINT n,UINT start,INT b) { Around(c,"DrawIndexed",[&]{indexed(c,n,start,b);}); }
+inline void STDMETHODCALLTYPE OnIndexed(ID3D11DeviceContext* c,UINT n,UINT start,INT b)
+{
+    if(c==context && !inside && FfxivCompanion::Layer::InterceptVisibilityIndexed(c,n,start,b,indexed))return;
+    auto normal = [&]{ Around(c,"DrawIndexed",[&]{indexed(c,n,start,b);}); };
+    if (c == context && !inside) FfxivCompanion::Gpu::AroundIndexed(c,n,start,normal);
+    else normal();
+}
 inline void STDMETHODCALLTYPE OnInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,UINT f) { Around(c,"DrawInstanced",[&]{instanced(c,n,i,start,f);}); }
-inline void STDMETHODCALLTYPE OnIndexedInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,INT b,UINT f) { Around(c,"DrawIndexedInstanced",[&]{indexedInstanced(c,n,i,start,b,f);}); }
+inline void STDMETHODCALLTYPE OnIndexedInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,INT b,UINT f)
+{
+    auto normal = [&]{ Around(c,"DrawIndexedInstanced",[&]{indexedInstanced(c,n,i,start,b,f);}); };
+    if (c == context && !inside && i) FfxivCompanion::Gpu::AroundIndexed(c,n,start,normal);
+    else normal();
+}
 inline void STDMETHODCALLTYPE OnIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { Around(c,"DrawInstancedIndirect",[&]{indirect(c,b,o);}); }
 inline void STDMETHODCALLTYPE OnIndexedIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { Around(c,"DrawIndexedInstancedIndirect",[&]{indexedIndirect(c,b,o);}); }
 inline void Install(ID3D11Device* d)
@@ -95,19 +119,21 @@ inline void Install(ID3D11Device* d)
     ComPtr<ID3D11DeviceContext> c; d->GetImmediateContext(&c); if (!c) return;
     auto dv=*reinterpret_cast<void***>(d), cv=*reinterpret_cast<void***>(c.Get());
     create=reinterpret_cast<Create>(dv[15]); draw=reinterpret_cast<Draw>(cv[13]); indexed=reinterpret_cast<Indexed>(cv[12]);
+    createLayout=reinterpret_cast<CreateLayout>(dv[11]);
     instanced=reinterpret_cast<Instanced>(cv[21]); indexedInstanced=reinterpret_cast<IndexedInstanced>(cv[20]);
     indirect=reinterpret_cast<Indirect>(cv[40]); indexedIndirect=reinterpret_cast<Indirect>(cv[39]);
     if (DetourTransactionBegin()!=NO_ERROR) { create=nullptr; return; }
     bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
 #define LIGHT_ATTACH(o,h) ok &= DetourAttach(reinterpret_cast<PVOID*>(&o),h)==NO_ERROR
     LIGHT_ATTACH(create,CreateShader); LIGHT_ATTACH(draw,OnDraw); LIGHT_ATTACH(indexed,OnIndexed);
+    LIGHT_ATTACH(createLayout,OnCreateLayout);
     LIGHT_ATTACH(instanced,OnInstanced); LIGHT_ATTACH(indexedInstanced,OnIndexedInstanced);
     LIGHT_ATTACH(indirect,OnIndirect); LIGHT_ATTACH(indexedIndirect,OnIndexedIndirect);
 #undef LIGHT_ATTACH
     LONG result=ERROR_INVALID_FUNCTION;
     if (ok) result=DetourTransactionCommit(); else DetourTransactionAbort();
     if (result==NO_ERROR) { context=c.Get(); installed.store(true); LOG_INFO("FFXIV lighting: native exposure hooks ready"); }
-    else { create=nullptr; LOG_ERROR("FFXIV lighting: hook installation failed {}",result); }
+    else { create=nullptr; createLayout=nullptr; LOG_ERROR("FFXIV lighting: hook installation failed {}",result); }
 }
 inline void Detach()
 {
@@ -117,10 +143,11 @@ inline void Detach()
     bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
 #define LIGHT_DETACH(o,h) ok &= DetourDetach(reinterpret_cast<PVOID*>(&o),h)==NO_ERROR
     LIGHT_DETACH(create,CreateShader); LIGHT_DETACH(draw,OnDraw); LIGHT_DETACH(indexed,OnIndexed);
+    LIGHT_DETACH(createLayout,OnCreateLayout);
     LIGHT_DETACH(instanced,OnInstanced); LIGHT_DETACH(indexedInstanced,OnIndexedInstanced);
     LIGHT_DETACH(indirect,OnIndirect); LIGHT_DETACH(indexedIndirect,OnIndexedIndirect);
 #undef LIGHT_DETACH
-    if (ok) { if (DetourTransactionCommit()==NO_ERROR) { create=nullptr; context=nullptr; } }
+    if (ok) { if (DetourTransactionCommit()==NO_ERROR) { create=nullptr; createLayout=nullptr; context=nullptr; } }
     else DetourTransactionAbort();
 }
 }

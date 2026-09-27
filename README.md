@@ -1,3 +1,11 @@
+## FFXIV integration updates — September 2026
+
+- **OptiHDR with XeFG:** matching RGB10A2 HDR10 output and HUD-free inputs, alongside existing DLSS-G support. Windows HDR is required; leave RTX HDR and Auto HDR disabled. XeFG extracts UI from the HDR backbuffer instead of using separate SDR UI overlays. This path passed automated conversion/lifetime tests; user XeFG HDR validation is pending.
+- **[FFXIV OptiScaler Companion](https://github.com/SirenBrink/FFXIV-OptiScaler-Companion):** version 0.1.2 supplies same-draw nameplate metadata for an opt-in, 30-second native-depth replacement test. In the Companion section, enable **Lightweight 2x position interpolation** if desired, then **Start depth-tested nameplate replacement (30s)**. Interpolation is bounded between observed positions and bypasses unsupported cases. It does not match 6X FG; an accepted midpoint adds one overlay refresh of visual delay. Replacement and interpolation have received positive in-game testing, but remain experimental.
+
+[Companion implementation and validation notes](COMPANION-INTEGRATION-20260926.md).
+
+---
 # OptiScaler DLSS-NR pre-SR multipass fork
 
 > [!IMPORTANT]
@@ -32,7 +40,7 @@ Downloads:
 
 - [Previous release - v0.7.3](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/releases/tag/v0.7.3-kcd2) - KCD2 presentation fixes, corrected NR motion-vector metadata, two model options, and the Streamline 2.14.1 downloader. See [KCD2 setup](docs/DLSS-FRAME-GENERATION.md#kingdom-come-deliverance-ii).
 
-- [FP8 / NVFP4 hybrid update � v0.7.1](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/releases/tag/v0.7.1-hybrid) � attempt at NVFP4 hybrid. VERY minor improvements on Blackwell. Removes async NR and fixes Streamline override startup crashes.
+- [FP8 / NVFP4 hybrid update � v0.7.1](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/releases/tag/v0.7.1-hybrid) � attempt at NVFP4 hybrid. VERY minor improvements on Blackwell. Removes async NR and fixes Streamline override startup crashes.
 
 - [Earlier experimental package — v0.7.0 Vulkan/NR preview](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/releases/tag/v0.7.0-vulkan-preview) — complete rebuilt package with native Vulkan pre-SR/multipass, selected compatibility fixes, and optional D3D12 residual experiments. New options are off by default. Read the [scope and validation limits](docs/VULKAN-PARITY-REVIEW.md).
 - [Previous release / rollback — v0.6.2](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/releases/tag/v0.6.2-swapchain-fixes) — rebuilt complete package including janblade's window-sized swapchain fix and the reviewed DirectComposition hook, plus the previous padded pre-SR and skin/MFG changes. Build and native API smoke-tested; in-game validation of the new hooks is pending. NVIDIA NR/FG runtimes are not bundled.

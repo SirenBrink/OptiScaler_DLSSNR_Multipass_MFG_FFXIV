@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <misc/companion/replay/FfxivNameplateLiveScope.h>
 #include <misc/FfxivDynamicMarkers.h>
 #include "FG_Hooks.h"
 #include <Config.h>
@@ -1035,6 +1036,7 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
 
 HRESULT FGHooks::hkFGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 {
+    if (FfxivNameplateLiveScope::active) return o_FGSCPresent(This,SyncInterval,Flags);
     // Skip XeFG's internal call
     if (_skipPresent)
     {
@@ -1070,6 +1072,7 @@ HRESULT FGHooks::hkFGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags
 HRESULT FGHooks::hkFGPresent1(IDXGISwapChain1* This, UINT SyncInterval, UINT Flags,
                               const DXGI_PRESENT_PARAMETERS* pPresentParameters)
 {
+    if (FfxivNameplateLiveScope::active) return o_FGSCPresent1(This,SyncInterval,Flags,pPresentParameters);
     // Skip XeFG's internal call
     if (_skipPresent1)
     {

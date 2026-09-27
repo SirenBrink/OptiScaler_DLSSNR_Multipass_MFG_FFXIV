@@ -1,6 +1,7 @@
 #include "pch.h"
 #include <shaders/hdr/Hdr10.h>
 #include <misc/FfxivLightingCapture.h>
+#include <misc/companion/Companion.h>
 #include "dx11_with_dx12_sc.h"
 
 #include <with_dx12/with_dx12.h>
@@ -952,6 +953,11 @@ bool Dx11wDx12SC::_CopyDx11BackBufferToShared(UINT index)
               (size_t) _sharedDx11BackBufferCopies[_currentFakeIndex]);
 
     _dx11Context->CopyResource(_sharedDx11BackBufferCopies[_currentFakeIndex], sourceTexture);
+    // Bake the diagnostic marks beside the native HUD, once per source frame, before
+    // the interop fence and HDR/FG. A late overlay on each generated Present can pair
+    // newer CPU coordinates with an older HUD image and appear to wander.
+    if (State::Instance().gameExe == "ffxiv_dx11.exe")
+        FfxivCompanion::DrawSourceMarkers(_dx11Context, _sharedDx11BackBufferCopies[_currentFakeIndex]);
     sourceTexture->Release();
     return true;
 }

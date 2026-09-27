@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <misc/companion/replay/FfxivNameplateLiveScope.h>
 #include "Dxgi_Hooks.h"
 
 #include "DxgiFactory_Hooks.h"
@@ -91,7 +92,7 @@ inline static HRESULT hkCreateDXGIFactory(REFIID riid, IDXGIFactory** ppFactory)
     auto caller = Util::WhoIsTheCaller(_ReturnAddress());
     LOG_DEBUG("Caller: {}", caller);
 
-    if (creatingD3D12DeviceForLuma)
+    if (creatingD3D12DeviceForLuma || FfxivNameplateLiveScope::active)
     {
         LOG_DEBUG("Bypassing hooking/wrapping during Luma D3D12 device creation");
         return o_CreateDXGIFactory(riid, ppFactory);
@@ -150,7 +151,7 @@ inline static HRESULT hkCreateDXGIFactory1(REFIID riid, IDXGIFactory1** ppFactor
     auto caller = Util::WhoIsTheCaller(_ReturnAddress());
     LOG_DEBUG("Caller: {}", caller);
 
-    if (creatingD3D12DeviceForLuma)
+    if (creatingD3D12DeviceForLuma || FfxivNameplateLiveScope::active)
     {
         LOG_DEBUG("Bypassing hooking/wrapping during Luma D3D12 device creation");
         return o_CreateDXGIFactory1(riid, ppFactory);
@@ -208,7 +209,7 @@ inline static HRESULT hkCreateDXGIFactory2(UINT Flags, REFIID riid, IDXGIFactory
     auto caller = Util::WhoIsTheCaller(_ReturnAddress());
     LOG_DEBUG("Caller: {}", caller);
 
-    if (creatingD3D12DeviceForLuma)
+    if (creatingD3D12DeviceForLuma || FfxivNameplateLiveScope::active)
     {
         LOG_DEBUG("Bypassing hooking/wrapping during Luma D3D12 device creation");
         return o_CreateDXGIFactory2(Flags, riid, ppFactory);

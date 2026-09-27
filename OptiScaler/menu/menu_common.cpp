@@ -2,6 +2,7 @@
 #include <shaders/hdr/Hdr10.h>
 #include <framegen/dlssg/AmpereMfgLoader.h>
 #include <misc/FfxivNativeQuality.h>
+#include <misc/companion/Companion.h>
 #include "menu_common.h"
 #include <framegen/dlssg/MfgUnlock.h>
 #include <NVNGX_Parameter.h>
@@ -7348,6 +7349,7 @@ void MenuCommon::RenderMainMenuTable(RenderMenuContext& ctx)
 
         // Right column: image quality, initialization, advanced options, appearance, overlay and input settings.
         RenderActiveImageSettings(ctx);
+        FfxivCompanion::DrawSettings();
         DlssNr::RenderMenu(ctx.config, ctx.menuResScale);
         RenderMagnifierSettings(ctx);
         RenderQuirksSettings(ctx);

@@ -445,3 +445,4 @@ release
 # Official NVIDIA SDK download/extraction cache; provenance is in redist/streamline/manifest.json.
 /.dependencies/
 /OptiScaler/streamline/
+/tests/out/
