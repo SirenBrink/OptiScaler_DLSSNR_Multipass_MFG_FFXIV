@@ -7,6 +7,9 @@
 #include "CompanionContextIdentity.h"
 #include "replay/FfxivNameplateGpu.h"
 #include <imgui/imgui.h>
+#include <Config.h>
+#include <State.h>
+#include <hooks/FG_Hooks.h>
 
 namespace FfxivCompanion::Layer
 {
@@ -24,7 +27,15 @@ static std::atomic<uint64_t> visibilityCpuUs{0},visibilityDraws{0};
 static thread_local uint64_t boundContextToken=0;
 static std::array<std::atomic<uint64_t>,5> visibilityRejects{};
 static std::atomic<uint64_t> forwardedContexts{0};
+static bool managedRequested=false; // Updated by the rendering-thread Tick only.
+static ULONGLONG nextRetry=0;
 static thread_local std::shared_ptr<const Snapshot> visibilitySnapshot;
+static bool HasHudFgPresenter()
+{
+    const auto& state=State::Instance();
+    return (state.activeFgOutput==FGOutput::DLSSG || state.activeFgOutput==FGOutput::XeFG) &&
+        state.currentFGSwapchain && !FGHooks::IsDx12InteropPresentSC(state.currentFGSwapchain);
+}
 void BeginSnapshot()
 {
     if (!FfxivNameplateLive::WantFrame()) return;
@@ -211,6 +222,55 @@ void Observe(ID3D11DeviceContext* c)
     try { FfxivNameplateGpu::Observe(c); }
     catch (const std::exception& e) { Stop(); LOG_WARN("Companion layer materials failed: {}",e.what()); }
 }
+// Called before publishing the pending frame, on the render thread, so lost
+// readiness prevents another launch. The menu changes intent, not GPU resources.
+static void SyncControls()
+{
+    namespace Live=FfxivNameplateLive;
+    auto* config=Config::Instance();
+    Live::midpointEnabled=config->CompanionHudInterpolation.value_or_default();
+    // Also protect diagnostic/timed sessions if their presenter disappears.
+    if(!HasHudFgPresenter() || State::Instance().isShuttingDown)
+    {
+        if(managedRequested || Live::preparing.load() || Live::WantFrame())
+        {Native::SetRequested(false);managedRequested=false;nextRetry=0;}
+        return;
+    }
+    const bool wanted=config->CompanionHudReplacement.value_or_default();
+    if(!wanted)
+    {
+        if(managedRequested){Native::SetRequested(false);managedRequested=false;nextRetry=0;}
+        return;
+    }
+    Snapshot snapshot;Status status;
+    const bool gameplayReady=mailbox.Read(snapshot,status,Now()) && status.ageQpc<=Frequency()/4 &&
+        (snapshot.frame.flags & GameplayReady)!=0;
+    if(!gameplayReady)
+    {
+        if(managedRequested)
+        {
+            Native::SetRequested(false);managedRequested=false;nextRetry=0;
+            visibilitySnapshot.reset();
+            LOG_INFO("Companion HUD suspended: waiting for stable gameplay from Companion 0.1.3+");
+        }
+        return;
+    }
+    if(Live::preparing.load() || Live::WantFrame() || GetTickCount64()<nextRetry)return;
+    if(!Native::GetStatistics().installed || !snapshot.frame.count)return;
+    DWORD foreground=0;GetWindowThreadProcessId(GetForegroundWindow(),&foreground);
+    if(foreground!=GetCurrentProcessId())return;
+    nextRetry=GetTickCount64()+5000;
+    if(!Live::Request(0))return;
+    managedRequested=true;
+    LOG_INFO("Companion HUD preparation authorized by stable gameplay, snapshot {}",snapshot.frame.sequence);
+    LOG_INFO("Companion HUD presenter: provider {}, FG swapchain {:X}, dedicated HUD hook bypass enabled",
+        State::Instance().activeFgOutput==FGOutput::DLSSG?"DLSS-G":"XeFG",
+        reinterpret_cast<uintptr_t>(State::Instance().currentFGSwapchain));
+    Native::SetRequested(true);Gpu::requested=false;
+    visibilityRing.store(nullptr);
+    VisibilityQueue::tracking=true;
+    Live::Status("Preparing HUD replacement; native nameplates active");
+}
 void Tick(ID3D11DeviceContext* c)
 {
     FfxivNameplateLive::Poll();
@@ -218,6 +278,8 @@ void Tick(ID3D11DeviceContext* c)
     {
         namespace Live=FfxivNameplateLive;
         std::lock_guard frameLock(visibilityFrameMutex);
+        // Revoke readiness before publishing or launching a layer during zoning.
+        SyncControls();
         if(frameProducer)
         {
             const bool visible=Live::WantFrame() && GetTickCount64()-Live::heartbeat.load()<=100;
@@ -251,16 +313,44 @@ void Tick(ID3D11DeviceContext* c)
 void DrawSettings()
 {
     namespace Live = FfxivNameplateLive;
+    auto* config=Config::Instance();
+    bool replacement=config->CompanionHudReplacement.value_or_default();
+    const bool supported=HasHudFgPresenter();
+    ImGui::BeginDisabled(!supported);
+    if(ImGui::Checkbox("HUD replacement (nameplates and icons)",&replacement))
+    {
+        config->CompanionHudReplacement=replacement;
+        if(!replacement)Stop();
+    }
+    ImGui::EndDisabled();
+    if(!supported)ImGui::TextWrapped("HUD replacement requires an OptiFG DLSS-G or XeFG presenter. Select the provider and restart the game.");
+    bool midpoint=config->CompanionHudInterpolation.value_or_default();
+    ImGui::BeginDisabled(!supported);
+    if(ImGui::Checkbox("HUD interpolation (2x)",&midpoint))
+    {config->CompanionHudInterpolation=midpoint;Live::midpointEnabled=midpoint;}
+    ImGui::EndDisabled();
+    if(ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Adds one intermediate nameplate position. Requires HUD replacement.\nDoes not interpolate the rest of the HUD; may add one overlay refresh of delay.");
+    if(replacement && supported)
+    {
+        if(!Native::GetStatistics().installed)ImGui::TextWrapped("Unavailable for this game build; native nameplates remain active.");
+        else ImGui::TextUnformatted(Live::WantFrame()?"Active":Live::preparing.load()?"Preparing; native nameplates active":"Waiting for stable gameplay (Companion 0.1.3+); native nameplates active");
+    }
+    ImGui::Text("Updates: %llu | Interpolated: %llu | Fallbacks: %llu",
+        Live::updates.load(),Live::midpointFrames.load(),Live::fallbacks.load());
+}
+void DrawDiagnostics()
+{
+    namespace Live = FfxivNameplateLive;
     ImGui::TextWrapped("Native depth-tested nameplate layer. Optional midpoint interpolation moves isolated nameplate regions between observed positions; no prediction or image blending.");
-    bool midpoint=Live::midpointEnabled.load();
-    if(ImGui::Checkbox("Lightweight 2x position interpolation",&midpoint)) Live::midpointEnabled.store(midpoint);
     ImGui::Text("Midpoints shown: %llu | Bypassed: %llu",Live::midpointFrames.load(),Live::midpointBypass.load());
     ImGui::TextWrapped("One midpoint, then the latest position next refresh. Requires Companion 0.1.2; skips overlapping plates, changed labels, jumps, missed samples and observed layer intervals above 8 ms. Integer-pixel movement preserves glyph sharpness. Can add one overlay refresh of visual delay. Occlusion edges may shift briefly with the current image; input is unchanged.");
+    ImGui::BeginDisabled(Config::Instance()->CompanionHudReplacement.value_or_default() || !HasHudFgPresenter());
     if (ImGui::Button("Start depth-tested nameplate replacement (30s)"))
     {
-        if (Native::GetStatistics().installed && Live::Request())
+        if (HasHudFgPresenter() && Native::GetStatistics().installed && Live::Request())
         {
-            Native::SetRequested(true);Gpu::requested.store(false);Live::midpointEnabled=false;
+            Native::SetRequested(true);Gpu::requested.store(false);
             visibilityRing.store(nullptr);visibilityCpuUs=0;visibilityDraws=0;
             forwardedContexts=0;for(auto& count:visibilityRejects)count=0;
             VisibilityQueue::emitted=0;VisibilityQueue::boundCount=0;VisibilityQueue::partitioned=0;VisibilityQueue::rejected=0;
@@ -270,6 +360,7 @@ void DrawSettings()
     }
     ImGui::SameLine();
     if (ImGui::Button("Restore native nameplates")) Stop();
+    ImGui::EndDisabled();
     ImGui::TextWrapped("%s",Live::Status().c_str());
     ImGui::Text("Layer presents: %.1f/s | Native position updates: %.1f/s",Live::layerRate.load(),Live::gameRate.load());
     ImGui::Text("Replacement frames: %llu | Fallbacks: %llu",Live::updates.load(),Live::fallbacks.load());

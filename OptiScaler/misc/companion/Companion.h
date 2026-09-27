@@ -5,4 +5,5 @@ namespace FfxivCompanion
 {
 void DrawSourceMarkers(ID3D11DeviceContext* context, ID3D11Texture2D* target);
 void DrawSettings();
+bool DiagnosticsEnabled();
 }

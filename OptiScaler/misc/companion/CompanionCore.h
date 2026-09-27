@@ -32,7 +32,7 @@ class Mailbox
     {
         if (f.count > MaxPlates || bytes != f.count * sizeof(Plate) || (f.count && !p) ||
             f.sequence <= lastSequence || f.qpc <= 0 || f.qpc > now || now - f.qpc > frequency / 4 ||
-            (f.flags & ~(Preview | CameraValid))) return false;
+            (f.flags & ~(Preview | CameraValid | GameplayReady))) return false;
         if (f.count && (!f.width || !f.height || f.width > 16384 || f.height > 16384)) return false;
         if (f.flags & CameraValid)
             for (unsigned i = 0; i < 16; ++i)

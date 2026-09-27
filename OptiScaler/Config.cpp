@@ -899,6 +899,8 @@ bool Config::Reload(std::filesystem::path iniPath)
 
         // HDR
         {
+            CompanionHudReplacement.set_from_config(readBool("Companion", "HudReplacement"));
+            CompanionHudInterpolation.set_from_config(readBool("Companion", "HudInterpolation"));
             FfxivHDR.set_from_config(readBool("HDR", "FfxivHDR"));
             FfxivHDRPeak.set_from_config(readFloat("HDR", "PeakNits"));
             FfxivHDRPaper.set_from_config(readFloat("HDR", "PaperWhiteNits"));
@@ -1347,6 +1349,8 @@ bool Config::SaveIni()
                  GetBoolValue(Instance()->DlssNrCompareTags.value_for_config()).c_str());
     ini.SetValue("DlssNr", "TagScale",
                  GetFloatValue(Instance()->DlssNrTagScale.value_for_config()).c_str());
+    ini.SetValue("Companion", "HudReplacement", GetBoolValue(Instance()->CompanionHudReplacement.value_for_config()).c_str());
+    ini.SetValue("Companion", "HudInterpolation", GetBoolValue(Instance()->CompanionHudInterpolation.value_for_config()).c_str());
     ini.SetValue("HDR", "FfxivHDR", GetBoolValue(Instance()->FfxivHDR.value_for_config()).c_str());
     ini.SetValue("HDR", "PeakNits", GetFloatValue(Instance()->FfxivHDRPeak.value_for_config()).c_str());
     ini.SetValue("HDR", "PaperWhiteNits", GetFloatValue(Instance()->FfxivHDRPaper.value_for_config()).c_str());

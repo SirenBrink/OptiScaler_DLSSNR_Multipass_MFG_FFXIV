@@ -7,14 +7,28 @@
 #include "CompanionLayer.h"
 #include <atomic>
 #include <imgui/imgui.h>
+#include <Config.h>
 
 namespace FfxivCompanion
 {
+bool DiagnosticsEnabled()
+{
+    const auto* c=Config::Instance();
+    return c->LogLevel.value_or_default()<6 &&
+        (c->LogToFile.value_or_default() || c->LogToConsole.value_or_default() ||
+         c->LogToDebug.value_or_default() || c->LogToNGX.value_or_default());
+}
 
-static std::atomic<bool> markersAllowed {true};
+static std::atomic<bool> markersAllowed {false};
 static std::atomic<uint64_t> sourceFrames {0}, skippedFrames {0};
 void DrawSourceMarkers(ID3D11DeviceContext* context, ID3D11Texture2D* target)
 {
+    if (!DiagnosticsEnabled())
+    {
+        Gpu::requested=false;
+        if (!Config::Instance()->CompanionHudReplacement.value_or_default() && Native::GetStatistics().requested)
+            Native::SetRequested(false);
+    }
     Layer::Tick(context);
     // Report independently of marker visibility. Aggregate only; no per-draw I/O.
     static ULONGLONG reportAt = 0;
@@ -36,7 +50,7 @@ void DrawSourceMarkers(ID3D11DeviceContext* context, ID3D11Texture2D* target)
             Gpu::results[1].load(), Gpu::results[2].load(), Gpu::results[3].load(), Gpu::results[4].load(),
             Gpu::results[5].load(), Gpu::results[6].load(), Gpu::results[7].load(), Gpu::results[8].load());
     }
-    if (!markersAllowed.load()) return;
+    if (!DiagnosticsEnabled() || !markersAllowed.load()) return;
     Snapshot snapshot;
     Status status;
     // Take ONE owned snapshot for this source image; later plugin updates cannot
@@ -59,13 +73,17 @@ void DrawSettings()
     Status status;
     const bool fresh = mailbox.Read(snapshot, status, Now());
     ImGui::TextUnformatted(fresh ? "Receiving native nameplate data" : "Waiting for fresh visible nameplates");
-    ImGui::Text("Nameplates: %u | Accepted: %llu | Rejected: %llu", status.count, status.accepted, status.rejected);
+    ImGui::Text("Nameplates: %u", status.count);
+    Layer::DrawSettings();
+    if (!DiagnosticsEnabled() || !ImGui::TreeNode("Companion diagnostics")) return;
+    ImGui::Text("Accepted: %llu | Rejected: %llu", status.accepted, status.rejected);
     if (status.sequence) ImGui::Text("Snapshot age: %.1f ms", 1000.0 * status.ageQpc / Frequency());
     bool allowed = markersAllowed.load();
     if (ImGui::Checkbox("Allow Companion alignment markers", &allowed)) markersAllowed.store(allowed);
     ImGui::Text("DX11 source frames marked: %llu | Skipped: %llu", sourceFrames.load(), skippedFrames.load());
     ImGui::TextWrapped("Markers are attached to the DX11 HUD copy before HDR and frame generation.");
     auto native = Native::GetStatistics();
+    ImGui::BeginDisabled(Config::Instance()->CompanionHudReplacement.value_or_default());
     bool copied = native.requested;
     ImGui::BeginDisabled(!native.installed);
     if (ImGui::Checkbox("Use copied nameplate submissions (test)", &copied)) Native::SetRequested(copied);
@@ -90,7 +108,9 @@ void DrawSettings()
     ImGui::Text("Last material age: %llu ms | Peak sampled CPU: %.3f ms", Gpu::lastAgeMs.load(), Gpu::cpuPeakUs.load() / 1000.0);
     ImGui::TextWrapped("Tests owned vertex/index buffers in place of native buffers for up to four matching draws per 100 ms. Shared UI materials can also match. No extra draws or higher refresh; all shaders, textures, ordering and input stay native. Logs include layout coverage and fallback reasons. CPU timing includes the sampled native draw and is not GPU latency.");
     ImGui::TextWrapped("Use /opticompanion in Dalamud to enable markers. Alignment markers are optional for this test.");
-    Layer::DrawSettings();
+    ImGui::EndDisabled();
+    Layer::DrawDiagnostics();
+    ImGui::TreePop();
 }
 }
 

@@ -14,19 +14,24 @@ int main()
     assert(!m.Open(1, sizeof(Frame), sizeof(Plate), sizeof(Status), 999, 1000, 100));
     auto token = open(100);
     assert(token && !open(100));
-    Frame f {1, 100, 3840, 2160, 1, Preview};
+    Frame f {1, 100, 3840, 2160, 1, Preview | GameplayReady};
     Plate p {}; p.objectId = 42; p.slot = 3; p.anchorX = 123; p.anchorY = 456;
     assert(m.Submit(token, f, &p, sizeof(p), 100));
     Snapshot s; Status status;
     assert(m.Read(s, status, 200) && s.plates[0].objectId == 42 && status.accepted == 1);
+    assert((s.frame.flags & GameplayReady)!=0);
     // Mailbox owns the copy, not a caller's stack or a game node pointer.
     p.objectId = 43;
     assert(m.Read(s, status, 200) && s.plates[0].objectId == 42);
     assert(!m.Read(s, status, 351));
     f.sequence++;
+    f.flags=8;
+    assert(!m.Submit(token,f,&p,sizeof(p),101)); // Unknown readiness flags fail closed.
+    f.flags=Preview;
     assert(!m.Submit(token, f, &p, sizeof(p) - 1, 101));
     assert(!m.Read(s, status, 101));
     assert(m.Submit(token, f, &p, sizeof(p), 101));
+    assert(m.Read(s,status,101) && !(s.frame.flags & GameplayReady));
     assert(!m.Submit(token, f, &p, sizeof(p), 101)); // reordered/duplicate frame
     f.sequence++; f.qpc = 102;
     p.anchorX = std::numeric_limits<float>::quiet_NaN();

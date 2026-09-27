@@ -75,6 +75,16 @@ int main()
     arm();heartbeat=GetTickCount64()-200;{BatchFilter filter(rendererAddress);assert(!filter.owner);}assert(pointer()==original);
     arm();entries[0][1]=987654;{BatchFilter filter(rendererAddress);assert(!filter.owner && pending);}assert(pointer()==original);
     Stop();assert(!WantFrame());
+    // Persistent mode has no 30-second deadline, but readiness, stop and stale
+    // heartbeat guards must continue to retain native drawing.
+    assert(Request(0));assert(durationMs==0 && endTime==0 && preparing);
+    assert(!Request(30000));assert(durationMs==0); // No reset during preparation.
+    preparing=false;entries[0][1]=reinterpret_cast<uintptr_t>(header.data());arm();endTime=0;assert(WantFrame());
+    {BatchFilter filter(rendererAddress);assert(filter.owner);}assert(pointer()==original);
+    heartbeat=GetTickCount64()-200;
+    {BatchFilter filter(rendererAddress);assert(!filter.owner);}assert(pointer()==original);
+    ready=false;assert(!WantFrame());ready=true;Stop();assert(!WantFrame());
+    assert(Request(30000));assert(durationMs==30000);Stop();
     // Production pairing: exact object signature and geometry must agree. Only xy changes.
     Frame oldFrame,newFrame;oldFrame.identity=newFrame.identity=123;
     Draw oldDraw,newDraw;oldDraw.identity=newDraw.identity=456;

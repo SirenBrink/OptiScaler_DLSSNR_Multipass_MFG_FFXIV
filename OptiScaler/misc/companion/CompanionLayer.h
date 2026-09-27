@@ -4,6 +4,7 @@
 namespace FfxivCompanion::Layer
 {
 void DrawSettings();
+void DrawDiagnostics();
 void Capture(const Packets::Queue& before);
 void BeginSnapshot();
 bool ReplaceBatch(void(__fastcall* original)(uintptr_t,char), uintptr_t renderer, char mode);

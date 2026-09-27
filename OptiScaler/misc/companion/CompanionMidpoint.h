@@ -11,17 +11,23 @@ namespace FfxivCompanion::Midpoint
 // of an already-arrived sample; its endpoint must be shown before another midpoint.
 struct Gate
 {
+    enum class Reject { None, Disabled, Sequence, Endpoint, Cadence, Age };
+    Reject rejection=Reject::None;
     uint64_t seen = 0, endpoint = 0;
     bool Offer(uint64_t current, uint64_t previous, double sourceInterval, double layerInterval,
                double age, bool enabled)
     {
         const bool first = current != seen;
         seen = current;
-        return enabled && first && previous && current > previous && current == previous + 1 && endpoint == previous &&
-            std::isfinite(sourceInterval) && std::isfinite(layerInterval) && std::isfinite(age) &&
-            sourceInterval >= 0.004 && sourceInterval <= 0.050 &&
-            layerInterval >= 0.001 && layerInterval <= 0.008 &&
-            sourceInterval >= 2.0 * layerInterval && age >= 0 && age <= sourceInterval * 0.5;
+        rejection=Reject::None;
+        if(!enabled)rejection=Reject::Disabled;
+        else if(!first || !previous || current<=previous || current!=previous+1)rejection=Reject::Sequence;
+        else if(endpoint!=previous)rejection=Reject::Endpoint;
+        else if(!std::isfinite(sourceInterval) || !std::isfinite(layerInterval) ||
+            sourceInterval<0.004 || sourceInterval>0.050 || layerInterval<0.001 || layerInterval>0.008 ||
+            sourceInterval<2.0*layerInterval)rejection=Reject::Cadence;
+        else if(!std::isfinite(age) || age<0 || age>sourceInterval*0.5)rejection=Reject::Age;
+        return rejection==Reject::None;
     }
     void Presented(uint64_t sequence, bool midpoint) { if (!midpoint) endpoint = sequence; }
     void Reset() { seen = endpoint = 0; }

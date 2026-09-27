@@ -5,7 +5,7 @@
 namespace FfxivCompanion
 {
 inline constexpr uint32_t Version = 1, MaxPlates = 50;
-inline constexpr uint32_t Preview = 1, CameraValid = 2;
+inline constexpr uint32_t Preview = 1, CameraValid = 2, GameplayReady = 4;
 inline constexpr uint32_t WorldValid = 1, BoundsValid = 2;
 // Capabilities: data receiver = 1, alignment view = 2. There is deliberately NO
 // replacement-ready capability. Receipt/preview is not proof that originals may be hidden.

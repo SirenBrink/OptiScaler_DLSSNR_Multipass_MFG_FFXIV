@@ -15,7 +15,7 @@
 #pragma comment(lib,"dcomp.lib")
 #pragma comment(lib,"ole32.lib")
 
-// A bounded presentation experiment. Only owned geometry/resources cross threads.
+// An optional presentation layer. Only owned geometry/resources cross threads.
 // Never calls game UI updates or uses the game's immediate context from the worker.
 namespace FfxivNameplateLive
 {
@@ -37,6 +37,7 @@ inline std::atomic<bool> midpointEnabled{false},visibilityMode{true};
 inline std::atomic<uint64_t> midpointFrames{0},midpointBypass{0},midpointCpuUs{0};
 inline std::atomic<bool> requested{false},preparing{false},ready{false},stop{false};
 inline std::atomic<ULONGLONG> heartbeat{0},endTime{0},prepareEnd{0};
+inline std::atomic<ULONGLONG> durationMs{30000}; // Zero means enabled until stopped.
 inline std::atomic<UINT64> updates{0},presents{0},fallbacks{0};
 inline std::atomic<double> layerRate{0},gameRate{0};
 inline std::mutex mutex;
@@ -48,8 +49,8 @@ inline double Seconds() { LARGE_INTEGER t,f; QueryPerformanceCounter(&t); QueryP
 inline void Status(std::string value) { std::lock_guard lock(mutex); status=std::move(value); }
 inline std::string Status() { std::lock_guard lock(mutex); return status; }
 inline void Stop() { stop.store(true); ready.store(false); preparing.store(false); requested.store(false); }
-inline bool WantFrame() { return ready.load() && !stop.load() && GetTickCount64()<endTime.load(); }
-inline bool Request()
+inline bool WantFrame() { return ready.load() && !stop.load() && (!endTime.load() || GetTickCount64()<endTime.load()); }
+inline bool Request(ULONGLONG duration=30000)
 {
     std::lock_guard lock(mutex);
     if(preparing.load()) return false; // Repeated clicks must not restart material capture.
@@ -59,6 +60,7 @@ inline bool Request()
     latest.reset();previous.reset();supported.clear();
     updates=0;presents=0;fallbacks=0;layerRate=0;gameRate=0;
     midpointFrames=0;midpointBypass=0;midpointCpuUs=0;
+    durationMs=duration;endTime=0;
     stop=false;ready=false;requested=true;preparing=true;prepareEnd=GetTickCount64()+15000;
     status="Preparing native geometry and materials; native drawing remains active";
     return true;
@@ -236,16 +238,19 @@ inline void Run(Package& package)
     D3D11_DEPTH_STENCIL_DESC dd{};ComPtr<ID3D11DepthStencilState> depth;Check(device->CreateDepthStencilState(&dd,&depth));
     D3D11_BUFFER_DESC vbDesc{};vbDesc.ByteWidth=65536*40;vbDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;vbDesc.Usage=D3D11_USAGE_DYNAMIC;vbDesc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;ComPtr<ID3D11Buffer> vb;Check(device->CreateBuffer(&vbDesc,nullptr,&vb));
     std::vector<UINT> indices;for(UINT i=0;i<65536;i+=4)for(UINT off:{0u,1u,2u,0u,2u,3u})indices.push_back(i+off);D3D11_BUFFER_DESC ibDesc{};ibDesc.ByteWidth=static_cast<UINT>(indices.size()*4);ibDesc.BindFlags=D3D11_BIND_INDEX_BUFFER;ibDesc.Usage=D3D11_USAGE_IMMUTABLE;D3D11_SUBRESOURCE_DATA ii{indices.data(),0,0};ComPtr<ID3D11Buffer> ib;Check(device->CreateBuffer(&ibDesc,&ii,&ib));
-    auto end=GetTickCount64()+30000;endTime=end;heartbeat=GetTickCount64();
-    {std::lock_guard lock(mutex);supported.clear();for(auto&[key,m]:materials)supported.push_back(key);status=package.visibility?"LIVE: depth-tested nameplates; native position rate (30 seconds)":"LIVE: independent nameplate refresh (30 seconds)";}
+    const auto duration=durationMs.load();auto end=duration?GetTickCount64()+duration:0;
+    endTime=end;heartbeat=GetTickCount64();
+    {std::lock_guard lock(mutex);supported.clear();for(auto&[key,m]:materials)supported.push_back(key);status="HUD replacement active";}
     LOG_INFO("FFXIV nameplate live: independent replacement active; optional 2x positional midpoint, no extrapolation");
     ShowWindow(window.value,SW_SHOWNOACTIVATE);preparing=false;ready=true;
     UINT64 lastPresents=0,lastUpdates=0;double lastReport=Seconds();
     FfxivCompanion::Midpoint::Gate midpointGate;
     FfxivCompanion::Midpoint::Gate visibilityGate;
+    std::array<uint64_t,6> timingSkips{};
+    uint64_t missingGuides=0,noSafeMovement=0;
     std::vector<std::vector<unsigned char>> midpointVertices;
     double previousPresentStart=0;
-    while(!stop.load() && GetTickCount64()<end && IsWindow(package.game))
+    while(!stop.load() && (!end || GetTickCount64()<end) && IsWindow(package.game))
     {
         if(WaitForSingleObject(pacing.value,50)!=WAIT_OBJECT_0)continue;
         MSG msg;while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessageW(&msg);}
@@ -287,9 +292,10 @@ inline void Run(Package& package)
                 const double imageAge=double(GetTickCount64()-visibility.time)/1000;
                 age=imageAge;
                 const double interval=visibility.time>=visibility.previousTime?double(visibility.time-visibility.previousTime)/1000:0;
-                if(visibilityGate.Offer(visibility.serial,visibility.previousSerial,interval,presentInterval,imageAge,midpointEnabled.load()) &&
-                   regionContext && visibility.snapshot && visibility.previousSnapshot &&
-                   visibility.snapshot->frame.width==package.width && visibility.snapshot->frame.height==package.height)
+                const bool offered=visibilityGate.Offer(visibility.serial,visibility.previousSerial,interval,presentInterval,imageAge,midpointEnabled.load());
+                const bool guides=regionContext && visibility.snapshot && visibility.previousSnapshot &&
+                   visibility.snapshot->frame.width==package.width && visibility.snapshot->frame.height==package.height;
+                if(offered && guides)
                 {
                     const auto begin=Seconds();
                     auto moves=FfxivCompanion::ImageMidpoint::Build(*visibility.previousSnapshot,*visibility.snapshot);
@@ -298,9 +304,15 @@ inline void Run(Package& package)
                         FfxivCompanion::ImageMidpoint::Render(regionContext.Get(),visibility.image.Get(),back.Get(),rtv.Get(),moves);
                         midpoint=true;
                     }
+                    else ++noSafeMovement;
                     midpointCpuUs+=static_cast<uint64_t>((Seconds()-begin)*1000000);
                 }
-                if(first && midpointEnabled.load() && !midpoint)++midpointBypass;
+                if(first && midpointEnabled.load() && !midpoint)
+                {
+                    ++midpointBypass;
+                    if(!offered)++timingSkips[static_cast<size_t>(visibilityGate.rejection)];
+                    else if(!guides)++missingGuides;
+                }
             }
             else visibilityGate.Reset();
         }
@@ -316,7 +328,15 @@ inline void Run(Package& package)
                 auto tex=m.texture.Get();auto sampler=m.sampler.Get();context->PSSetShaderResources(0,1,&tex);context->PSSetSamplers(0,1,&sampler);context->OMSetBlendState(m.blend.Get(),m.blendFactor,m.sampleMask);context->RSSetState(m.raster.Get());context->RSSetViewports(1,&m.viewport);context->RSSetScissorRects(static_cast<UINT>(m.scissors.size()),m.scissors.data());context->DrawIndexed(p.count/4*6,0,0);
             }
         }
-        Check(swap->Present(1,0));++presents;
+        // Present the independent composition chain with a full update. Present1
+        // alone does not isolate third-party hooks: Layer also requires the tested
+        // OptiFG presenter path. On failure, restore native drawing without retrying
+        // through a different presentation entry.
+        const DXGI_PRESENT_PARAMETERS presentParameters{};
+        const auto presentResult=swap->Present1(1,0,&presentParameters);
+        if(presents.load()==0 || FAILED(presentResult))
+            LOG_INFO("Companion HUD Present1: result {:X}, first {}",static_cast<unsigned>(presentResult),presents.load()==0);
+        Check(presentResult);++presents;
         if(package.visibility && visibility.serial)
         {visibilityGate.Presented(visibility.serial,midpoint);if(midpoint)++midpointFrames;}
         else if(now && age<=0.1) {midpointGate.Presented(now->sequence,midpoint);if(midpoint)++midpointFrames;}
@@ -332,6 +352,8 @@ inline void Run(Package& package)
                 package.visibility?(visibility.snapshot?visibility.snapshot->frame.sequence:0):(now?now->sequence:0));
             if(package.visibility)LOG_INFO("Companion visibility: image {} age {} ms GPU span including intervening HUD {:.3f} ms valid {}",
                 visibility.serial,visibility.serial?GetTickCount64()-visibility.time:0,package.visibility->gpuMs.load(),package.visibility->validSerial.load());
+            if(package.visibility)LOG_INFO("Companion midpoint skips: sequence {} endpoint {} cadence {} age {} guides {} no-safe-movement {}",
+                timingSkips[2],timingSkips[3],timingSkips[4],timingSkips[5],missingGuides,noSafeMovement);
             lastPresents=presentCount;lastUpdates=updateCount;lastReport=time;
         }
     }
@@ -344,7 +366,7 @@ inline DWORD WINAPI Worker(void* data)
     {
         std::unique_ptr<Package> package(static_cast<Package*>(data));module=package->module;
         const auto comResult=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
-        try {Run(*package);Status("Test finished; native nameplates restored");}
+        try {Run(*package);Status("Native nameplates active");}
         catch(const std::exception& e){LOG_WARN("FFXIV nameplate live: {}",e.what());Status(std::string("Native nameplates active: ")+e.what());}
         ready=false;preparing=false;
         if(SUCCEEDED(comResult))CoUninitialize();

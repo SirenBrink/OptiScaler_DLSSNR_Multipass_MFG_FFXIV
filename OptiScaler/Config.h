@@ -238,6 +238,10 @@ class Config
     CustomOptional<bool, NoDefault> DisableReactiveMask;
     CustomOptional<float> DlssReactiveMaskBias { 0.45f };
 
+    // Optional Companion nameplate layer. Both features are opt-in.
+    CustomOptional<bool> CompanionHudReplacement { false };
+    CustomOptional<bool> CompanionHudInterpolation { false };
+
     // Logging
     CustomOptional<bool> LogToFile { false };
     CustomOptional<bool> LogToConsole { false };

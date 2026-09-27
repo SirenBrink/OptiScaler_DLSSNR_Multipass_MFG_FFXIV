@@ -36,10 +36,12 @@ int main()
     assert(!gate.Offer(14,13,0.030,0.007,0.001,true)); // missed native endpoint
     gate.Presented(14,false);
     assert(!gate.Offer(15,14,0.030,0.017,0.001,true)); // latency gate at low refresh
+    assert(gate.rejection==Gate::Reject::Cadence);
     gate.Presented(15,false);
     assert(!gate.Offer(16,15,0.010,0.007,0.001,true)); // too little display headroom
     gate.Presented(16,false);
     assert(!gate.Offer(17,16,0.030,0.007,0.020,true)); // stale source
+    assert(gate.rejection==Gate::Reject::Age);
     gate.Presented(17,false);
     assert(!gate.Offer(18,17,0.030,0.007,0.001,false)); // live disable
     gate.Reset();assert(!gate.endpoint && !gate.seen);
