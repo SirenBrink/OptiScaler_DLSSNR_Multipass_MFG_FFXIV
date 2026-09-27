@@ -525,87 +525,11 @@ inline void PushPeriod(int64_t ns)
     g_periodNs = sorted[g_sampleCount / 2];
 }
 
-// Diagnostic accounting only. All fields are owned by the present thread.
-// Scheduler/present durations can include GPU waits; "other" is uninstrumented
-// wall time, NOT GPU render time. Windows never combine different factors.
-struct BurstTiming
-{
-    int64_t begin = 0, scheduler[8] {}, present = 0;
-    uint32_t factor = 0, presentCalls = 0;
-    int64_t providerMedianNs = 0, scheduledStepNs = 0;
-    bool recovery = false;
-};
-inline BurstTiming g_burstTiming;
-// These calls are disjoint from ScheduleFrame/SchedForwarder. Include their
-// duration in blocked-call accounting so DXGI backpressure is not fed back as
-// render time. This estimates time outside provider calls, not GPU workload.
+// Preserve blocked-present accounting used by the pacing controller.
+inline bool g_burstStarted = false;
 inline void NoteGeneratedPresentDuration(int64_t duration)
 {
-    if (duration < 0) return;
-    g_burstTiming.present += duration;
-    ++g_burstTiming.presentCalls;
-    if (g_burstTiming.begin > 0) g_burstBlockQpc += duration;
-}
-
-inline BurstTiming g_timingWindow;
-inline uint32_t g_timingBursts = 0;
-inline int64_t g_timingElapsed = 0, g_timingMax = 0, g_timingStart = 0;
-
-inline int64_t SchedulerTotal(const BurstTiming& timing)
-{
-    int64_t total = 0;
-    for (auto duration : timing.scheduler) total += duration;
-    return total;
-}
-
-inline void BeginDiagnosticBurst(uint32_t factor, int64_t now)
-{
-    const auto previous = g_burstTiming;
-    // Keep startup, factor changes and long rebuild gaps out of steady averages.
-    if (previous.begin > 0 && now > previous.begin && previous.factor == factor &&
-        NsFromQpc(now - previous.begin) <= MaxTimingIntervalNs)
-    {
-        if (g_timingWindow.factor != factor)
-        {
-            g_timingWindow = {}; g_timingWindow.factor = factor;
-            g_timingBursts = 0; g_timingElapsed = g_timingMax = 0; g_timingStart = previous.begin;
-        }
-        const auto elapsed = now - previous.begin;
-        g_timingElapsed += elapsed;
-        if (elapsed > g_timingMax) g_timingMax = elapsed;
-        for (int i = 0; i < 8; ++i) g_timingWindow.scheduler[i] += previous.scheduler[i];
-        g_timingWindow.present += previous.present;
-        g_timingWindow.presentCalls += previous.presentCalls;
-        g_timingWindow.providerMedianNs += previous.providerMedianNs;
-        g_timingWindow.scheduledStepNs += previous.scheduledStepNs;
-        g_timingWindow.recovery |= previous.recovery;
-        ++g_timingBursts;
-        if (NsFromQpc(now - g_timingStart) >= 5000000000LL)
-        {
-            const auto sched = SchedulerTotal(g_timingWindow);
-            const double divisor = g_timingBursts;
-            LOG_INFO("XeFG burst timing: {}X {} bursts; avg/max {:.2f}/{:.2f} ms; "
-                     "scheduler {:.2f} ms [1 {:.2f}, 2 {:.2f}, 3 {:.2f}, 4 {:.2f}, 5 {:.2f}, 6 {:.2f}, 7 {:.2f}]; "
-                     "generated-present {:.2f} ms ({:.2f} calls/burst); other {:.2f} ms; "
-                     "provider median {:.2f} ms, scheduled step {:.2f} ms; recovery included={}; CPU wall times, not GPU timings",
-                     factor, g_timingBursts, MsFromQpc(g_timingElapsed) / divisor, MsFromQpc(g_timingMax),
-                     MsFromQpc(sched) / divisor,
-                     MsFromQpc(g_timingWindow.scheduler[1]) / divisor, MsFromQpc(g_timingWindow.scheduler[2]) / divisor,
-                     MsFromQpc(g_timingWindow.scheduler[3]) / divisor, MsFromQpc(g_timingWindow.scheduler[4]) / divisor,
-                     MsFromQpc(g_timingWindow.scheduler[5]) / divisor, MsFromQpc(g_timingWindow.scheduler[6]) / divisor,
-                     MsFromQpc(g_timingWindow.scheduler[7]) / divisor,
-                     MsFromQpc(g_timingWindow.present) / divisor, g_timingWindow.presentCalls / divisor,
-                     MsFromQpc(g_timingElapsed - sched - g_timingWindow.present) / divisor,
-                     g_timingWindow.providerMedianNs / divisor / 1e6, g_timingWindow.scheduledStepNs / divisor / 1e6,
-                     g_timingWindow.recovery);
-            g_timingWindow = {}; g_timingBursts = 0;
-        }
-    }
-    else
-    {
-        g_timingWindow = {}; g_timingBursts = 0;
-    }
-    g_burstTiming = {}; g_burstTiming.begin = now; g_burstTiming.factor = factor;
+    if (duration >= 0 && g_burstStarted) g_burstBlockQpc += duration;
 }
 
 // Burst bookkeeping, shared by both pacing paths: the gap between two burst
@@ -616,7 +540,7 @@ inline void NoteFrame(uint64_t index, uint64_t count, int64_t nowQpc)
     if (index > 1)
         return;
 
-    BeginDiagnosticBurst(static_cast<uint32_t>(count + 1), nowQpc);
+    g_burstStarted = nowQpc > 0;
 
     if (g_recoveryRequested.exchange(false, std::memory_order_acq_rel))
         BeginRecovery();
@@ -782,7 +706,6 @@ inline void ScheduleFrame(void* ctx, uint8_t* burst, uint64_t index)
     LARGE_INTEGER after;
     QueryPerformanceCounter(&after);
 
-    if (index < 8) g_burstTiming.scheduler[index] += after.QuadPart - before.QuadPart;
     g_schedCalls++;
 
     if (!scheduled)
@@ -942,7 +865,6 @@ inline bool SchedForwarder(void* ctx, void* burst, uint8_t gate, void* timing, u
     const bool result = g_schedNative(ctx, burst, gate, timing, index);
     QueryPerformanceCounter(&after);
     g_burstBlockQpc += after.QuadPart - before.QuadPart;
-    if (index < 8) g_burstTiming.scheduler[index] += after.QuadPart - before.QuadPart;
     return result;
 }
 
@@ -1010,9 +932,6 @@ inline void* TsDetour(void* a1, int64_t* out, void* lookup, void* timing, uint32
         // the paced median back here reintroduces our scheduling delay.
         // Keep subsequent frames evenly spaced; preserve all native waits.
         const auto scheduledUnit = nativeUnit;
-        g_burstTiming.providerMedianNs = median;
-        g_burstTiming.scheduledStepNs = scheduledUnit;
-        g_burstTiming.recovery = g_recoveryBursts > 0;
         g_nextDeadlineNs = *out + static_cast<int64_t>(index) * (scheduledUnit - nativeUnit);
         g_burstStepNs = scheduledUnit;
         if (g_recoveryBursts > 0 && --g_recoveryBursts == 0)

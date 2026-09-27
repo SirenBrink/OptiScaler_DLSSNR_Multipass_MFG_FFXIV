@@ -469,21 +469,12 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
     const bool hasRestoreParamReactive = getOriginalNgxResource(
         InParameters, NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, &restoreParamReactive);
 
-    if (FfxivLightingCapture::sampling.load(std::memory_order_relaxed) ||
-        FfxivLightingScan::armed.load(std::memory_order_relaxed))
+    if (FfxivLightingScan::armed.load(std::memory_order_relaxed))
     {
-        unsigned int flags=0, width=0, height=0;
-        float preExposure=1.0f, exposureScale=1.0f;
+        unsigned int flags=0;
         const bool haveFlags=InParameters->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,&flags)==NVSDK_NGX_Result_Success;
-        InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width,&width);
-        InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height,&height);
-        InParameters->Get(NVSDK_NGX_Parameter_DLSS_Pre_Exposure,&preExposure);
-        InParameters->Get(NVSDK_NGX_Parameter_DLSS_Exposure_Scale,&exposureScale);
-        if (InDeviceContext == FfxivLightingCapture::context)
-            FfxivLightingScan::Boundary(InDeviceContext, restoreParamColor,
-                !haveFlags || (flags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0);
-        FfxivLightingCapture::UpscaleInput(InDeviceContext,restoreParamColor,restoreParamOutput,
-                                         restoreParamExposure,flags,haveFlags,width,height,preExposure,exposureScale);
+        FfxivLightingScan::Boundary(InDeviceContext, restoreParamColor,
+            !haveFlags || (flags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0);
     }
 
     ID3D11ShaderResourceView* restoreSRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};

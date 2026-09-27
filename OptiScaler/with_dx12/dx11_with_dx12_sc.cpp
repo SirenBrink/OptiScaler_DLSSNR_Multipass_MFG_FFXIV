@@ -309,7 +309,6 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (!_InitInteropObjects())
         return DXGI_ERROR_DEVICE_REMOVED;
 
-    FfxivLightingCapture::Tick(_dx11Context);
     if (State::Instance().gameExe == "ffxiv_dx11.exe" && FfxivLightingCapture::installed.load())
         FfxivLightingScan::Tick(_dx11Context, Config::Instance()->DlssNrWhitePointSource.value_or_default() == 2);
 

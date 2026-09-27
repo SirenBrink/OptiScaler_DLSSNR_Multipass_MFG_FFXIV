@@ -109,21 +109,11 @@ int main(){
  g_ring=nullptr;
  g_enabled=false;
  // Native present is measured after scheduling, so add its duration once.
- g_burstTiming={};g_burstTiming.begin=100000;g_burstBlockQpc=2000;
+ g_burstStarted=true;g_burstBlockQpc=2000;
  NoteGeneratedPresentDuration(3000);assert(g_burstBlockQpc==5000);
- assert(g_burstTiming.present==3000&&g_burstTiming.presentCalls==1);
  NoteGeneratedPresentDuration(-1);assert(g_burstBlockQpc==5000);
  g_freq.QuadPart=1000000;g_lastBurstQpc=100000;g_workCount=g_workPos=0;
  NoteFrame(1,4,120000);assert(g_renderTimeNs.load()==15000000);
- // Diagnostic accounting uses completed bursts and isolates factor changes.
- g_freq.QuadPart=1000000;g_burstTiming={};g_timingWindow={};g_timingBursts=0;
- BeginDiagnosticBurst(4,100000);g_burstTiming.scheduler[1]=2000;g_burstTiming.scheduler[3]=3000;
- g_burstTiming.present=1000;g_burstTiming.presentCalls=3;
- BeginDiagnosticBurst(4,120000);
- assert(g_timingBursts==1&&g_timingElapsed==20000&&SchedulerTotal(g_timingWindow)==5000);
- assert(g_timingWindow.present==1000&&g_timingWindow.presentCalls==3);
- BeginDiagnosticBurst(5,140000);assert(g_timingBursts==0);
- BeginDiagnosticBurst(5,1140000);assert(g_timingBursts==0);
  QueryPerformanceFrequency(&g_freq);
  Config::Instance()->FGXeFGExtraPacing.v=true;
  memcpy(image+PresentThunkRva,PresentThunkExpected,16);memcpy(image+SchedThunkRva,SchedThunkExpected,16);memcpy(image+TimestampThunkRva,TimestampThunkExpected,16);

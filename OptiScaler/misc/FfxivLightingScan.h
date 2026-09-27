@@ -35,6 +35,7 @@ struct Scan
     int collecting = -1;
     uintptr_t adapted = 0, lut = 0, color = 0;
     bool haveGain = false, haveLut = false, haveTone = false, active = false, failed = false;
+    bool waitingReadback = false;
     std::array<bool, 4> slotLinear {};
     uint64_t samplerKey = UINT64_MAX;
     uint64_t generation = 0, next = 0, events = 0;
@@ -49,6 +50,37 @@ inline Scan& State()
     // the rendering thread when disabled; in-flight slots drain without waiting.
     static auto* state = new Scan;
     return *state;
+}
+// ReShade 6.8 exposes its original COM object through this interface. Use it
+// only to compare identity; rendering and query calls still go through their
+// original interfaces. Unsupported runtimes retain ordinary COM identity.
+// https://github.com/crosire/reshade/blob/v6.8.0/source/com_utils.hpp
+inline constexpr GUID UnwrappedObject {0x7f2c9a11,0x3b4e,0x4d6a,{0x81,0x2f,0x5e,0x9c,0xd3,0x7a,0x1b,0x42}};
+inline ComPtr<IUnknown> NativeIdentity(IUnknown* object)
+{
+    if (!object) return {};
+    ComPtr<IUnknown> current=object;
+    std::array<ComPtr<IUnknown>,8> seen;
+    for (size_t i=0; i<seen.size(); ++i)
+    {
+        auto& identity=seen[i];
+        if (FAILED(current.As(&identity))) return {};
+        for (size_t j=0; j<i; ++j)
+            if (seen[j] == identity) return {}; // Broken/cyclic proxy chain.
+        ComPtr<IUnknown> original;
+        const auto hr=current->QueryInterface(UnwrappedObject, reinterpret_cast<void**>(original.GetAddressOf()));
+        if (hr == E_NOINTERFACE) return identity;
+        if (FAILED(hr) || !original) return {};
+        current=std::move(original);
+    }
+    return {}; // Never accept an unbounded proxy chain.
+}
+inline bool SameContext(ID3D11DeviceContext* a, ID3D11DeviceContext* b)
+{
+    if (!a || !b) return false;
+    if (a == b) return true;
+    const auto first=NativeIdentity(a), second=NativeIdentity(b);
+    return first && second && first == second;
 }
 inline Reading Latest()
 {
@@ -155,12 +187,12 @@ inline void Before(ID3D11DeviceContext* c, UINT id)
 {
     auto& s = State();
     if (s.collecting < 0 || id != 1 || !s.haveLut || s.haveTone) return;
-    if (Predicated(c)) { Drop(); return; }
+    if (Predicated(c)) { Drop("Tone mapping is predicated; sample cannot be verified."); return; }
     auto lut = Srv(c, 1, DXGI_FORMAT_R16G16B16A16_FLOAT);
     auto color = Target(c, DXGI_FORMAT_R16G16B16A16_FLOAT);
     if (!lut || !color || reinterpret_cast<uintptr_t>(lut.Get()) != s.lut) { Drop("ToneMapping resource link or format changed."); return; }
     ComPtr<ID3D11SamplerState> sampler; c->PSGetSamplers(1, 1, &sampler);
-    if (!sampler) { Drop(); return; }
+    if (!sampler) { Drop("Tone mapping LUT sampler is missing."); return; }
     D3D11_SAMPLER_DESC sd {}; sampler->GetDesc(&sd);
     const uint64_t samplerKey = uint64_t(sd.Filter) | (uint64_t(sd.AddressU) << 32) | (uint64_t(sd.AddressV) << 40);
     if (s.samplerKey != samplerKey)
@@ -183,7 +215,7 @@ inline void After(ID3D11DeviceContext* c, UINT id)
     auto& s = State(); if (s.collecting < 0) return;
     if (id == 6 && !s.haveGain)
     {
-        if (Predicated(c)) { Drop(); return; }
+        if (Predicated(c)) { Drop("Adaptation is predicated; sample cannot be verified."); return; }
         auto r = Target(c, DXGI_FORMAT_R32_FLOAT);
         if (!Texture(r.Get(), 1, DXGI_FORMAT_R32_FLOAT)) { Drop("Unsupported adaptation output."); return; }
         c->CopyResource(s.slots[s.collecting].gain.Get(), r.Get());
@@ -191,7 +223,7 @@ inline void After(ID3D11DeviceContext* c, UINT id)
     }
     else if (id == 9 && s.haveGain && !s.haveLut)
     {
-        if (Predicated(c)) { Drop(); return; }
+        if (Predicated(c)) { Drop("LUT generation is predicated; sample cannot be verified."); return; }
         auto a = Srv(c, 0, DXGI_FORMAT_R32_FLOAT);
         auto r = Target(c, DXGI_FORMAT_R16G16B16A16_FLOAT);
         if (reinterpret_cast<uintptr_t>(a.Get()) != s.adapted || !Texture(r.Get(), 1024, DXGI_FORMAT_R16G16B16A16_FLOAT))
@@ -202,10 +234,29 @@ inline void After(ID3D11DeviceContext* c, UINT id)
 inline void Boundary(ID3D11DeviceContext* c, ID3D11Resource* color, bool hdr)
 {
     auto& s = State(); if (s.collecting < 0) return;
+    // NGX can receive a different (including deferred) context on the same
+    // device. The copies were recorded on the native immediate context, so
+    // their completion query must be ended there too, never on the NGX context.
+    if (!s.context || !c || !color || s.context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE)
+    { Drop("Native lighting capture context or DLSS colour is unavailable."); return; }
+    ComPtr<ID3D11Device> captureDevice, evaluateDevice, colorDevice;
+    s.context->GetDevice(&captureDevice); c->GetDevice(&evaluateDevice); color->GetDevice(&colorDevice);
+    const auto captureIdentity=NativeIdentity(captureDevice.Get()), evaluateIdentity=NativeIdentity(evaluateDevice.Get()),
+               colorIdentity=NativeIdentity(colorDevice.Get());
+    if (!captureIdentity || !evaluateIdentity || !colorIdentity ||
+        captureIdentity != evaluateIdentity || captureIdentity != colorIdentity)
+    { Drop("Native lighting and DLSS input belong to different devices."); return; }
     if (hdr || !s.haveTone || reinterpret_cast<uintptr_t>(color) != s.color)
     { Drop(hdr ? "HDR or unknown DLSS colour flags; native lighting rejection disabled." : "Tone-mapped output did not match DLSS input."); return; }
+    static bool loggedContext = false;
+    if (!loggedContext)
+    {
+        LOG_INFO("FFXIV native lighting: verified DLSS input on context type {}, same context {}; readback query stays on capture context",
+                 unsigned(c->GetType()), SameContext(c, s.context));
+        loggedContext = true;
+    }
     auto& slot = s.slots[s.collecting];
-    slot.generation = s.generation; slot.pending = true; c->End(slot.ready.Get());
+    slot.generation = s.generation; slot.pending = true; s.context->End(slot.ready.Get());
     s.collecting = -1; armed.store(false);
 }
 inline float Half(uint16_t bits)
@@ -249,16 +300,20 @@ inline bool Read(ID3D11DeviceContext* c, ID3D11Resource* r, void* dest, size_t b
     if (FAILED(c->Map(r, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m))) return false;
     std::memcpy(dest, m.pData, bytes); c->Unmap(r, 0); return true;
 }
-inline void Tick(ID3D11DeviceContext* c, bool wanted)
+template<class Poll> inline void TickWithPoll(ID3D11DeviceContext* c, bool wanted, Poll&& poll)
 {
     auto& s = State(); const auto now = GetTickCount64(); armed.store(false);
-    if (s.context && s.context != c)
+    if (s.context && !SameContext(s.context, c))
     {
         s.failed = true; enabled.store(false); std::lock_guard lock(s.mutex);
         s.reading.failed = true; s.reading.valid = false; return;
     }
     s.context = c;
-    if (s.collecting >= 0) Drop(); // Incomplete shader chain; never publish a guessed association.
+    if (s.collecting >= 0)
+        Drop(s.haveTone ? "Verified tone mapping was not linked to a DLSS evaluation." :
+             s.haveLut ? "Tone mapping shader was not observed after the LUT." :
+             s.haveGain ? "LUT generation was not observed after adaptation." :
+                          "Adaptation shader was not observed in the sampled frame.");
     if (s.active != wanted)
     {
         s.active = wanted; s.next = 0; ++s.generation; s.gate = {};
@@ -274,10 +329,19 @@ inline void Tick(ID3D11DeviceContext* c, bool wanted)
             if (s.slots[i].pending && (index < 0 || s.slots[i].time < s.slots[index].time)) index = i;
         if (index < 0) break;
         auto& slot = s.slots[index]; BOOL done = FALSE;
-        auto hr = c->GetData(slot.ready.Get(), &done, sizeof(done), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        auto hr = poll(c, slot.ready.Get(), &done);
         if (hr == S_FALSE || (hr == S_OK && !done))
         {
-            if (now - slot.time > 2000) s.failed = true; // Keep in-flight resources, stop new work.
+            if (now - slot.time > 2000 && !s.waitingReadback)
+            {
+                // A loading pause is not a device failure. Keep every pending
+                // resource alive and poll without flushing until it completes.
+                s.waitingReadback = true; ++s.generation; s.gate = {};
+                std::lock_guard lock(s.mutex);
+                s.reading.valid = false; s.reading.eventTime = 0;
+                s.reading.reason = "Waiting for GPU readback; detection will resume automatically.";
+                LOG_WARN("FFXIV native lighting: readback delayed; preserving pending slots and waiting for completion");
+            }
             break;
         }
         slot.pending = false;
@@ -312,9 +376,19 @@ inline void Tick(ID3D11DeviceContext* c, bool wanted)
     if (s.failed)
     {
         enabled.store(false); std::lock_guard lock(s.mutex);
-        if (!s.reading.failed) LOG_ERROR("FFXIV native lighting: readback failed or timed out; scan stopped for this session");
+        if (!s.reading.failed) LOG_ERROR("FFXIV native lighting: GPU query failed; scan stopped for this session");
         s.reading.failed = true; s.reading.valid = false;
         return;
+    }
+    if (s.waitingReadback)
+    {
+        // Do not allocate more work or recycle any timed-out slot. A completed
+        // old generation is discarded above, then sampling starts fresh.
+        for (const auto& slot : s.slots) if (slot.pending) return;
+        s.waitingReadback = false; s.next = 0;
+        { std::lock_guard lock(s.mutex);
+          s.reading.reason = "GPU readback recovered; waiting for a fresh linked shader chain."; }
+        LOG_INFO("FFXIV native lighting: pending readbacks completed; native detection resumed");
     }
     if (!wanted)
     {
@@ -336,6 +410,12 @@ inline void Tick(ID3D11DeviceContext* c, bool wanted)
         s.haveGain = s.haveLut = s.haveTone = false;
         s.adapted = s.lut = s.color = 0; armed.store(true); return;
     }
+}
+inline void Tick(ID3D11DeviceContext* c, bool wanted)
+{
+    TickWithPoll(c, wanted, [](ID3D11DeviceContext* context, ID3D11Query* query, BOOL* done) {
+        return context->GetData(query, done, sizeof(*done), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+    });
 }
 inline void Stop() { enabled.store(false); armed.store(false); }
 }

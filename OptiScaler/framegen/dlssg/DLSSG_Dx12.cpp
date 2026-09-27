@@ -335,13 +335,6 @@ bool DLSSG_Dx12::Dispatch()
 
     UINT64 willDispatchFrame = 0;
     auto fIndex = GetDispatchIndex(willDispatchFrame);
-    static thread_local UINT64 diagnosticCalls = 0;
-    if (++diagnosticCalls % 240 == 1)
-        LOG_INFO("DLSSG dispatch diagnostic: enabled={} active={} paused={} frame={} dispatchFrame={} index={} depthReady={} velocityReady={}",
-                 Config::Instance()->FGEnabled.value_or_default(), IsActive(), IsPaused(), _frameCount,
-                 willDispatchFrame, fIndex,
-                 fIndex >= 0 && IsResourceReady(FG_ResourceType::Depth, fIndex),
-                 fIndex >= 0 && IsResourceReady(FG_ResourceType::Velocity, fIndex));
     if (fIndex < 0)
         return false;
 
@@ -405,24 +398,6 @@ bool DLSSG_Dx12::Dispatch()
     else
         _observedMultiplier.store(0, std::memory_order_relaxed);
     _sampleMode = queryResult == sl::Result::eOk ? mode : -1;
-
-    static thread_local ULONGLONG lastDiagnosticTime = 0;
-    static thread_local int lastDiagnosticMode = -1;
-    static thread_local float lastDiagnosticTarget = -1.0f;
-    const auto diagnosticTime = GetTickCount64();
-    const auto diagnosticMode = static_cast<int>(options.mode);
-    if (diagnosticMode != lastDiagnosticMode || options.dynamicTargetFrameRate != lastDiagnosticTarget ||
-        diagnosticTime - lastDiagnosticTime >= 2000)
-    {
-        LOG_INFO("DLSSG runtime diagnostic: mode={} target={} requestedGenerated={} setResult={} queryResult={} status={} presentedSinceQuery={} sampleMs={} frame={}",
-                 diagnosticMode, options.dynamicTargetFrameRate, options.numFramesToGenerate,
-                 magic_enum::enum_name(dlssgSetOptionsResult), magic_enum::enum_name(queryResult),
-                 static_cast<unsigned int>(runtimeState.status), runtimeState.numFramesActuallyPresented,
-                 lastDiagnosticTime == 0 ? 0 : diagnosticTime - lastDiagnosticTime, _frameCount);
-        lastDiagnosticTime = diagnosticTime;
-        lastDiagnosticMode = diagnosticMode;
-        lastDiagnosticTarget = options.dynamicTargetFrameRate;
-    }
 
     if (dlssgSetOptionsResult != sl::Result::eOk)
     {
