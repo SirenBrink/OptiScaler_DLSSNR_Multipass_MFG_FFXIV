@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <shaders/hdr/Hdr10.h>
 
 #include <dlssnr/DlssNr_ExposureScan.h>
 #include <dlssnr/DlssNr.h>
@@ -120,7 +121,7 @@ static HRESULT STDMETHODCALLTYPE hkLateReset(ID3D12GraphicsCommandList* cmd, ID3
                                              ID3D12PipelineState* pipeline)
 {
     const auto result = o_LateReset(cmd, allocator, pipeline);
-    if (SUCCEEDED(result)) DlssNr::NotifyGpuReset(cmd);
+    if (SUCCEEDED(result)) { DlssNr::NotifyGpuReset(cmd); Hdr10::Reset(cmd); }
     return result;
 }
 
@@ -657,6 +658,7 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
         o_ExecuteCommandLists(This, count, lists);
         DlssNr::AmdBridge::Submitted(This, count, lists);
         DlssNr::NotifyGpuSubmitted(This, count, lists);
+        Hdr10::Submitted(This, count, lists);
     };
     const auto executeWithAmdIsolation = [&]
     {

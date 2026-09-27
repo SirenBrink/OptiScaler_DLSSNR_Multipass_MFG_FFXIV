@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <shaders/hdr/Hdr10.h>
 #include "DxgiFactory_Hooks.h"
 #include "DxgiSwapchainSizing.h"
 
@@ -438,6 +439,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
                     }
 
                     DXGI_SWAP_CHAIN_DESC fgDesc = localDesc;
+                    if (Hdr10::Request(localDesc.OutputWindow)) fgDesc.BufferDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
                     HRESULT fgScResult = E_FAIL;
                     IDXGISwapChain* fgSwapChain = nullptr;
                     IDXGISwapChain4* fgSwapChain4 = nullptr;
@@ -838,6 +840,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                     }
 
                     DXGI_SWAP_CHAIN_DESC1 fgDesc = localDesc;
+                    if (Hdr10::Request(hWnd)) fgDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
                     HRESULT fgScResult = E_FAIL;
                     IDXGISwapChain1* fgSwapChain1 = nullptr;
                     IDXGISwapChain4* fgSwapChain4 = nullptr;

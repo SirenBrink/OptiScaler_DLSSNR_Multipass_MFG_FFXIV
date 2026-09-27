@@ -899,6 +899,13 @@ bool Config::Reload(std::filesystem::path iniPath)
 
         // HDR
         {
+            FfxivHDR.set_from_config(readBool("HDR", "FfxivHDR"));
+            FfxivHDRPeak.set_from_config(readFloat("HDR", "PeakNits"));
+            FfxivHDRPaper.set_from_config(readFloat("HDR", "PaperWhiteNits"));
+            FfxivHDRExpansion.set_from_config(readFloat("HDR", "HighlightExpansion"));
+            FfxivHDRContrast.set_from_config(readFloat("HDR", "Contrast"));
+            FfxivHDRSaturation.set_from_config(readFloat("HDR", "Saturation"));
+            FfxivHDRVibrance.set_from_config(readFloat("HDR", "Vibrance"));
             ForceHDR.set_from_config(readBool("HDR", "ForceHDR"));
             UseHDR10.set_from_config(readBool("HDR", "UseHDR10"));
             SkipColorSpace.set_from_config(readBool("HDR", "SkipColorSpace"));
@@ -1340,6 +1347,13 @@ bool Config::SaveIni()
                  GetBoolValue(Instance()->DlssNrCompareTags.value_for_config()).c_str());
     ini.SetValue("DlssNr", "TagScale",
                  GetFloatValue(Instance()->DlssNrTagScale.value_for_config()).c_str());
+    ini.SetValue("HDR", "FfxivHDR", GetBoolValue(Instance()->FfxivHDR.value_for_config()).c_str());
+    ini.SetValue("HDR", "PeakNits", GetFloatValue(Instance()->FfxivHDRPeak.value_for_config()).c_str());
+    ini.SetValue("HDR", "PaperWhiteNits", GetFloatValue(Instance()->FfxivHDRPaper.value_for_config()).c_str());
+    ini.SetValue("HDR", "HighlightExpansion", GetFloatValue(Instance()->FfxivHDRExpansion.value_for_config()).c_str());
+    ini.SetValue("HDR", "Contrast", GetFloatValue(Instance()->FfxivHDRContrast.value_for_config()).c_str());
+    ini.SetValue("HDR", "Saturation", GetFloatValue(Instance()->FfxivHDRSaturation.value_for_config()).c_str());
+    ini.SetValue("HDR", "Vibrance", GetFloatValue(Instance()->FfxivHDRVibrance.value_for_config()).c_str());
     ini.SetValue("DlssNr", "VitEvery", GetIntValue(Instance()->DlssNrVitEvery.value_for_config()).c_str());
     ini.SetValue("DlssNr", "SpatialCompression", GetBoolValue(Instance()->DlssNrSpatialCompression.value_for_config()).c_str());
     ini.SetValue("DlssNr", "SpatialCenterX", GetFloatValue(Instance()->DlssNrSpatialCenterX.value_for_config()).c_str());

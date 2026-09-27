@@ -1050,6 +1050,13 @@ class Config
     CustomOptional<float> FramerateLimit { 0.0f };
 
     // HDR
+    CustomOptional<bool> FfxivHDR { false };
+    CustomOptional<float> FfxivHDRPeak { 1100.0f };
+    CustomOptional<float> FfxivHDRPaper { 203.0f };
+    CustomOptional<float> FfxivHDRExpansion { 0.5f };
+    CustomOptional<float> FfxivHDRContrast { 1.0f };
+    CustomOptional<float> FfxivHDRSaturation { 1.0f };
+    CustomOptional<float> FfxivHDRVibrance { 0.0f };
     CustomOptional<bool> ForceHDR { false };
     CustomOptional<bool> UseHDR10 { false };
     CustomOptional<bool> SkipColorSpace { false };

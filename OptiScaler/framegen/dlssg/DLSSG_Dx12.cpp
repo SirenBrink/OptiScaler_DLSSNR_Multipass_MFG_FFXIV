@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <shaders/hdr/Hdr10.h>
 
 #include "DLSSG_Dx12.h"
 
@@ -978,6 +979,10 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
     if (fIndex < 0)
         fIndex = GetIndex();
 
+    // This first HDR path uses final/HUD-less differencing, not a separate SDR UI tag.
+    if (Hdr10::Active() && inputResource->type == FG_ResourceType::UIColor)
+    { _noUi[fIndex] = true; return false; }
+
     Dx12Resource matched;
     if (_guideAge[fIndex] >= 0 && (inputResource->type == FG_ResourceType::Depth ||
                                   inputResource->type == FG_ResourceType::Velocity))
@@ -985,6 +990,17 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
         matched = *inputResource;
         if (!MatchPresentationGuide(matched, fIndex)) return false;
         inputResource = &matched;
+    }
+    // Convert while the capture command list is still recording, not when the
+    // deferred tag is revisited at Present (that recording may already be closed).
+    Dx12Resource hdrCapture;
+    if (Hdr10::Active() && inputResource->type == FG_ResourceType::HudlessColor &&
+        inputResource->validity != FG_ResourceValidity::UntilPresentFromDispatch)
+    {
+        if (!inputResource->cmdList) return false;
+        hdrCapture = *inputResource;
+        hdrCapture.validity = FG_ResourceValidity::ValidNow;
+        inputResource = &hdrCapture;
     }
     auto& type = inputResource->type;
 
@@ -1162,6 +1178,16 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
         resourceTag.lifecycle = fResource->validity == FG_ResourceValidity::UntilPresent
                                     ? ::sl::ResourceLifecycle::eValidUntilPresent
                                     : sl::ResourceLifecycle::eOnlyValidNow;
+
+        if (Hdr10::Active() && type == FG_ResourceType::HudlessColor)
+        {
+            auto* converted = Hdr10::Convert(_device, fResource->cmdList, fResource->GetResource(), fResource->state);
+            if (!converted) { LOG_ERROR("HDR10 hudless conversion failed; refusing mismatched FG input"); Deactivate(); return false; }
+            resource.native = converted;
+            resource.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            // Streamline copies this tag on the same recording before our packet can be reused.
+            resourceTag.lifecycle = sl::ResourceLifecycle::eOnlyValidNow;
+        }
 
         resourceTag.extent.left = fResource->left;
         resourceTag.extent.top = fResource->top;

@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <shaders/hdr/Hdr10.h>
 #include <misc/FfxivDynamicMarkers.h>
 #include "Upscaler_Inputs_Dx11wDx12.h"
 
@@ -158,7 +159,7 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
     fgConstants.displayWidth = feature->DisplayWidth();
     fgConstants.displayHeight = feature->DisplayHeight();
 
-    if (feature->IsHdr())
+    if (feature->IsHdr() || Hdr10::Active())
         fgConstants.flags |= FG_Flags::Hdr;
 
     if (feature->DepthInverted())

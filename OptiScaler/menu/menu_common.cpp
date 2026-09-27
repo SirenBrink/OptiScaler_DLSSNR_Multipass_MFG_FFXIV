@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <shaders/hdr/Hdr10.h>
 #include <framegen/dlssg/AmpereMfgLoader.h>
 #include <misc/FfxivNativeQuality.h>
 #include "menu_common.h"
@@ -3068,6 +3069,29 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
     auto config = ctx.config;
+    if (state.gameExe == "ffxiv_dx11.exe" && ImGui::TreeNode("FFXIV HDR10 output (experimental)"))
+    {
+        bool hdr = config->FfxivHDR.value_or_default();
+        if (ImGui::Checkbox("Enable OptiScaler HDR (restart)", &hdr)) config->FfxivHDR = hdr;
+        ImGui::TextWrapped("%s", Hdr10::Status().c_str());
+        ImGui::TextWrapped("Requires Windows HDR. Disable RTX HDR and Auto HDR for this test. DLSS-G or FG off only. Game HUD shares the highlight curve.");
+        float peak=config->FfxivHDRPeak.value_or_default(), paper=config->FfxivHDRPaper.value_or_default(), expansion=config->FfxivHDRExpansion.value_or_default();
+        if(ImGui::SliderFloat("Peak brightness (nits)",&peak,400,4000,"%.0f"))config->FfxivHDRPeak=peak;
+        if(ImGui::SliderFloat("Paper white (nits)",&paper,80,400,"%.0f"))config->FfxivHDRPaper=paper;
+        if(ImGui::SliderFloat("Highlight expansion",&expansion,0,1,"%.2f"))config->FfxivHDRExpansion=expansion;
+        float contrast=config->FfxivHDRContrast.value_or_default();
+        if(ImGui::SliderFloat("Contrast",&contrast,0.5f,1.5f,"%.2fx"))config->FfxivHDRContrast=contrast;
+        ShowHelpMarker("Applies immediately. 1.00 preserves the original contrast.\nHigher values deepen shadows and lift highlights around middle grey.\nBlack, white and the HDR peak limit are preserved. Applies to the game HUD too.");
+        float saturation=config->FfxivHDRSaturation.value_or_default(), vibrance=config->FfxivHDRVibrance.value_or_default();
+        if(ImGui::SliderFloat("Saturation##OptiHDR",&saturation,0.0f,2.0f,"%.2fx"))config->FfxivHDRSaturation=saturation;
+        ShowHelpMarker("Applies immediately. 1.00 is unchanged; 0 removes colour.\nAdjusts colour strength while preserving luminance and respecting the HDR output range.");
+        if(ImGui::SliderFloat("Vibrance##OptiHDR",&vibrance,-1.0f,1.0f,"%.2f"))config->FfxivHDRVibrance=vibrance;
+        ShowHelpMarker("Applies immediately. 0 is unchanged. Positive values favour muted colours; negative values soften them.\nBoth colour controls also affect the game HUD.");
+        if(config->LoadReShade.value_or_default())
+            ImGui::TextWrapped("ReShade compatibility: SDR presets run before OptiHDR. Their colour adjustments combine with these controls; detail clipped by a preset cannot be restored.");
+        ImGui::TextWrapped("0 preserves SDR brightness at paper white; 1 expands white highlights to the peak. Black stays black. This cannot recover detail already clipped by the game.");
+        ImGui::TreePop();
+    }
     bool external = config->ExternalFrameGeneration.value_or_default();
     if (ImGui::Checkbox("External frame generation / MFG unlocker", &external))
         config->ExternalFrameGeneration = external;
@@ -3235,11 +3259,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
     // FSR FG output requirements
     auto constexpr fsrfgOutputIndex = (uint32_t) FGOutput::FSRFG;
-    outputOptions[fsrfgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
+    outputOptions[fsrfgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan || Hdr10::Active(), "Unavailable with this HDR10 test; use DLSS-G");
 
     // XeFG output requirements
     auto constexpr xefgOutputIndex = (uint32_t) FGOutput::XeFG;
-    outputOptions[xefgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
+    outputOptions[xefgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan || Hdr10::Active(), "Unavailable with this HDR10 test; use DLSS-G");
     // Unsupported FG input selected
     const auto currentInputIndex = (uint32_t) state.activeFgInput;
     if (config->FGInput != FGInput::NoFG && inputOptions.size() > currentInputIndex &&
