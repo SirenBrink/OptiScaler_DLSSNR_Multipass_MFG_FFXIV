@@ -31,7 +31,7 @@ class AntiLagVk : public LowLatencyTech
 
     void get_sleep_status(SleepParams* sleep_params) override;
     void set_sleep_mode(SleepMode* sleep_mode) override;
-    void sleep(std::optional<uint32_t> frame_id) override;
+    void sleep(std::optional<uint64_t> frame_id) override;
     void set_marker(IUnknown* pDevice, const MarkerParams& marker_params) override;
     void set_async_marker(IUnknown* pCommandQueue, const MarkerParams& marker_params) override {
     }; // Not used by AntiLag VK

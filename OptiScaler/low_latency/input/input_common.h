@@ -70,7 +70,7 @@ class InputCommon
     static InputResult set_low_latency_tech(IUnknown* pDevice, LowLatencyMode mode);
 
     static InputResult sleep(const InputContext& inputContext, IUnknown* pDevice,
-                             std::optional<uint32_t> frame_id = std::nullopt);
+                             std::optional<uint64_t> frame_id = std::nullopt);
     static InputResult set_marker(const InputContext& inputContext, IUnknown* pDevice,
                                   const MarkerParams& marker_params);
     static InputResult set_async_marker(const InputContext& inputContext, ID3D12CommandQueue* pCommandQueue,

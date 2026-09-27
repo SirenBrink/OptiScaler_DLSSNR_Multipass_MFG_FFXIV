@@ -308,7 +308,7 @@ InputResult InputCommon::set_low_latency_tech(IUnknown* pDevice, LowLatencyMode 
     return InputResult::Ok;
 }
 
-InputResult InputCommon::sleep(const InputContext& inputContext, IUnknown* pDevice, std::optional<uint32_t> frame_id)
+InputResult InputCommon::sleep(const InputContext& inputContext, IUnknown* pDevice, std::optional<uint64_t> frame_id)
 {
     // Ignore context that Opti creates
     if (!inputContext.localContext)

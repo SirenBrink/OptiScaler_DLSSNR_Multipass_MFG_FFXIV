@@ -144,7 +144,7 @@ void LatencyFlex::set_sleep_mode(SleepMode* sleep_mode)
     minimum_interval_us = sleep_mode->minimum_interval_us;
 };
 
-void LatencyFlex::sleep(std::optional<uint32_t> frame_id)
+void LatencyFlex::sleep(std::optional<uint64_t> frame_id)
 {
     if ((LFXMode) Config::Instance()->FN_LatencyFlexMode.value_or_default() != LFXMode::ReflexIDs)
     {

@@ -152,7 +152,7 @@ void AntiLag2::set_sleep_mode(SleepMode* sleep_mode)
         sleep_mode->minimum_interval_us; // don't convert to fps due to fg fps limit fallback using intervals
 }
 
-void AntiLag2::sleep(std::optional<uint32_t> frame_id)
+void AntiLag2::sleep(std::optional<uint64_t> frame_id)
 {
     last_sleep_framecount = simulation_framecount;
 

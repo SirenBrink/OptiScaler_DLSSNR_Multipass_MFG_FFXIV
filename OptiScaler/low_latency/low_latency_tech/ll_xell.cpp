@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "ll_xell.h"
 
 #include <magic_enum.hpp>
@@ -224,7 +224,7 @@ void XeLL::set_async_marker(IUnknown* pCommandQueue, const MarkerParams& marker_
     }
 }
 
-void XeLL::sleep(std::optional<uint32_t> frame_id)
+void XeLL::sleep(std::optional<uint64_t> frame_id)
 {
     if (frame_id.has_value())
     {
