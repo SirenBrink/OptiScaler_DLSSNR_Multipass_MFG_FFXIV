@@ -563,8 +563,8 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::TreePop();
         }
 
-        const bool nativeLighting = State::Instance().gameExe == "ffxiv_dx11.exe" &&
-            State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+        // Native DX11 lighting is independent of the FG presentation bridge.
+        const bool nativeLighting = State::Instance().gameExe == "ffxiv_dx11.exe";
         if (nativeLighting)
             ImGui::TextWrapped("FFXIV applies exposure before NR. Native scanned lighting can detect abrupt lighting changes for history rejection.");
         else
@@ -589,7 +589,7 @@ void RenderMenu(Config* config, float menuResScale)
                 const auto light = FfxivLightingScan::Latest();
                 const auto now = GetTickCount64();
                 if (light.failed)
-                    ImGui::TextWrapped("Native lighting scan stopped after a readback error or timeout. Lighting rejection is inactive until restart.");
+                    ImGui::TextWrapped("Native lighting scan stopped after a capture or readback error. Lighting rejection is inactive until restart.");
                 else if (!FfxivLightingCapture::installed.load())
                     ImGui::TextWrapped("Native lighting hooks unavailable. Lighting rejection is inactive.");
                 else if (FfxivLightingScan::Fresh(light, now))

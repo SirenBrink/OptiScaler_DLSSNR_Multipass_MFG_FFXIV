@@ -620,7 +620,6 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
     // Clear both the private reconstruction and any held/alternate-frame NR edit
     // on the same lighting event. Main-game DLSS and FG parameters are untouched.
     if (State::Instance().gameExe == "ffxiv_dx11.exe" &&
-        State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 &&
         cfg.DlssNrWhitePointSource.value_or_default() == 2 && cfg.DlssNrLightingHistory.value_or_default() &&
         !cfg.DlssNrHoldFrame.value_or_default() &&
         !(UInt(source, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags) & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) &&

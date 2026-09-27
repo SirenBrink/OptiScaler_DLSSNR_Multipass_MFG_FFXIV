@@ -33,7 +33,8 @@ struct Scan
 {
     std::array<Slot, 4> slots;
     int collecting = -1;
-    uintptr_t adapted = 0, lut = 0, color = 0;
+    uintptr_t adapted = 0, lut = 0;
+    std::array<ComPtr<ID3D11Resource>,8> colorAliases;
     bool haveGain = false, haveLut = false, haveTone = false, active = false, failed = false;
     bool waitingReadback = false;
     std::array<bool, 4> slotLinear {};
@@ -82,6 +83,35 @@ inline bool SameContext(ID3D11DeviceContext* a, ID3D11DeviceContext* b)
     const auto first=NativeIdentity(a), second=NativeIdentity(b);
     return first && second && first == second;
 }
+inline bool SameResource(ID3D11Resource* a, ID3D11Resource* b)
+{
+    if(!a || !b)return false;
+    if(a==b)return true;
+    const auto x=NativeIdentity(a),y=NativeIdentity(b);return x && y && x==y;
+}
+inline bool KnownColor(ID3D11Resource* resource)
+{
+    auto& s=State();
+    if(!resource || !s.haveTone)return false;
+    for(const auto& alias:s.colorAliases)if(SameResource(resource,alias.Get()))return true;
+    return false;
+}
+inline void ForgetColor(ID3D11Resource* resource)
+{
+    auto& s=State();
+    for(auto& alias:s.colorAliases)if(SameResource(resource,alias.Get()))alias.Reset();
+}
+inline void ColorCopy(ID3D11Resource* dest,ID3D11Resource* source,bool fullCopy)
+{
+    auto& s=State();if(!armed.load() || !s.haveTone || !dest || !source || SameResource(dest,source))return;
+    const bool known=KnownColor(source);ForgetColor(dest);
+    if(!fullCopy || !known)return;
+    ComPtr<ID3D11Texture2D> a,b;if(FAILED(source->QueryInterface(IID_PPV_ARGS(&a))) || FAILED(dest->QueryInterface(IID_PPV_ARGS(&b))))return;
+    D3D11_TEXTURE2D_DESC x{},y{};a->GetDesc(&x);b->GetDesc(&y);
+    if(x.Width!=y.Width || x.Height!=y.Height || x.Format!=y.Format || x.MipLevels!=1 || y.MipLevels!=1 ||
+       x.ArraySize!=1 || y.ArraySize!=1 || x.SampleDesc.Count!=1 || y.SampleDesc.Count!=1)return;
+    for(auto& alias:s.colorAliases)if(!alias){alias=dest;return;}
+}
 inline Reading Latest()
 {
     auto& s = State(); std::lock_guard lock(s.mutex); return s.reading;
@@ -98,7 +128,7 @@ inline bool ConsumeReset(uint64_t& cursor)
 }
 inline void Drop(const char* reason = "No complete linked shader chain in the sampled frame.")
 {
-    auto& s = State(); armed.store(false); s.collecting = -1;
+    auto& s = State(); armed.store(false); s.collecting = -1; s.colorAliases = {};
     std::lock_guard lock(s.mutex); ++s.reading.dropped; s.reading.reason = reason;
     if (s.reading.dropped <= 3 || s.reading.dropped % 100 == 0)
         LOG_INFO("FFXIV native lighting: skipped sample {}: {}", s.reading.dropped, reason);
@@ -186,7 +216,11 @@ inline bool MagnificationFilter(D3D11_FILTER filter, bool& linear)
 inline void Before(ID3D11DeviceContext* c, UINT id)
 {
     auto& s = State();
-    if (s.collecting < 0 || id != 1 || !s.haveLut || s.haveTone) return;
+    // This measures the tone-mapping stage, not every later colour operation.
+    // A subsequent draw with this target bound does not prove a replacement;
+    // it may blend over the scene, be depth-rejected, or write no pixels at all.
+    if (s.collecting < 0 || id != 1) return;
+    if(!s.haveLut)return;
     if (Predicated(c)) { Drop("Tone mapping is predicated; sample cannot be verified."); return; }
     auto lut = Srv(c, 1, DXGI_FORMAT_R16G16B16A16_FLOAT);
     auto color = Target(c, DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -208,7 +242,8 @@ inline void Before(ID3D11DeviceContext* c, UINT id)
     if (!Constants(c, 0, 16, slot.constants.Get(), 0) || !Constants(c, 1, 32, slot.constants.Get(), 16)) { Drop("Missing tone-map constants."); return; }
     c->CopyResource(slot.lut.Get(), lut.Get());
     s.slotLinear[s.collecting] = linear;
-    s.color = reinterpret_cast<uintptr_t>(color.Get()); s.haveTone = true;
+    s.haveTone = true;
+    s.colorAliases={};s.colorAliases[0]=color;
 }
 inline void After(ID3D11DeviceContext* c, UINT id)
 {
@@ -246,8 +281,25 @@ inline void Boundary(ID3D11DeviceContext* c, ID3D11Resource* color, bool hdr)
     if (!captureIdentity || !evaluateIdentity || !colorIdentity ||
         captureIdentity != evaluateIdentity || captureIdentity != colorIdentity)
     { Drop("Native lighting and DLSS input belong to different devices."); return; }
-    if (hdr || !s.haveTone || reinterpret_cast<uintptr_t>(color) != s.color)
-    { Drop(hdr ? "HDR or unknown DLSS colour flags; native lighting rejection disabled." : "Tone-mapped output did not match DLSS input."); return; }
+    if (hdr || !KnownColor(color))
+    {
+        const auto rejected = Latest().dropped + 1;
+        if (!hdr && (rejected <= 3 || rejected % 100 == 0))
+        {
+            ComPtr<ID3D11Texture2D> input, tone;
+            D3D11_TEXTURE2D_DESC inDesc {}, toneDesc {};
+            if (SUCCEEDED(color->QueryInterface(IID_PPV_ARGS(&input)))) input->GetDesc(&inDesc);
+            if (s.colorAliases[0] && SUCCEEDED(s.colorAliases[0].As(&tone))) tone->GetDesc(&toneDesc);
+            size_t aliases = 0; for (const auto& alias : s.colorAliases) if (alias) ++aliases;
+            LOG_INFO("FFXIV native lighting: colour link rejected; gain {}, LUT {}, tone {}, aliases {}; tone {:X} {}x{} format {}, DLSS {:X} {}x{} format {}",
+                s.haveGain, s.haveLut, s.haveTone, aliases,
+                reinterpret_cast<uintptr_t>(s.colorAliases[0].Get()), toneDesc.Width, toneDesc.Height, unsigned(toneDesc.Format),
+                reinterpret_cast<uintptr_t>(color), inDesc.Width, inDesc.Height, unsigned(inDesc.Format));
+        }
+        Drop(hdr ? "HDR or unknown DLSS colour flags; native lighting rejection disabled." :
+             !s.haveTone ? "Tone mapping was not observed before DLSS input." : "Tone-mapped output did not match DLSS input.");
+        return;
+    }
     static bool loggedContext = false;
     if (!loggedContext)
     {
@@ -257,7 +309,7 @@ inline void Boundary(ID3D11DeviceContext* c, ID3D11Resource* color, bool hdr)
     }
     auto& slot = s.slots[s.collecting];
     slot.generation = s.generation; slot.pending = true; s.context->End(slot.ready.Get());
-    s.collecting = -1; armed.store(false);
+    s.collecting = -1; armed.store(false); s.colorAliases = {};
 }
 inline float Half(uint16_t bits)
 {
@@ -392,6 +444,7 @@ template<class Poll> inline void TickWithPoll(ID3D11DeviceContext* c, bool wante
     }
     if (!wanted)
     {
+        s.colorAliases = {};
         for (auto& slot : s.slots) if (!slot.pending) slot = {};
         return;
     }
@@ -408,7 +461,7 @@ template<class Poll> inline void TickWithPoll(ID3D11DeviceContext* c, bool wante
         }
         slot.time = now; s.collecting = i;
         s.haveGain = s.haveLut = s.haveTone = false;
-        s.adapted = s.lut = s.color = 0; armed.store(true); return;
+        s.adapted = s.lut = 0;s.colorAliases={}; armed.store(true); return;
     }
 }
 inline void Tick(ID3D11DeviceContext* c, bool wanted)

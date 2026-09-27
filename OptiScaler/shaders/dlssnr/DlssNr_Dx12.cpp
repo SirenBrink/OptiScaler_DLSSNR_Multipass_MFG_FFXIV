@@ -1702,7 +1702,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     static uint64_t lightingEvent = 0;
     const bool lightingReset = !frame.ColourIsLinearHdr &&
         State::Instance().gameExe == "ffxiv_dx11.exe" &&
-        State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12 &&
         cfg.DlssNrWhitePointSource.value_or_default() == 2 && cfg.DlssNrLightingHistory.value_or_default() &&
         !cfg.DlssNrHoldFrame.value_or_default() && FfxivLightingScan::ConsumeReset(lightingEvent);
     if (lightingReset)

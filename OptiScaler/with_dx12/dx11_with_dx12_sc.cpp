@@ -319,9 +319,6 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (!_InitInteropObjects())
         return DXGI_ERROR_DEVICE_REMOVED;
 
-    if (State::Instance().gameExe == "ffxiv_dx11.exe" && FfxivLightingCapture::installed.load())
-        FfxivLightingScan::Tick(_dx11Context, Config::Instance()->DlssNrWhitePointSource.value_or_default() == 2);
-
     auto dx11Index = _GetDx11BackBufferIndexForPresent();
 
     if (!_RequestSharedBackBuffer(dx11Index))
@@ -1129,7 +1126,14 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
 
 bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue()
 {
-    if (_fg == nullptr || _copyFence == nullptr)
+    if (_copyFence == nullptr)
+        return false;
+
+    // A plain HDR presenter uses the same queue as the interop copy. Queue
+    // ordering already covers the copy; no FG instance or second queue exists.
+    if (FGHooks::IsDx12InteropPresentSC(_fgSwapChain))
+        return true;
+    if (_fg == nullptr || _fg->GetCommandQueue() == nullptr)
         return false;
 
     if (_lastInteropCopyFenceValue == 0)

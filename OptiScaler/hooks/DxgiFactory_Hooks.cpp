@@ -411,9 +411,9 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
             D3D11Hooks::HookToDevice(device);
             State::Instance().currentD3D11Device = device;
 
-            if (!_skipFGSwapChainCreation && State::Instance().activeFgInput == FGInput::Upscaler &&
-                State::Instance().activeFgOutput != FGOutput::NoFG &&
-                State::Instance().activeFgInput != FGInput::NvngxFG)
+            const bool hdrPresenter = !_skipFGSwapChainCreation && Hdr10::Request(localDesc.OutputWindow);
+            if (!_skipFGSwapChainCreation &&
+                ((State::Instance().activeFgInput == FGInput::Upscaler && State::Instance().activeFgOutput != FGOutput::NoFG) || hdrPresenter))
             {
                 auto hiddenHwnd = CreateHiddenSwapchainWindow();
 
@@ -440,7 +440,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
                     }
 
                     DXGI_SWAP_CHAIN_DESC fgDesc = localDesc;
-                    if (Hdr10::Request(localDesc.OutputWindow)) fgDesc.BufferDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+                    if (hdrPresenter) fgDesc.BufferDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
                     HRESULT fgScResult = E_FAIL;
                     IDXGISwapChain* fgSwapChain = nullptr;
                     IDXGISwapChain4* fgSwapChain4 = nullptr;
@@ -448,6 +448,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
 
                     if (SUCCEEDED(realScResult) && PrepareDx12InteropDesc(fgDesc))
                     {
+                        if (State::Instance().activeFgOutput != FGOutput::NoFG)
                         {
                             ScopedSkipFGSCCreation skipFGSCCreation {};
                             fgScResult = FGHooks::CreateSwapChain(realFactory, dx12Queue, &fgDesc, &fgSwapChain);
@@ -458,8 +459,11 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
                         {
                             fgSwapChainIsRealFG = false;
 
-                            LOG_WARN("Dx11wDx12 FG swapchain creation failed: {:X}; creating plain DX12 swapchain",
-                                     (UINT) fgScResult);
+                            if (State::Instance().activeFgOutput == FGOutput::NoFG)
+                                LOG_INFO("OptiHDR: creating plain DX12 presenter with FG provider None");
+                            else
+                                LOG_WARN("Dx11wDx12 FG swapchain creation failed: {:X}; creating plain DX12 swapchain",
+                                         (UINT) fgScResult);
 
                             ScopedSkipParentWrapping skipParentWrapping {};
                             fgScResult = o_CreateSwapChain(realFactory, dx12Queue, &fgDesc, &fgSwapChain);
@@ -813,9 +817,9 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
             D3D11Hooks::HookToDevice(device);
             State::Instance().currentD3D11Device = device;
 
-            if (!_skipFGSwapChainCreation && State::Instance().activeFgInput == FGInput::Upscaler &&
-                State::Instance().activeFgOutput != FGOutput::NoFG &&
-                State::Instance().activeFgInput != FGInput::NvngxFG)
+            const bool hdrPresenter = !_skipFGSwapChainCreation && Hdr10::Request(hWnd);
+            if (!_skipFGSwapChainCreation &&
+                ((State::Instance().activeFgInput == FGInput::Upscaler && State::Instance().activeFgOutput != FGOutput::NoFG) || hdrPresenter))
             {
                 // For dx11 swapchain
                 auto hiddenHwnd = CreateHiddenSwapchainWindow();
@@ -841,7 +845,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                     }
 
                     DXGI_SWAP_CHAIN_DESC1 fgDesc = localDesc;
-                    if (Hdr10::Request(hWnd)) fgDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+                    if (hdrPresenter) fgDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
                     HRESULT fgScResult = E_FAIL;
                     IDXGISwapChain1* fgSwapChain1 = nullptr;
                     IDXGISwapChain4* fgSwapChain4 = nullptr;
@@ -849,6 +853,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
 
                     if (realScResult == S_OK && PrepareDx12InteropDesc1(fgDesc))
                     {
+                        if (State::Instance().activeFgOutput != FGOutput::NoFG)
                         {
                             ScopedSkipFGSCCreation skipFGSCCreation {};
                             fgScResult = FGHooks::CreateSwapChainForHwnd(
@@ -863,8 +868,11 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForHwnd(IDXGIFactory2* realFactory, IUn
                         {
                             fgSwapChainIsRealFG = false;
 
-                            LOG_WARN("Dx11wDx12 FG swapchain creation failed: {:X}; creating plain DX12 swapchain",
-                                     (UINT) fgScResult);
+                            if (State::Instance().activeFgOutput == FGOutput::NoFG)
+                                LOG_INFO("OptiHDR: creating plain DX12 presenter with FG provider None");
+                            else
+                                LOG_WARN("Dx11wDx12 FG swapchain creation failed: {:X}; creating plain DX12 swapchain",
+                                         (UINT) fgScResult);
 
                             ScopedSkipParentWrapping skipParentWrapping {};
                             fgScResult =

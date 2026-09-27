@@ -3264,7 +3264,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
     // XeFG output requirements
     auto constexpr xefgOutputIndex = (uint32_t) FGOutput::XeFG;
-    outputOptions[xefgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan || Hdr10::Active(), "Unavailable with this HDR10 test; use DLSS-G");
+    outputOptions[xefgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
     // Unsupported FG input selected
     const auto currentInputIndex = (uint32_t) state.activeFgInput;
     if (config->FGInput != FGInput::NoFG && inputOptions.size() > currentInputIndex &&

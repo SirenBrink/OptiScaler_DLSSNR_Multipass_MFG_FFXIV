@@ -8,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include "FfxivLightingScan.h"
+#include <Config.h>
 #include "companion/CompanionGpu.h"
 #include "companion/CompanionLayer.h"
 
@@ -69,6 +70,19 @@ using Indirect = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Buffer*,UIN
 inline Create create=nullptr; inline Draw draw=nullptr; inline Indexed indexed=nullptr;
 inline Instanced instanced=nullptr; inline IndexedInstanced indexedInstanced=nullptr;
 inline Indirect indirect=nullptr,indexedIndirect=nullptr;
+using Copy=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,ID3D11Resource*);
+using CopyRegion=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Resource*,UINT,UINT,UINT,UINT,ID3D11Resource*,UINT,const D3D11_BOX*);
+inline Copy copy=nullptr;inline CopyRegion copyRegion=nullptr;
+inline void STDMETHODCALLTYPE OnCopy(ID3D11DeviceContext* c,ID3D11Resource* dest,ID3D11Resource* source)
+{
+    copy(c,dest,source);
+    if(c==context && !inside)FfxivLightingScan::ColorCopy(dest,source,true);
+}
+inline void STDMETHODCALLTYPE OnCopyRegion(ID3D11DeviceContext* c,ID3D11Resource* dest,UINT sub,UINT x,UINT y,UINT z,ID3D11Resource* source,UINT from,const D3D11_BOX* box)
+{
+    copyRegion(c,dest,sub,x,y,z,source,from,box);
+    if(c==context && !inside)FfxivLightingScan::ColorCopy(dest,source,!sub && !from && !x && !y && !z && !box);
+}
 inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,SIZE_T size,ID3D11ClassLinkage* link,ID3D11PixelShader** out)
 {
     auto hr=create(d,code,size,link,out);
@@ -84,12 +98,17 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
 template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&& original)
 {
     if(c==context && !inside) FfxivCompanion::Layer::Observe(c);
-    if (!FfxivLightingScan::armed.load(std::memory_order_relaxed) || c!=context || inside)
+    const bool wanted=Config::Instance()->DlssNrWhitePointSource.value_or_default()==2;
+    if ((!wanted && !FfxivLightingScan::enabled.load()) || c!=context || inside)
     { original(); return; }
     struct Guard { Guard(){inside=true;} ~Guard(){inside=false;} } guard;
     UINT id = 0;
     ComPtr<ID3D11PixelShader> ps; c->PSGetShader(&ps, nullptr, nullptr); UINT bytes = sizeof(id);
     if (ps) ps->GetPrivateData(tag, &bytes, &id);
+    // Drive sampling from the native adaptation pass, independent of any
+    // DX12 presentation bridge or frame-generation provider.
+    if(id==6 || !wanted)FfxivLightingScan::Tick(c,wanted);
+    if(!FfxivLightingScan::armed.load()){original();return;}
     FfxivLightingScan::Before(c, id);
     original();
     FfxivLightingScan::After(c, id);
@@ -122,6 +141,7 @@ inline void Install(ID3D11Device* d)
     createLayout=reinterpret_cast<CreateLayout>(dv[11]);
     instanced=reinterpret_cast<Instanced>(cv[21]); indexedInstanced=reinterpret_cast<IndexedInstanced>(cv[20]);
     indirect=reinterpret_cast<Indirect>(cv[40]); indexedIndirect=reinterpret_cast<Indirect>(cv[39]);
+    copy=reinterpret_cast<Copy>(cv[47]);copyRegion=reinterpret_cast<CopyRegion>(cv[46]);
     if (DetourTransactionBegin()!=NO_ERROR) { create=nullptr; return; }
     bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
 #define LIGHT_ATTACH(o,h) ok &= DetourAttach(reinterpret_cast<PVOID*>(&o),h)==NO_ERROR
@@ -129,6 +149,7 @@ inline void Install(ID3D11Device* d)
     LIGHT_ATTACH(createLayout,OnCreateLayout);
     LIGHT_ATTACH(instanced,OnInstanced); LIGHT_ATTACH(indexedInstanced,OnIndexedInstanced);
     LIGHT_ATTACH(indirect,OnIndirect); LIGHT_ATTACH(indexedIndirect,OnIndexedIndirect);
+    LIGHT_ATTACH(copy,OnCopy);LIGHT_ATTACH(copyRegion,OnCopyRegion);
 #undef LIGHT_ATTACH
     LONG result=ERROR_INVALID_FUNCTION;
     if (ok) result=DetourTransactionCommit(); else DetourTransactionAbort();
@@ -146,6 +167,7 @@ inline void Detach()
     LIGHT_DETACH(createLayout,OnCreateLayout);
     LIGHT_DETACH(instanced,OnInstanced); LIGHT_DETACH(indexedInstanced,OnIndexedInstanced);
     LIGHT_DETACH(indirect,OnIndirect); LIGHT_DETACH(indexedIndirect,OnIndexedIndirect);
+    LIGHT_DETACH(copy,OnCopy);LIGHT_DETACH(copyRegion,OnCopyRegion);
 #undef LIGHT_DETACH
     if (ok) { if (DetourTransactionCommit()==NO_ERROR) { create=nullptr; createLayout=nullptr; context=nullptr; } }
     else DetourTransactionAbort();

@@ -51,7 +51,7 @@ int main()
     assert(SUCCEEDED(device->CreateDeferredContext(0, &deferred)));
     assert(Allocate(context.Get(), s.slots[0]));
     auto prepare = [&] {
-        s.collecting=0; s.haveTone=true; s.color=reinterpret_cast<uintptr_t>(s.slots[0].lut.Get());
+        s.collecting=0; s.haveTone=true; s.colorAliases={}; s.colorAliases[0]=s.slots[0].lut;
         s.slots[0].pending=false; armed=true;
     };
     prepare(); Boundary(otherContext.Get(), s.slots[0].lut.Get(), false);
@@ -67,6 +67,48 @@ int main()
     do { query=context->GetData(s.slots[0].ready.Get(), &ready, sizeof(ready), 0); if(query==S_FALSE) Sleep(1); }
     while(query==S_FALSE && GetTickCount64()<deadline);
     assert(query==S_OK && ready);
+    // Copies retain the verified tone-map lineage only if the complete image
+    // and dimensions/format agree. An overwrite must revoke it, even when the
+    // destination was the original tone-map target.
+    ComPtr<ID3D11Texture2D> copied, undersized;
+    D3D11_TEXTURE2D_DESC desc{}; s.slots[0].lut->GetDesc(&desc);
+    assert(SUCCEEDED(device->CreateTexture2D(&desc,nullptr,&copied)));
+    --desc.Width; assert(SUCCEEDED(device->CreateTexture2D(&desc,nullptr,&undersized)));
+    prepare();
+    ColorCopy(copied.Get(),s.slots[0].lut.Get(),true);
+    assert(KnownColor(copied.Get()));
+    Boundary(deferred.Get(),copied.Get(),false);
+    assert(s.slots[0].pending && s.collecting==-1);
+    context->Flush();
+    prepare();
+    ColorCopy(copied.Get(),s.slots[0].lut.Get(),false);
+    assert(!KnownColor(copied.Get()));
+    ColorCopy(undersized.Get(),s.slots[0].lut.Get(),true);
+    assert(!KnownColor(undersized.Get()));
+    ColorCopy(copied.Get(),s.slots[0].lut.Get(),true);
+    ColorCopy(copied.Get(),undersized.Get(),true);
+    assert(!KnownColor(copied.Get()));
+    ColorCopy(s.slots[0].lut.Get(),copied.Get(),true);
+    assert(!KnownColor(s.slots[0].lut.Get()));
+    prepare(); ForgetColor(s.slots[0].lut.Get());
+    assert(!KnownColor(s.slots[0].lut.Get()));
+    // Later draws can composite onto the tone-mapped scene. They do not undo
+    // the measured tone-mapping stage, and the draw hook cannot infer that a
+    // bound target was fully overwritten (a draw may even write no pixels).
+    ComPtr<ID3D11Texture2D> scene; ComPtr<ID3D11RenderTargetView> sceneView;
+    desc.Width=desc.Height=64; desc.Usage=D3D11_USAGE_DEFAULT;
+    desc.CPUAccessFlags=0; desc.BindFlags=D3D11_BIND_RENDER_TARGET;
+    assert(SUCCEEDED(device->CreateTexture2D(&desc,nullptr,&scene)));
+    assert(SUCCEEDED(device->CreateRenderTargetView(scene.Get(),nullptr,&sceneView)));
+    prepare(); s.colorAliases[0]=scene;
+    auto* bound=sceneView.Get(); context->OMSetRenderTargets(1,&bound,nullptr);
+    Before(context.Get(),0);
+    if(!KnownColor(scene.Get()))
+    { puts("FAIL: an unrelated draw discarded the verified tone-mapping stage"); return 1; }
+    Boundary(deferred.Get(),scene.Get(),false);
+    assert(s.slots[0].pending && s.collecting==-1);
+    context->OMSetRenderTargets(0,nullptr,nullptr); context->Flush();
+    s.collecting=-1; armed=false;
     s.reading.valid = true; s.reading.eventTime = 1;
     auto& slot = s.slots[0]; slot.pending = true; slot.time = GetTickCount64()-3000;
     slot.generation = s.generation;
@@ -88,5 +130,5 @@ int main()
     auto failure=[](auto*,auto*,BOOL*){return HRESULT(DXGI_ERROR_DEVICE_REMOVED);};
     TickWithPoll(context.Get(),true,failure);
     assert(s.failed && s.reading.failed && !enabled.load() && !armed.load());
-    puts("PASS: cross-context query completes on capture context; wrong device/resource/HDR rejected; delayed-readback recovery intact");
+    puts("PASS: native copy lineage and overwrite rejection; cross-context readback; wrong device/resource/HDR rejected; delayed-readback recovery intact");
 }
