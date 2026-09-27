@@ -20,6 +20,12 @@ template<class C, class F> void Fields(C& c, F&& f)
     NR_FIELD(Enabled, 0, 1); NR_FIELD(RunBeforeSr, 0, 1);
     NR_FIELD(DeferredDlss, 0, 1); NR_FIELD(ResidualFg, 0, 1);
     NR_FIELD(ResidualFgApproxCamera, 0, 1); NR_FIELD(Precision, 0, 4);
+    NR_FIELD(SpatialCompression, 0, 1);
+    NR_FIELD(SpatialCenterX, 1, 99); NR_FIELD(SpatialCenterY, 1, 99);
+    NR_FIELD(SpatialWorkX, 25, 100); NR_FIELD(SpatialWorkY, 25, 100);
+    NR_FIELD(SpatialOffsetX, -50, 50); NR_FIELD(SpatialOffsetY, -50, 50);
+    NR_FIELD(SpatialShiftX, -50, 50); NR_FIELD(SpatialShiftY, -50, 50);
+    NR_FIELD(VitEvery, 1, 2); NR_FIELD(PassFeedback, 0, 1);
     NR_FIELD(Passes, 1, 30); NR_FIELD(UnlockPasses, 0, 1);
     NR_FIELD(Preset, 0, 3); NR_FIELD(Style, 0, 2);
     NR_FIELD(Intensity, 0, 2); NR_FIELD(LocalStructure, 0, 2);
@@ -85,8 +91,23 @@ template<class C> Json Capture(C& c)
     return result;
 }
 
-template<class C> void Validate(const Json& j, C& c)
+inline Json Upgrade(Json j)
 {
+    if (j.is_object())
+    {
+        if (!j.contains("SpatialCompression")) j["SpatialCompression"] = false;
+        for (const char* key : {"SpatialCenterX", "SpatialCenterY"}) if (!j.contains(key)) j[key] = 80.0;
+        for (const char* key : {"SpatialWorkX", "SpatialWorkY"}) if (!j.contains(key)) j[key] = 90.0;
+        for (const char* key : {"SpatialOffsetX", "SpatialOffsetY", "SpatialShiftX", "SpatialShiftY"}) if (!j.contains(key)) j[key] = 0.0;
+        if (!j.contains("VitEvery")) j["VitEvery"] = 1;
+        if (!j.contains("PassFeedback")) j["PassFeedback"] = 1.0;
+    }
+    return j;
+}
+
+template<class C> void Validate(const Json& source, C& c)
+{
+    const auto j = Upgrade(source);
     if (!j.is_object()) throw std::runtime_error("Invalid preset settings");
     Fields(c, [&](const std::string& key, auto& opt, double lo, double hi) {
         if (!j.contains(key)) throw std::runtime_error("Preset is missing " + key);
@@ -96,8 +117,9 @@ template<class C> void Validate(const Json& j, C& c)
         throw std::runtime_error("Unsupported model precision");
 }
 
-template<class C> void Apply(const Json& j, C& c)
+template<class C> void Apply(const Json& source, C& c)
 {
+    const auto j = Upgrade(source);
     Validate(j, c); // Validate every pass before changing any live setting.
     Fields(c, [&](const std::string& key, auto& opt, double, double) {
         using T = typename std::decay_t<decltype(opt)>::value_type;

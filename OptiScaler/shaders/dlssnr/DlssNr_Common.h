@@ -28,6 +28,7 @@ enum DlssNrMode : uint32_t
     DlssNrMode_ComposeMotion = 9, // compose two successive fields at the displaced coordinate
     DlssNrMode_ApplyInterpolatedResidual = 10, // t4: R8_UNORM NVIDIA suppression flag
     DlssNrMode_ZeroMotion = 11, // private reset-only NR/SR guide, never passed to residual FG
+    DlssNrMode_MultipassFeedback = 13, // blend interpass edits with the preceding input
     DlssNrMode_BoundResidual = 12 // t0: private SR carrier; t1: current render-resolution carrier
 };
 
@@ -244,6 +245,8 @@ struct alignas(256) DlssNrConstants
     // Mode 10 only: reject an interpolated edit where the clean anchor differs.
     uint32_t ResidualRejection;
     float ReferencePreExposure;
+    float PassFeedback;
+    uint32_t SpatialResidual;
 };
 
 class DlssNr_Common

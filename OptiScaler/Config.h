@@ -530,6 +530,21 @@ class Config
     // passes are sequential and each one needs the last one's output.
     CustomOptional<uint32_t> DlssNrPasses { 1 };
 
+    // 1 preserves the original raw interpass output without an extra dispatch.
+    // Below 1, gamut-bound the edit then blend it back toward the preceding input.
+    // Single-pass NR is unchanged. This is spatial feedback between passes, not temporal history.
+    CustomOptional<bool> DlssNrSpatialCompression { false };
+    CustomOptional<float> DlssNrSpatialCenterX { 80.0f };
+    CustomOptional<float> DlssNrSpatialCenterY { 80.0f };
+    CustomOptional<float> DlssNrSpatialWorkX { 90.0f };
+    CustomOptional<float> DlssNrSpatialWorkY { 90.0f };
+    CustomOptional<float> DlssNrSpatialOffsetX { 0.0f };
+    CustomOptional<float> DlssNrSpatialOffsetY { 0.0f };
+    CustomOptional<float> DlssNrSpatialShiftX { 0.0f };
+    CustomOptional<float> DlssNrSpatialShiftY { 0.0f };
+    CustomOptional<float> DlssNrPassFeedback { 1.0f };
+    CustomOptional<uint32_t> DlssNrVitEvery { 1 };
+
     // Which depth convention the model is told the guide uses.
     //
     //   0  what the game's own DLSS feature was created with, which is what it means for the upscaler
@@ -851,6 +866,16 @@ class Config
     // Frame Generation
     CustomOptional<FGInput> FGInput { FGInput::NoFG };
     CustomOptional<bool> ExternalFrameGeneration { false };
+    CustomOptional<bool> FGDLSSGAmpereMfgUnlock { false };
+    CustomOptional<int> FGDLSSGAmpereMfgMaxFrames { 3 };
+    CustomOptional<std::string> FGDLSSGAmpereMfgKernelImage { "Auto" };
+    CustomOptional<std::string> FGDLSSGAmpereMfgRouter { "Auto" };
+    CustomOptional<bool> FGDLSSGAmpereMfgHardwareBilinear { false };
+    CustomOptional<int> FGDLSSGAmpereMfgOptimized { 1 };
+    CustomOptional<std::string> FGDLSSGAmpereMfgPreset { "Auto" };
+    CustomOptional<std::string> FGDLSSGAmpereMfgSpoofArchToGame { "Auto" };
+    CustomOptional<int> FGDLSSGAmpereMfgLogLevel { 1 };
+
     CustomOptional<bool> FGDLSSGAdaMfgUnlock { false };
     CustomOptional<bool, NoDefault> FGDLSSGAdaBlackwellKernels;
     CustomOptional<FGOutput> FGOutput { FGOutput::NoFG };

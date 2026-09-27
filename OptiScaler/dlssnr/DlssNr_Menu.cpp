@@ -156,12 +156,38 @@ void RenderMenu(Config* config, float menuResScale)
 
         HelpMarker("On: apply NR before SR or combined RR+SR. Off: apply it afterward.\nBefore RR is experimental. Unsupported input layouts fall back after upscaling.");
 
+        bool spatial = config->DlssNrSpatialCompression.value_or_default();
+        if (ImGui::Checkbox("Peripheral spatial compression (experimental)", &spatial))
+            config->DlssNrSpatialCompression = spatial;
+        HelpMarker("Preserves the central image and spends fewer NR pixels at the edges.\nColor, depth and motion are transformed together. Uses matched residual composition.\nThis test supports DX12 model resolutions up to 100%; larger scales use ordinary NR.");
+        if (spatial)
+        {
+            if (DeferredSlider("Central region", &config->DlssNrSpatialCenterX, 10.0f, 95.0f, 80.0f, "%.0f%%"))
+                config->DlssNrSpatialCenterY = config->DlssNrSpatialCenterX.value_or_default();
+            if (DeferredSlider("Peripheral work budget", &config->DlssNrSpatialWorkX, 25.0f, 100.0f, 90.0f, "%.0f%%"))
+                config->DlssNrSpatialWorkY = config->DlssNrSpatialWorkX.value_or_default();
+            ImGui::TextWrapped("%s", SpatialStatus().c_str());
+            ImGui::TextDisabled("Work budget must exceed the central-region percentage.");
+        }
+
         bool deferredDlss = config->DlssNrDeferredDlss.value_or_default();
         int precisionChoice = config->DlssNrPrecision.value_or_default() == 4 ? 1 : 0;
         const char* precisions[] = { "NVIDIA (FP8)", "Experimental (FP8+NVFP4 hybrid)" };
         if (ImGui::Combo("Model precision", &precisionChoice, precisions, IM_ARRAYSIZE(precisions)))
             config->DlssNrPrecision = precisionChoice == 1 ? 4u : 0u;
         HelpMarker("NVIDIA: original FP8 model (default), with some sensitive operations kept at higher precision.\nExperimental: this fork's FP8+NVFP4 hybrid for RTX 50 GPUs; output may differ slightly.");
+        ImGui::BeginDisabled(precisionChoice > 0 || !amdStatus.empty());
+        bool vitReuse = config->DlssNrVitEvery.value_or_default() > 1;
+        if (ImGui::Checkbox("Reuse NR bottleneck every second evaluation (experimental)", &vitReuse))
+            config->DlssNrVitEvery = vitReuse ? 2u : 1u;
+        HelpMarker("NVIDIA FP8 only, verified kernel module only. May cause stale detail during motion. Off by default; hybrid mode always computes fully.");
+        if (vitReuse) ImGui::TextWrapped("%s", DlssNrNative::VitStatus().c_str());
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(config->DlssNrPasses.value_or_default() < 2 || !amdStatus.empty());
+        float feedback = config->DlssNrPassFeedback.value_or_default();
+        if (ImGui::SliderFloat("Multipass feedback", &feedback, 0.0f, 1.0f)) config->DlssNrPassFeedback = feedback;
+        HelpMarker("How much of each pass's edit reaches the next pass. 1 preserves the existing behavior. Single-pass NR is unchanged.");
+        ImGui::EndDisabled();
         const auto hybridStatus = DlssNrNative::Status();
         if (hybridStatus.rfind("Restart required:", 0) == 0 ||
             (precisionChoice > 0 && hybridStatus.find("fallback") != std::string::npos))
@@ -322,6 +348,11 @@ void RenderMenu(Config* config, float menuResScale)
                                ? pendingScale
                                : (int) lroundf(config->DlssNrWorkingScale.value_or_default() * 100.0f);
 
+        unsigned modelWidth = 0, modelHeight = 0;
+        CurrentModelSize(modelWidth, modelHeight);
+        if (modelWidth && modelHeight)
+            ImGui::TextDisabled("Model input: %u x %u; network: %u x %u", modelWidth, modelHeight,
+                                (modelWidth + 1) / 2, (modelHeight + 1) / 2);
         if (ImGui::SliderInt("Model resolution", &scalePercent, 25, 200, "%d%%"))
             pendingScale = scalePercent;
 
@@ -539,19 +570,7 @@ void RenderMenu(Config* config, float menuResScale)
         else
             ImGui::TextDisabled("HDR input settings. Adjust the brightness range presented to NR.");
 
-        if (State::Instance().gameExe == "ffxiv_dx11.exe" && ImGui::TreeNode("Native DX11 lighting capture (diagnostic)"))
-        {
-            ImGui::TextWrapped("Capture a stationary bright view, a stationary dark view, then a lighting transition. Each capture lasts 12 seconds. Turn NR off for the first set.");
-            ImGui::TextDisabled("Recognized lighting shaders loaded: %u / 9", FfxivLightingCapture::Loaded());
-            ImGui::BeginDisabled(!FfxivLightingCapture::installed.load() || FfxivLightingCapture::Busy());
-            if (ImGui::Button("Capture bright view")) FfxivLightingCapture::Request(1);
-            if (ImGui::Button("Capture dark view")) FfxivLightingCapture::Request(2);
-            if (ImGui::Button("Capture transition")) FfxivLightingCapture::Request(3);
-            ImGui::EndDisabled();
-            ImGui::TextWrapped("%s", FfxivLightingCapture::Status().c_str());
-            ImGui::TextWrapped("Saved under OptiScaler_LightingCaptures in the game folder. This records diagnostic data; it does not adjust exposure.");
-            ImGui::TreePop();
-        }
+
 
 
         if (nativeLighting)

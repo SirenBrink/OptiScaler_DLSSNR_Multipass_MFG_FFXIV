@@ -1,5 +1,6 @@
 #include "pch.h"
 #include <dlssnr/PassProfiles.h>
+#include <dlssnr/NrModelSize.h>
 
 #include <set>
 
@@ -41,10 +42,13 @@
 #include <algorithm>
 #include <cstring>
 #include "precompile/DlssNr_Shader.h"
+#include "precompile/DlssNr_Spatial_Shader.h"
+#include "precompile/DlssNr_Spatial_Guides_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
 
 namespace
 {
+std::atomic<uint64_t> g_modelDimensions { 0 };
 // NGX result codes, by name.
 //
 // A user's log recently read "init 0x-452FFFFF", which is an int formatted as hex and is
@@ -212,6 +216,8 @@ struct NrState
     void* feature = nullptr;
     bool featurePendingSubmission = false;
     unsigned long long featureCreateEpoch = 0;
+    std::function<bool()> featureReady;
+    std::array<std::function<bool()>, DlssNr::MaxPassCount> passReady;
 
     // A feature per extra pass, each with its own temporal history.
     //
@@ -240,6 +246,13 @@ struct NrState
     // The second half of the model-output ping-pong. The base proxy stays immutable: pass 0 writes
     // output (A), pass 1 writes this (B), and pass 2 writes A again. Only the final answer is composed.
     ID3D12Resource* passScratch = nullptr;
+    DlssNr::Spatial::Layout spatialLayout {};
+    bool spatialFailed = false;
+    std::string spatialStatus = "disabled";
+    ID3D12Resource *spatialColor = nullptr, *spatialDepth = nullptr, *spatialMotion = nullptr;
+    ID3D12Resource *spatialProxy = nullptr, *spatialAnswer = nullptr;
+    ID3D12Resource* feedbackScratch = nullptr;
+    bool feedbackScratchFailed = false;
     bool passScratchFailed = false;
 
     // The frame as the upscaler wrote it. The resolve adds the model's edit to this rather than
@@ -756,6 +769,7 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
 
     ParkNrFeature(g_nr.feature);
     g_nr.featurePendingSubmission = false;
+    g_nr.featureReady = {};
 
     // The extras go with it: they were built for this raster and this tuning too.
     for (unsigned int i = 1; i < DlssNr::MaxPassCount; ++i)
@@ -764,11 +778,13 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
         g_nr.passNeedsReset[i] = false;
         g_nr.passCreateFailed[i] = false;
         g_nr.passPendingSubmission[i] = false;
+        g_nr.passReady[i] = {};
     }
 
     for (ID3D12Resource** r :
-         { &g_nr.output, &g_nr.passScratch, &g_nr.colorCopy, &g_nr.hdrCopy, &g_nr.colorSmall,
-           &g_nr.outputNative, &g_nr.activeColor })
+         { &g_nr.output, &g_nr.passScratch, &g_nr.feedbackScratch, &g_nr.colorCopy, &g_nr.hdrCopy, &g_nr.colorSmall,
+           &g_nr.outputNative, &g_nr.activeColor, &g_nr.spatialColor, &g_nr.spatialDepth,
+           &g_nr.spatialMotion, &g_nr.spatialProxy, &g_nr.spatialAnswer })
         ParkNrResource(*r);
 
     g_nr.passScratchFailed = false;
@@ -1316,6 +1332,12 @@ ID3D12Resource* GetResource(NVSDK_NGX_Parameter* params, const char* a, const ch
 // frame, and each one would otherwise mean a new model.
 constexpr unsigned long long kSettleFrames = 30;
 
+// The network pools its input 2x2 and runs its 8x8 attention windows on the result, so its grid is 16
+// input pixels per window. A size that is not a multiple of 16 leaves a ragged last window that is
+// zero-padded (the model copes, it is just wasted work at the border), and, more usefully here, every
+// distinct size is a different feature: Auto's continuous render:output ratio moved the size by a pixel
+// or two under dynamic resolution and each move rebuilt the model. Rounding to 16 lets the size hold.
+//
 // The extras the official integration sets: global tone (read at create) and the interface inputs.
 // Written before every create and evaluate, nulls included, so nothing stale ever sits in the block.
 void SetExtras(const Config& cfg, ID3D12Resource* ui, ID3D12Resource* backbuffer, unsigned int uiWidth,
@@ -1478,7 +1500,7 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
                                   ID3D12Resource* InSource, ID3D12Resource* InModel,
                                   ID3D12Resource* InOriginal, ID3D12Resource* InMotion,
                                   ID3D12Resource* InPrevEdit, ID3D12Resource* OutTarget,
-                                  ID3D12Resource* OutKeep)
+                                  ID3D12Resource* OutKeep, ID3D12PipelineState* pipeline)
 {
     if (!_init || InCmdList == nullptr || _device == nullptr || InSource == nullptr || OutTarget == nullptr)
         return false;
@@ -1519,7 +1541,7 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
     ID3D12DescriptorHeap* heaps[] = { currentHeap.GetHeapCSU() };
     InCmdList->SetDescriptorHeaps(_countof(heaps), heaps);
     InCmdList->SetComputeRootSignature(_rootSignature);
-    InCmdList->SetPipelineState(_pipelineState);
+    InCmdList->SetPipelineState(pipeline ? pipeline : _pipelineState);
     InCmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());
 
     // Sized from the constants rather than from a resource, because the pass that shrinks the proxy
@@ -1531,8 +1553,27 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
     return true;
 }
 
+bool DlssNr_Dx12::DispatchSpatial(ID3D12GraphicsCommandList* cmd, const DlssNr::Spatial::Constants& constants,
+                                  ID3D12Resource* source, ID3D12Resource* depthOrAnswer, ID3D12Resource* motion,
+                                  ID3D12Resource* target, ID3D12Resource* second)
+{
+    auto*& pipeline = constants.mode == 101 ? _spatialGuidesPipeline : _spatialPipeline;
+    if (!pipeline)
+    {
+        const auto* code = constants.mode == 101 ? DlssNr_Spatial_Guides_cso : DlssNr_Spatial_cso;
+        const auto size = constants.mode == 101 ? sizeof(DlssNr_Spatial_Guides_cso) : sizeof(DlssNr_Spatial_cso);
+        if (!CreateComputePipeline(_device, &pipeline, code, size, nullptr)) return false;
+    }
+    static_assert(sizeof(constants) == sizeof(DlssNrConstants));
+    DlssNrConstants bytes {};
+    std::memcpy(&bytes, &constants, sizeof(bytes));
+    return DispatchPass(cmd, bytes, source, depthOrAnswer, motion, nullptr, nullptr, target, second, pipeline);
+}
+
 DlssNr_Dx12::~DlssNr_Dx12()
 {
+    if (_spatialPipeline) _spatialPipeline->Release();
+    if (_spatialGuidesPipeline) _spatialGuidesPipeline->Release();
     for (auto& buffer : _constantBuffers)
     {
         if (buffer != nullptr)
@@ -1751,8 +1792,23 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (!std::isfinite(workScale))
         workScale = 1.0f;
     workScale = workScale < 0.25f ? 0.25f : (workScale > 2.0f ? 2.0f : workScale);
-    const auto workWidth = (unsigned int) (width * workScale + 0.5f);
-    const auto workHeight = (unsigned int) (height * workScale + 0.5f);
+    auto spatialLayout = DlssNr::Spatial::Build(DlssNr::Spatial::ReadSettings(cfg), width, height, workScale);
+    const bool spatialChanged = spatialLayout != g_nr.spatialLayout;
+    if (spatialChanged) g_nr.spatialFailed = false;
+    g_nr.spatialLayout = spatialLayout;
+    // This first integration keeps the existing supersampling downfilter untouched.
+    // Spatial packing is supported through 100%; larger model scales use ordinary NR.
+    const bool spatial = spatialLayout.active && workScale <= 1.0f && !cfg.DlssNrUseProxy.value_or_default() &&
+                         !g_nr.spatialFailed;
+    g_nr.spatialStatus = !spatialLayout.requested ? "disabled" : g_nr.spatialFailed ? "fallback: spatial processing failed" :
+        workScale > 1.0f ? "inactive: spatial test supports model resolution up to 100%" :
+        cfg.DlssNrUseProxy.value_or_default() ? "inactive: requires direct NR backend" : spatialLayout.reason;
+    const auto ordinaryWidth = DlssNr::AlignWorkSize((unsigned int)(width * workScale + .5f), width);
+    const auto ordinaryHeight = DlssNr::AlignWorkSize((unsigned int)(height * workScale + .5f), height);
+    const auto workWidth = spatial ? spatialLayout.modelW : ordinaryWidth;
+    const auto workHeight = spatial ? spatialLayout.modelH : ordinaryHeight;
+    spatialLayout.ordinaryW = ordinaryWidth; spatialLayout.ordinaryH = ordinaryHeight;
+    g_modelDimensions.store((uint64_t(workWidth) << 32) | workHeight, std::memory_order_relaxed);
     const bool reduced = workWidth != width || workHeight != height;
     const unsigned int configuredPasses =
         std::clamp(cfg.DlssNrPasses.value_or_default(),
@@ -1774,7 +1830,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     ReleaseSurfacesIfFormatChanged(desc.Format);
 
-    const bool resolutionChanged = g_nr.width != width || g_nr.height != height ||
+    const bool resolutionChanged = spatialChanged || g_nr.width != width || g_nr.height != height ||
                                    g_nr.workWidth != workWidth || g_nr.workHeight != workHeight;
     const bool placementChanged = g_nr.feature != nullptr &&
         (g_nr.beforeUpscale != frame.BeforeUpscale ||
@@ -1792,6 +1848,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // deep in work that references all of it.
         ParkNrFeature(g_nr.feature);
         g_nr.featurePendingSubmission = false;
+        g_nr.featureReady = {};
 
         for (unsigned int i = 1; i < DlssNr::MaxPassCount; ++i)
         {
@@ -1799,6 +1856,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             g_nr.passNeedsReset[i] = false;
             g_nr.passCreateFailed[i] = false;
             g_nr.passPendingSubmission[i] = false;
+            g_nr.passReady[i] = {};
         }
 
         // Resolution and seam changes invalidate the scratch state. Tuning does not, and throwing
@@ -1810,11 +1868,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
             ParkNrResource(g_nr.output);
             ParkNrResource(g_nr.passScratch);
+            ParkNrResource(g_nr.feedbackScratch);
+            g_nr.feedbackScratchFailed = false;
             ParkNrResource(g_nr.colorCopy);
             ParkNrResource(g_nr.hdrCopy);
             ParkNrResource(g_nr.colorSmall);
             ParkNrResource(g_nr.outputNative);
             ParkNrResource(g_nr.activeColor);
+            for (auto** r : { &g_nr.spatialColor, &g_nr.spatialDepth, &g_nr.spatialMotion,
+                               &g_nr.spatialProxy, &g_nr.spatialAnswer }) ParkNrResource(*r);
             g_nr.passScratchFailed = false;
         }
     }
@@ -1844,6 +1906,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // Reclaim the extra raster and clear its failure latch. Raising the count later gets one fresh
         // allocation attempt; holding a failing allocation at two must not retry it every frame.
         ParkNrResource(g_nr.passScratch);
+        ParkNrResource(g_nr.feedbackScratch);
+        g_nr.feedbackScratchFailed = false;
         g_nr.passScratchFailed = false;
     }
     else if (g_nr.passScratch == nullptr && !g_nr.passScratchFailed)
@@ -1855,6 +1919,30 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             LOG_ERROR("DLSS-NR: could not allocate the model-output ping-pong; extra passes are disabled");
     }
 
+    if (requestedPasses > 1 && cfg.DlssNrPassFeedback.value_or_default() < 1.0f &&
+        !g_nr.feedbackScratch && !g_nr.feedbackScratchFailed)
+    {
+        g_nr.feedbackScratch = CreateScratch(device, desc.Format, workWidth, workHeight);
+        g_nr.feedbackScratchFailed = !g_nr.feedbackScratch;
+        if (g_nr.feedbackScratchFailed)
+            LOG_ERROR("DLSS-NR: feedback scratch allocation failed; retaining full interpass feedback until model rebuild");
+    }
+
+    if (spatial)
+    {
+        if (!g_nr.spatialColor) g_nr.spatialColor = CreateScratch(device, desc.Format, workWidth, workHeight);
+        if (!g_nr.spatialDepth) g_nr.spatialDepth = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, workWidth, workHeight);
+        if (!g_nr.spatialMotion) g_nr.spatialMotion = CreateScratch(device, DXGI_FORMAT_R32G32_FLOAT, workWidth, workHeight);
+        if (!g_nr.spatialProxy) g_nr.spatialProxy = CreateScratch(device, desc.Format, ordinaryWidth, ordinaryHeight);
+        if (!g_nr.spatialAnswer) g_nr.spatialAnswer = CreateScratch(device, desc.Format, ordinaryWidth, ordinaryHeight);
+        if (!g_nr.spatialColor || !g_nr.spatialDepth || !g_nr.spatialMotion || !g_nr.spatialProxy || !g_nr.spatialAnswer)
+        {
+            g_nr.spatialFailed = true;
+            g_nr.spatialStatus = "fallback: spatial resource allocation failed";
+            LOG_WARN("DLSS-NR: {}; ordinary NR will resume next frame", g_nr.spatialStatus);
+            device->Release(); return;
+        }
+    }
     if (reduced && g_nr.colorSmall == nullptr)
         g_nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
 
@@ -1925,6 +2013,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (g_nr.feature == nullptr)
         {
             g_nr.featurePendingSubmission = false;
+            g_nr.featureReady = {};
             g_nr.failed = true;
             g_nr.reason = "the model would not initialise";
             if (g_nr.lastModelError && *g_nr.lastModelError())
@@ -1950,13 +2039,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.reset = true;
         g_nr.featurePendingSubmission = true;
         g_nr.featureCreateEpoch = frame.SubmissionEpoch;
+        g_nr.featureReady = g_nrLifetime.CompletionProbe(cmdList);
         RecordBuiltPrimaryTuning(cfg);
         LOG_INFO("DLSS-NR model feature created from {}", snippet->string());
-        LOG_INFO("DLSS-NR running {}: target {}x{}, model {}x{}, guides {}x{} "
+        LOG_INFO("DLSS-NR running {}: target {}x{}, model input {}x{} (main network {}x{}), guides {}x{} "
                  "(preset {}, intensity {}, style {}, build epoch {})",
                  frame.RayReconstruction ? (frame.BeforeUpscale ? "before RR+SR" : "after RR+SR") :
                      (frame.BeforeUpscale ? "before SR" : "after SR"),
-                 width, height, workWidth, workHeight,
+                 width, height, workWidth, workHeight, (workWidth + 1) / 2, (workHeight + 1) / 2,
                  guideWidth, guideHeight, g_nr.builtPreset[0], g_nr.builtIntensity, g_nr.builtStyle[0],
                  frame.SubmissionEpoch);
 
@@ -1974,19 +2064,20 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     // A later function call is not proof that the command list containing CreateFeature was
-    // submitted: some engines record more than one upscale on the same list. Native DX12 supplies
-    // the wrapped Present count and the bridges supply their post-Execute frame counter, so an epoch
-    // change is the first point at which evaluating the feature is safe.
+    // submitted: some engines record more than one upscale on the same list. Even submission is
+    // insufficient across queues: require a completed fence for the exact creation recording.
     if (g_nr.featurePendingSubmission)
     {
-        if (frame.SubmissionEpoch == g_nr.featureCreateEpoch)
+        if (!g_nr.featureReady || !g_nr.featureReady())
         {
             device->Release();
             return;
         }
 
         g_nr.featurePendingSubmission = false;
-        LOG_INFO("DLSS-NR: primary feature ready after submitted epoch {}", g_nr.featureCreateEpoch);
+
+        g_nr.featureReady = {};
+        LOG_INFO("DLSS-NR: primary feature ready after GPU completion (creation epoch {})", g_nr.featureCreateEpoch);
     }
 
     // Park no-longer-requested feature histories immediately (their actual release remains deferred),
@@ -1999,25 +2090,28 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             g_nr.passNeedsReset[pass] = false;
             g_nr.passCreateFailed[pass] = false;
             g_nr.passPendingSubmission[pass] = false;
+            g_nr.passReady[pass] = {};
         }
     }
 
     // Do not create another feature, and do not evaluate any feature, while a requested layer still
-    // belongs to the current submission epoch. This keeps multiple upscaler evaluations recorded on
+    // has unfinished creation work. This keeps multiple upscaler evaluations recorded on
     // one command list from recreating the historical create/evaluate GPU hang.
     for (unsigned int pass = 1; pass < requestedPasses; ++pass)
     {
         if (!g_nr.passPendingSubmission[pass])
             continue;
 
-        if (frame.SubmissionEpoch == g_nr.passCreateEpoch[pass])
+        if (!g_nr.passReady[pass] || !g_nr.passReady[pass]())
         {
             device->Release();
             return;
         }
 
         g_nr.passPendingSubmission[pass] = false;
-        LOG_INFO("DLSS-NR: feature for pass {} ready after submitted epoch {}", pass + 1,
+
+        g_nr.passReady[pass] = {};
+        LOG_INFO("DLSS-NR: feature for pass {} ready after GPU completion (creation epoch {})", pass + 1,
                  g_nr.passCreateEpoch[pass]);
     }
 
@@ -2063,6 +2157,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     g_nr.passNeedsReset[pass] = true;
                     g_nr.passPendingSubmission[pass] = true;
                     g_nr.passCreateEpoch[pass] = frame.SubmissionEpoch;
+                    g_nr.passReady[pass] = g_nrLifetime.CompletionProbe(cmdList);
                     LOG_INFO("DLSS-NR: feature for pass {} built with preset {}, style {} at epoch {}; "
                              "waiting for submission",
                              pass + 1, g_nr.builtPreset[pass], g_nr.builtStyle[pass],
@@ -2071,6 +2166,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 else
                 {
                     g_nr.passPendingSubmission[pass] = false;
+                    g_nr.passReady[pass] = {};
                     g_nr.passCreateFailed[pass] = true;
                     LOG_ERROR("DLSS-NR: feature for pass {} failed to build; using {} ready pass(es)",
                               pass + 1, pass);
@@ -2357,7 +2453,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // enlarged during the resolve while the frame underneath stays full size and untouched.
     ID3D12Resource* modelInput = g_nr.colorCopy;
 
-    if (reduced && g_nr.colorSmall != nullptr)
+    if (reduced && !spatial && g_nr.colorSmall != nullptr)
     {
         bool built = false;
 
@@ -2436,6 +2532,28 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return;
     }
 
+    struct SpatialReadScope {
+        ID3D12GraphicsCommandList* cmd;
+        std::vector<ID3D12Resource*> resources;
+        void Read(ID3D12Resource* r) { Barrier(cmd, r, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE); resources.push_back(r); }
+        ~SpatialReadScope() { for (auto* r : resources) Barrier(cmd, r, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS); }
+    } spatialReads { cmdList };
+    bool spatialPacked = true;
+    if (spatial)
+    {
+        const auto pack = DlssNr::Spatial::MakeConstants(spatialLayout, 100, guides, g_nr.guideMvScaleX, g_nr.guideMvScaleY, width, height);
+        const auto guide = DlssNr::Spatial::MakeConstants(spatialLayout, 101, guides, g_nr.guideMvScaleX, g_nr.guideMvScaleY, width, height);
+        spatialPacked = DispatchSpatial(cmdList, pack, modelInput, nullptr, nullptr, g_nr.spatialColor, nullptr) &&
+            DispatchSpatial(cmdList, guide, modelInput, depthIn, motionIn, g_nr.spatialDepth, g_nr.spatialMotion);
+        if (spatialPacked)
+        {
+            for (auto* r : { g_nr.spatialColor, g_nr.spatialDepth, g_nr.spatialMotion }) spatialReads.Read(r);
+            modelInput = g_nr.spatialColor; depthIn = g_nr.spatialDepth; motionIn = g_nr.spatialMotion;
+        }
+        else { g_nr.spatialFailed = true; g_nr.spatialStatus = "fallback: spatial packing dispatch failed"; }
+    }
     // The vectors were scaled to full-frame pixels; the image the model reprojects is the working size.
     // The vectors were scaled to full-frame pixels; the image the model reprojects is the
     // working size.
@@ -2535,7 +2653,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     int result = NVSDK_NGX_Result_Success;
 
-    for (unsigned int pass = 0; pass < effectivePasses && result == NVSDK_NGX_Result_Success;
+    for (unsigned int pass = 0; spatialPacked && pass < effectivePasses && result == NVSDK_NGX_Result_Success;
          ++pass)
     {
         void* const passFeature = pass == 0 ? g_nr.feature : g_nr.passFeature[pass];
@@ -2543,15 +2661,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         const auto tuning = PassTuning(cfg, pass);
 
         MakeModelWritable(passOutput);
+        // ViT reuse of the NVIDIA model: tell the NvAPI wrapper which feature this is, whether it starts over, and how often to compute the bottleneck
+        DlssNrNative::BeginEvaluate(passFeature, passReset, cfg.DlssNrVitEvery.value_or_default());
         result = g_nr.evaluate(
             cmdList, passFeature, g_nr.capabilityParams, passInput, depthIn, motionIn, passOutput,
-            workWidth, workHeight, guideWidth, guideHeight, motionWidth, motionHeight,
-            depthBaseX, depthBaseY, motionBaseX, motionBaseY, g_nr.guideDepthInverted ? 1 : 0,
+            workWidth, workHeight, spatial ? workWidth : guideWidth, spatial ? workHeight : guideHeight,
+            spatial ? workWidth : motionWidth, spatial ? workHeight : motionHeight,
+            spatial ? 0 : depthBaseX, spatial ? 0 : depthBaseY, spatial ? 0 : motionBaseX, spatial ? 0 : motionBaseY, g_nr.guideDepthInverted ? 1 : 0,
             passReset ? 1 : 0, tuning.intensity,
             (int) PassStyle(cfg, pass), tuning.structure,
             tuning.tone, tuning.skin,
-            tuning.autoMask ? 1 : 0, g_nr.guideMvScaleX * mvToWorkX,
-            g_nr.guideMvScaleY * mvToWorkY);
+            tuning.autoMask ? 1 : 0, spatial ? 1.0f : g_nr.guideMvScaleX * mvToWorkX,
+            spatial ? 1.0f : g_nr.guideMvScaleY * mvToWorkY);
+        DlssNrNative::EndEvaluate(result == NVSDK_NGX_Result_Success);
 
         if (result != NVSDK_NGX_Result_Success)
             break;
@@ -2564,11 +2686,39 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         if (pass + 1 < effectivePasses)
         {
+            if (g_nr.feedbackScratch && cfg.DlssNrPassFeedback.value_or_default() < 1.0f)
+            {
+                DlssNrConstants feedback {};
+                feedback.Mode = DlssNrMode_MultipassFeedback; feedback.Width = workWidth; feedback.Height = workHeight;
+                feedback.PassFeedback = std::clamp(cfg.DlssNrPassFeedback.value_or_default(), 0.0f, 1.0f);
+                if (DispatchPass(cmdList, feedback, finalAnswer, passInput, nullptr, nullptr, nullptr,
+                                 g_nr.feedbackScratch, nullptr))
+                {
+                    Barrier(cmdList, g_nr.feedbackScratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    Barrier(cmdList, finalAnswer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+                    cmdList->CopyResource(finalAnswer, g_nr.feedbackScratch);
+                    Barrier(cmdList, finalAnswer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    Barrier(cmdList, g_nr.feedbackScratch, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                }
+            }
             passInput = finalAnswer;
             passOutput = passOutput == g_nr.output ? g_nr.passScratch : g_nr.output;
         }
     }
 
+    ID3D12Resource* ordinaryProxy = modelInput;
+    ID3D12Resource* ordinaryAnswer = finalAnswer;
+    if (spatial && spatialPacked && result == NVSDK_NGX_Result_Success && finalAnswer)
+    {
+        const auto unpack = DlssNr::Spatial::MakeConstants(spatialLayout, 102, guides, 1, 1, width, height);
+        if (DispatchSpatial(cmdList, unpack, modelInput, finalAnswer, nullptr, g_nr.spatialProxy, g_nr.spatialAnswer))
+        {
+            spatialReads.Read(g_nr.spatialProxy); spatialReads.Read(g_nr.spatialAnswer);
+            ordinaryProxy = g_nr.spatialProxy; ordinaryAnswer = g_nr.spatialAnswer;
+        }
+        else { spatialPacked = false; g_nr.spatialFailed = true; g_nr.spatialStatus = "fallback: spatial unpack failed"; }
+    }
+    if (!spatialPacked) result = NVSDK_NGX_Result_Fail;
     if (g_ngxTime != nullptr)
         g_ngxTime->End(cmdList);
 
@@ -2689,6 +2839,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             unsigned int workW;
             unsigned int workH;
             unsigned int passes;
+            float passFeedback;
         };
 
         static ComposeReport loggedCompose {};
@@ -2707,7 +2858,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                          resolveParams.Transfer,
                                          g_nr.workWidth,
                                          g_nr.workHeight,
-                                         effectivePasses };
+                                         effectivePasses,
+                                         std::clamp(cfg.DlssNrPassFeedback.value_or_default(), 0.0f, 1.0f) };
 
         if (!loggedCompose.valid || loggedCompose.whitePoint != composeNow.whitePoint ||
             loggedCompose.transfer != composeNow.transfer || loggedCompose.colour != composeNow.colour ||
@@ -2716,15 +2868,18 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             loggedCompose.debugView != composeNow.debugView ||
             loggedCompose.compareMode != composeNow.compareMode ||
             loggedCompose.residual != composeNow.residual || loggedCompose.workW != composeNow.workW ||
-            loggedCompose.workH != composeNow.workH || loggedCompose.passes != composeNow.passes)
+            loggedCompose.workH != composeNow.workH || loggedCompose.passes != composeNow.passes ||
+            loggedCompose.passFeedback != composeNow.passFeedback)
         {
             loggedCompose = composeNow;
             LOG_INFO("DLSS-NR composition: paper white {:.2f}x, detail {:.2f}, colour {:.2f}, guard "
-                     "{:.1f}x, colour transform {}, transfer {}, model {}x{}, passes {}, debug view {}, compare {}",
+                     "{:.1f}x, colour transform {}, transfer {}, model {}x{}, passes {} (feedback {:.2f}), "
+                     "debug view {}, compare {}",
                      composeNow.whitePoint, composeNow.transfer, composeNow.colour, composeNow.maxRatio,
                      composeNow.passthrough != 0 ? "off (frame already tone mapped)" : "on (linear HDR)",
                      composeNow.residual == 1 ? "matched residual" : "classic", composeNow.workW,
-                     composeNow.workH, composeNow.passes, composeNow.debugView, composeNow.compareMode);
+                     composeNow.workH, composeNow.passes, composeNow.passFeedback, composeNow.debugView,
+                     composeNow.compareMode);
         }
 
         // Supersampling down-leg. Average the Nx model answer back to native with the chosen filter, so
@@ -2735,15 +2890,16 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // falls back to the Nx pair. finalAnswer is NPSR here; outputNative is UAV from last frame.
         bool superDownOk = false;
         if (workScale > 1.0f && g_nr.superDown != nullptr && g_nr.outputNative != nullptr &&
-            g_nr.superDown->Dispatch(cmdList, finalAnswer, g_nr.outputNative))
+            g_nr.superDown->Dispatch(cmdList, ordinaryAnswer, g_nr.outputNative))
         {
             Barrier(cmdList, g_nr.outputNative, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             superDownOk = true;
         }
 
-        ID3D12Resource* resolveProxy = superDownOk ? g_nr.colorCopy : modelInput;
-        ID3D12Resource* resolveAnswer = superDownOk ? g_nr.outputNative : finalAnswer;
+        ID3D12Resource* resolveProxy = superDownOk ? g_nr.colorCopy : ordinaryProxy;
+        ID3D12Resource* resolveAnswer = superDownOk ? g_nr.outputNative : ordinaryAnswer;
+        if (spatial) { resolveParams.Transfer = 1; resolveParams.SpatialResidual = 1; }
 
         // Pre-SR Color is not guaranteed to have UAV support. Write directly when legal; otherwise
         // resolve into hdrCopy while the original Color remains readable, then copy the result back.
@@ -2799,15 +2955,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
     else
     {
-        g_nr.failed = true;
+        g_nr.failed = !spatial;
+        if (spatial) { g_nr.spatialFailed = true; g_nr.spatialStatus = "fallback: packed NR evaluation failed"; }
         g_nr.reason = "the model refused to run";
         if (g_nr.lastModelError && *g_nr.lastModelError())
         {
             g_nr.modelError = g_nr.lastModelError();
             g_nr.reason = g_nr.modelError.c_str();
         }
-        LOG_ERROR("DLSS-NR evaluate returned 0x{:X} ({}), disabling for this session", (uint32_t) result,
-                  NgxResultName((unsigned int) result));
+        LOG_ERROR("DLSS-NR evaluate returned 0x{:X} ({}): {}", (uint32_t) result,
+                  NgxResultName((unsigned int) result),
+                  spatial ? "spatial processing disabled; ordinary NR will retry next frame" : "disabled for this session");
     }
 
     // On an evaluation failure, intermediate A/B inputs may still be readable. Restore both persistent
@@ -2876,7 +3034,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         Barrier(cmdList, g_nr.motionClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_COPY_DEST);
 
-    if (reduced && g_nr.colorSmall != nullptr)
+    if (reduced && !spatial && g_nr.colorSmall != nullptr)
         Barrier(cmdList, g_nr.colorSmall, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -2889,6 +3047,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
 namespace DlssNr
 {
+std::string SpatialStatus() { std::lock_guard<std::recursive_mutex> lock(g_nrMutex); return g_nr.spatialStatus; }
+
+void CurrentModelSize(unsigned int& width, unsigned int& height)
+{
+    const auto packed = g_modelDimensions.load(std::memory_order_relaxed);
+    width = unsigned(packed >> 32); height = unsigned(packed);
+}
+
 #include "DlssNr_DeferredSr.inl"
 
 void SuspendForBridgeShutdown()
@@ -3515,6 +3681,7 @@ void Shutdown()
 
     g_nr.feature = nullptr;
     g_nr.featurePendingSubmission = false;
+    g_nr.featureReady = {};
 
     for (unsigned int pass = 1; pass < DlssNr::MaxPassCount; ++pass)
     {
@@ -3526,6 +3693,7 @@ void Shutdown()
         g_nr.passNeedsReset[pass] = false;
         g_nr.passCreateFailed[pass] = false;
         g_nr.passPendingSubmission[pass] = false;
+        g_nr.passReady[pass] = {};
     }
 
     if (g_nr.output != nullptr)
@@ -3539,6 +3707,9 @@ void Shutdown()
         g_nr.passScratch->Release();
         g_nr.passScratch = nullptr;
     }
+    for (auto** r : { &g_nr.spatialColor, &g_nr.spatialDepth, &g_nr.spatialMotion, &g_nr.spatialProxy, &g_nr.spatialAnswer })
+        if (*r) { (*r)->Release(); *r = nullptr; }
+    if (g_nr.feedbackScratch) { g_nr.feedbackScratch->Release(); g_nr.feedbackScratch = nullptr; }
     g_nr.passScratchFailed = false;
 
     if (g_nr.colorCopy != nullptr)

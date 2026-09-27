@@ -70,6 +70,15 @@ bool Config::Reload(std::filesystem::path iniPath)
         {
             FGEnabled.set_from_config(readBool("FrameGen", "Enabled"));
             ExternalFrameGeneration.set_from_config(readBool("FrameGen", "External"));
+            FGDLSSGAmpereMfgUnlock.set_from_config(readBool("DLSSG", "AmpereMfgUnlock"));
+            FGDLSSGAmpereMfgMaxFrames.set_from_config(readInt("DLSSG", "AmpereMfgMaxFrames"));
+            FGDLSSGAmpereMfgKernelImage.set_from_config(readString("DLSSG", "AmpereMfgKernelImage"));
+            FGDLSSGAmpereMfgRouter.set_from_config(readString("DLSSG", "AmpereMfgRouter"));
+            FGDLSSGAmpereMfgHardwareBilinear.set_from_config(readBool("DLSSG", "AmpereMfgHardwareBilinear"));
+            FGDLSSGAmpereMfgOptimized.set_from_config(readInt("DLSSG", "AmpereMfgOptimized"));
+            FGDLSSGAmpereMfgPreset.set_from_config(readString("DLSSG", "AmpereMfgPreset"));
+            FGDLSSGAmpereMfgSpoofArchToGame.set_from_config(readString("DLSSG", "AmpereMfgSpoofArchToGame"));
+            FGDLSSGAmpereMfgLogLevel.set_from_config(readInt("DLSSG", "AmpereMfgLogLevel"));
             FGDLSSGAdaMfgUnlock.set_from_config(readBool("DLSSG", "AdaMfgUnlock"));
             FGDLSSGAdaBlackwellKernels.set_from_config(readBool("DLSSG", "AdaBlackwellKernels"));
             FGDebugView.set_from_config(readBool("FrameGen", "DebugView"));
@@ -343,6 +352,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrResidualFg.set_from_config(readBool("DlssNr", "ResidualFG"));
             DlssNrPrecision.set_from_config(readUInt("DlssNr", "Precision"));
             if (DlssNrPrecision.value_or_default() != 4) DlssNrPrecision = 0u;
+            DlssNrVitEvery.set_from_config(readUInt("DlssNr", "VitEvery"));
+            if (DlssNrVitEvery.value_or_default() < 1u || DlssNrVitEvery.value_or_default() > 2u)
+                DlssNrVitEvery = std::clamp<uint32_t>(DlssNrVitEvery.value_or_default(), 1u, 2u);
             DlssNrResidualFgApproxCamera.set_from_config(readBool("DlssNr", "ResidualFGApproxCamera"));
             DlssNrToggleKey.set_from_config(readInt("DlssNr", "ToggleKey"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
@@ -359,6 +371,18 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCompareSwap.set_from_config(readBool("DlssNr", "CompareSwap"));
             DlssNrCompareTags.set_from_config(readBool("DlssNr", "CompareTags"));
             DlssNrTagScale.set_from_config(readFloat("DlssNr", "TagScale"));
+            DlssNrSpatialCompression.set_from_config(readBool("DlssNr", "SpatialCompression"));
+            DlssNrSpatialCenterX.set_from_config(readFloat("DlssNr", "SpatialCenterX"));
+            DlssNrSpatialCenterY.set_from_config(readFloat("DlssNr", "SpatialCenterY"));
+            DlssNrSpatialWorkX.set_from_config(readFloat("DlssNr", "SpatialWorkX"));
+            DlssNrSpatialWorkY.set_from_config(readFloat("DlssNr", "SpatialWorkY"));
+            DlssNrSpatialOffsetX.set_from_config(readFloat("DlssNr", "SpatialOffsetX"));
+            DlssNrSpatialOffsetY.set_from_config(readFloat("DlssNr", "SpatialOffsetY"));
+            DlssNrSpatialShiftX.set_from_config(readFloat("DlssNr", "SpatialShiftX"));
+            DlssNrSpatialShiftY.set_from_config(readFloat("DlssNr", "SpatialShiftY"));
+            DlssNrPassFeedback.set_from_config(readFloat("DlssNr", "PassFeedback"));
+            if (!std::isfinite(DlssNrPassFeedback.value_or_default())) DlssNrPassFeedback = 1.0f;
+            else DlssNrPassFeedback = std::clamp(DlssNrPassFeedback.value_or_default(), 0.0f, 1.0f);
             DlssNrWorkingScale.set_from_config(readFloat("DlssNr", "WorkingScale"));
 
             if (auto v = readEnum<Scaler>("DlssNr", "ScalingDownscaler"))
@@ -996,6 +1020,15 @@ bool Config::SaveIni()
     {
         ini.SetValue("FrameGen", "Enabled", GetBoolValue(Instance()->FGEnabled.value_for_config()).c_str());
         ini.SetValue("FrameGen", "External", GetBoolValue(Instance()->ExternalFrameGeneration.value_for_config()).c_str());
+        ini.SetValue("DLSSG", "AmpereMfgUnlock", GetBoolValue(Instance()->FGDLSSGAmpereMfgUnlock.value_for_config()).c_str());
+        ini.SetValue("DLSSG", "AmpereMfgMaxFrames", GetIntValue(Instance()->FGDLSSGAmpereMfgMaxFrames.value_for_config()).c_str());
+        ini.SetValue("DLSSG", "AmpereMfgKernelImage", Instance()->FGDLSSGAmpereMfgKernelImage.value_for_config().value_or("auto").c_str());
+        ini.SetValue("DLSSG", "AmpereMfgRouter", Instance()->FGDLSSGAmpereMfgRouter.value_for_config().value_or("auto").c_str());
+        ini.SetValue("DLSSG", "AmpereMfgHardwareBilinear", GetBoolValue(Instance()->FGDLSSGAmpereMfgHardwareBilinear.value_for_config()).c_str());
+        ini.SetValue("DLSSG", "AmpereMfgOptimized", GetIntValue(Instance()->FGDLSSGAmpereMfgOptimized.value_for_config()).c_str());
+        ini.SetValue("DLSSG", "AmpereMfgPreset", Instance()->FGDLSSGAmpereMfgPreset.value_for_config().value_or("auto").c_str());
+        ini.SetValue("DLSSG", "AmpereMfgSpoofArchToGame", Instance()->FGDLSSGAmpereMfgSpoofArchToGame.value_for_config().value_or("auto").c_str());
+        ini.SetValue("DLSSG", "AmpereMfgLogLevel", GetIntValue(Instance()->FGDLSSGAmpereMfgLogLevel.value_for_config()).c_str());
         ini.SetValue("DLSSG", "AdaMfgUnlock", GetBoolValue(Instance()->FGDLSSGAdaMfgUnlock.value_for_config()).c_str());
         ini.SetValue("DLSSG", "AdaBlackwellKernels", GetBoolValue(Instance()->FGDLSSGAdaBlackwellKernels.value_for_config()).c_str());
         ini.SetValue("FrameGen", "DebugView", GetBoolValue(Instance()->FGDebugView.value_for_config()).c_str());
@@ -1307,6 +1340,17 @@ bool Config::SaveIni()
                  GetBoolValue(Instance()->DlssNrCompareTags.value_for_config()).c_str());
     ini.SetValue("DlssNr", "TagScale",
                  GetFloatValue(Instance()->DlssNrTagScale.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "VitEvery", GetIntValue(Instance()->DlssNrVitEvery.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialCompression", GetBoolValue(Instance()->DlssNrSpatialCompression.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialCenterX", GetFloatValue(Instance()->DlssNrSpatialCenterX.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialCenterY", GetFloatValue(Instance()->DlssNrSpatialCenterY.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialWorkX", GetFloatValue(Instance()->DlssNrSpatialWorkX.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialWorkY", GetFloatValue(Instance()->DlssNrSpatialWorkY.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialOffsetX", GetFloatValue(Instance()->DlssNrSpatialOffsetX.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialOffsetY", GetFloatValue(Instance()->DlssNrSpatialOffsetY.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialShiftX", GetFloatValue(Instance()->DlssNrSpatialShiftX.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialShiftY", GetFloatValue(Instance()->DlssNrSpatialShiftY.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "PassFeedback", GetFloatValue(Instance()->DlssNrPassFeedback.value_for_config()).c_str());
     ini.SetValue("DlssNr", "WorkingScale", GetFloatValue(Instance()->DlssNrWorkingScale.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScalingDownscaler", GetIntValue(Instance()->DlssNrScalingDownscaler).c_str());
     ini.SetValue("DlssNr", "AutoCapture", GetBoolValue(Instance()->DlssNrAutoCapture.value_for_config()).c_str());

@@ -21,6 +21,10 @@ int main(int argc, char** argv)
     c.DlssNrPass3AutoMask = false;
     c.DlssNrExtraPasses[26].style = 1u;
     c.DlssNrExtraPasses[26].intensity = 1.75f;
+    c.DlssNrSpatialCompression = true;
+    c.DlssNrSpatialWorkX = 87.0f;
+    c.DlssNrVitEvery = 2u;
+    c.DlssNrPassFeedback = 0.5f;
     const auto elaborate = Capture(c);
     Apply(defaults, c);
     assert(Capture(c) == defaults && !c.DlssNrPass2Intensity.has_value());
@@ -41,7 +45,11 @@ int main(int argc, char** argv)
     bool rejected = false;
     try { Apply(missing, c); } catch (...) { rejected = true; }
     assert(rejected && Capture(c) == elaborate);
-    Apply(defaults, c);
+    auto legacy = defaults; legacy.erase("VitEvery"); legacy.erase("PassFeedback");
+    for (auto it = legacy.begin(); it != legacy.end();) { if (it.key().starts_with("Spatial")) it = legacy.erase(it); else ++it; }
+    Apply(legacy, c);
+    assert(!c.DlssNrSpatialCompression.value_or_default() && c.DlssNrSpatialWorkX.value_or_default() == 90.0f);
+    assert(c.DlssNrVitEvery.value_or_default() == 1 && c.DlssNrPassFeedback.value_or_default() == 1.0f);
     assert(c.DlssNrToggleKey.value() == 123 && c.DlssNrHoldFrame.value());
     assert(Name("  Gameplay  ") == "Gameplay");
     assert(Name("Portrait / 日本語") == "Portrait / 日本語");

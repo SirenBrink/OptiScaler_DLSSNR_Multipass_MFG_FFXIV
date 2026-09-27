@@ -113,6 +113,8 @@ CalibrationReading Calibration();
 
 // Whether the model is loaded and running, for the overlay.
 bool IsRunning();
+std::string SpatialStatus();
+void CurrentModelSize(unsigned int& width, unsigned int& height);
 // Private residual-upscaler status; separate from the NR model's own running status/time.
 std::string DeferredDlssStatus();
 

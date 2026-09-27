@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <framegen/dlssg/AmpereMfgLoader.h>
 #include <misc/FfxivNativeQuality.h>
 #include "menu_common.h"
 #include <framegen/dlssg/MfgUnlock.h>
@@ -3082,6 +3083,36 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     }
     auto& menuResScale = ctx.menuResScale;
     auto& primaryGpu = *ctx.primaryGpu;
+
+    if (ImGui::TreeNode("SM86/SM75 companion runtime (experimental)"))
+    {
+        bool enabled = config->FGDLSSGAmpereMfgUnlock.value_or_default();
+        if (ImGui::Checkbox("Load RTX 20/30 companion (restart)", &enabled)) config->FGDLSSGAmpereMfgUnlock = enabled;
+        ShowHelpMarker("Save settings and restart. Supply the companion DLL in OptiScaler/dlssg_sm86.\nOptiFG remains the frame producer. Do not enable the built-in Ada unlock with this runtime.");
+        auto runtime = AmpereMfgLoader::LastStatus();
+        if (ImGui::Button("Detect installed runtime")) runtime = AmpereMfgLoader::ProbeCandidate(true);
+        ImGui::TextWrapped("Runtime: %s; %s", runtime.ModName.empty() ? "not detected" : runtime.ModName.c_str(),
+                           runtime.DllLoaded ? "loaded" : "not loaded");
+        if (!runtime.ErrorMessage.empty()) ImGui::TextWrapped("%s", runtime.ErrorMessage.c_str());
+        if (enabled && config->FGDLSSGAdaMfgUnlock.value_or_default())
+            ImGui::TextWrapped("Disable the built-in Ada unlock before enabling this companion.");
+        int maxFrames = config->FGDLSSGAmpereMfgMaxFrames.value_or_default();
+        if (ImGui::SliderInt("Companion max generated frames (restart)", &maxFrames, 1, 5))
+            config->FGDLSSGAmpereMfgMaxFrames = maxFrames;
+        ImGui::BeginDisabled(!runtime.DllLoaded || !runtime.LiveControlSupported);
+        static int mode = 0, factor = 2, target = 144;
+        const char* modes[] = { "Follow OptiFG", "Dynamic", "Fixed factor" };
+        ImGui::Combo("Companion control", &mode, modes, 3);
+        ImGui::SliderInt("Companion factor", &factor, 2, runtime.Is3101Runtime ? 4 : 6);
+        ImGui::SliderInt("Companion target FPS", &target, 30, 360);
+        static std::string result;
+        if (ImGui::Button("Apply companion controls"))
+            result = AmpereMfgLoader::ApplyLiveControl(mode, target, factor) ? "Runtime accepted the request" : "Runtime rejected or does not support this request";
+        if (!result.empty()) ImGui::TextWrapped("%s", result.c_str());
+        ImGui::EndDisabled();
+        ImGui::TextWrapped("Live controls require the SilyNoMeta exports. Detection alone does not confirm FG support.");
+        ImGui::TreePop();
+    }
 
     /// FG INPUTS
     bool adaUnlock = config->FGDLSSGAdaMfgUnlock.value_or_default();

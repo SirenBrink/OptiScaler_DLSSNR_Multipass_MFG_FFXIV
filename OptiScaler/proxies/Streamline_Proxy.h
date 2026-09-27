@@ -4,6 +4,7 @@
 #include "Util.h"
 #include "Config.h"
 #include "Logger.h"
+#include <framegen/dlssg/AmpereMfgLoader.h>
 
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
@@ -66,6 +67,7 @@ class StreamlineProxy
 
     static bool LoadStreamline()
     {
+        AmpereMfgLoader::TrySetup();
         if (_dll != nullptr)
             return true;
 

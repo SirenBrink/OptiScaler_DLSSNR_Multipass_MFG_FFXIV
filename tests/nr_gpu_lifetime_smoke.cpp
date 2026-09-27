@@ -59,16 +59,20 @@ try
     {
         DlssNr::GpuLifetime life;
         life.Record(commands.Get());
+        auto ready = life.CompletionProbe(commands.Get());
+        expect(!ready(), "unsubmitted creation reported ready");
         check(queue->Wait(gate.Get(), 1));
         queue->ExecuteCommandLists(1, lists);
         life.Submitted(queue.Get(), 1, lists);
         life.Retire([&] { ++released; });
         life.ResetRecording(commands.Get());
         expect(released == 1 && !life.Idle(), "reset released submitted GPU work");
+        expect(!ready(), "GPU-blocked creation reported ready");
         check(gate->Signal(1));
         wait();
         life.Collect();
         expect(released == 2 && life.Idle(), "completed submitted work not released");
+        expect(ready(), "completed creation still pending");
     }
     {
         DlssNr::GpuLifetime life;

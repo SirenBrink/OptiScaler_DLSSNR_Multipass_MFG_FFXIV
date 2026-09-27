@@ -1,0 +1,769 @@
+#include "pch.h"
+
+#include "AmpereMfgLoader.h"
+
+#include <Config.h>
+#include <State.h>
+#include <Util.h>
+#include <misc/IdentifyGpu.h>
+#include <proxies/Ntdll_Proxy.h>
+
+
+#include <fstream>
+#include <sstream>
+#include <mutex>
+
+#ifndef NV_GPU_ARCHITECTURE_GA100
+#define NV_GPU_ARCHITECTURE_GA100 0x00000170
+#endif
+
+namespace AmpereMfgLoader
+{
+namespace
+{
+Status s_status;
+bool s_setupAttempted = false;
+bool s_probeAttempted = false;
+std::recursive_mutex s_mutex;
+
+HMODULE s_hModule = nullptr;
+PFN_DLSSG_RequestControl s_pfnRequestControl = nullptr;
+PFN_DLSSG_SetDisplayTarget s_pfnSetDisplayTarget = nullptr;
+PFN_DLSSG_RequestUI s_pfnRequestUI = nullptr;
+} // namespace
+
+Status ProbeCandidate(bool forceRefresh)
+{
+    std::lock_guard lock(s_mutex);
+    if (s_status.DllLoaded)
+        return s_status;
+
+    if (s_probeAttempted && !forceRefresh) return s_status;
+    s_probeAttempted = true;
+
+    auto* cfg = Config::Instance();
+    const auto& gpu = IdentifyGpu::getPrimaryGpu();
+    const uint32_t archId = static_cast<uint32_t>(gpu.nvidiaArchInfo.architecture_id);
+    const bool isTuring =
+        IsTuringArch(archId) ||
+        (gpu.name.find("RTX 20") != std::string::npos || gpu.name.find("GTX 16") != std::string::npos ||
+         gpu.name.find("TITAN RTX") != std::string::npos || gpu.name.find("Turing") != std::string::npos ||
+         gpu.name.find("TU10") != std::string::npos || gpu.name.find("TU11") != std::string::npos);
+
+    auto basePath = Util::DllPath().parent_path();
+    std::filesystem::path dllPath;
+    std::error_code fileError;
+
+    auto probePath = [&](const std::filesystem::path& candidate) -> bool
+    { return !candidate.empty() && candidate != Util::DllPath() && std::filesystem::exists(candidate, fileError); };
+
+    auto mainOverride =
+        cfg->MainDllPath.has_value() ? std::filesystem::path(cfg->MainDllPath.value()) : std::filesystem::path();
+
+    std::filesystem::path rootCandidates[] = {
+        mainOverride.empty() ? std::filesystem::path() : mainOverride / L"dlssg_sm86" / L"dlssg_sm86.dll",
+        mainOverride.empty() ? std::filesystem::path() : mainOverride / L"dlssg_sm86" / L"version.dll",
+        mainOverride.empty() ? std::filesystem::path()
+                             : mainOverride / L"dlssg_for_sm86" / L"SilyNoMeta" / L"version.dll",
+        mainOverride.empty() ? std::filesystem::path()
+                             : mainOverride / L"dlssg_for_sm86" / L"sdli1995" / L"version.dll",
+        mainOverride.empty() ? std::filesystem::path() : mainOverride / L"dlssg_for_sm86" / L"version.dll",
+        basePath / L"OptiScaler" / L"dlssg_sm86" / L"dlssg_sm86.dll",
+        basePath / L"OptiScaler" / L"dlssg_sm86" / L"version.dll",
+        basePath / L"dlssg_sm86" / L"dlssg_sm86.dll",
+        basePath / L"dlssg_sm86" / L"version.dll",
+        basePath / L"dlssg_for_sm86" / L"SilyNoMeta" / L"version.dll",
+        basePath / L"dlssg_for_sm86" / L"sdli1995" / L"version.dll",
+        basePath / L"dlssg_for_sm86" / L"version.dll",
+        basePath / L"dlssg_for_sm86" / L"dlssg_sm86.dll",
+        basePath / L"dlssg_sm86.dll",
+        basePath / L"version.dll"
+    };
+
+    std::filesystem::path legacy3101Candidates[] = {
+        mainOverride.empty() ? std::filesystem::path() : mainOverride / L"dlssg_sm86" / L"310.1" / L"dlssg_sm86.dll",
+        mainOverride.empty() ? std::filesystem::path() : mainOverride / L"dlssg_sm86" / L"310.1" / L"version.dll",
+        mainOverride.empty() ? std::filesystem::path()
+                             : mainOverride / L"dlssg_for_sm86" / L"sdli1995" / L"310.1" / L"version.dll",
+        basePath / L"OptiScaler" / L"dlssg_sm86" / L"310.1" / L"dlssg_sm86.dll",
+        basePath / L"OptiScaler" / L"dlssg_sm86" / L"310.1" / L"version.dll",
+        basePath / L"dlssg_sm86" / L"310.1" / L"dlssg_sm86.dll",
+        basePath / L"dlssg_sm86" / L"310.1" / L"version.dll",
+        basePath / L"dlssg_for_sm86" / L"sdli1995" / L"310.1" / L"version.dll",
+        basePath / L"310.1" / L"dlssg_sm86.dll",
+        basePath / L"310.1" / L"version.dll"
+    };
+
+    std::filesystem::path rootDll;
+    for (const auto& candidate : rootCandidates)
+    {
+        if (probePath(candidate))
+        {
+            rootDll = candidate;
+            break;
+        }
+    }
+
+    if (isTuring)
+    {
+        if (!rootDll.empty() && HasSm75KernelFamily(rootDll))
+        {
+            dllPath = rootDll;
+        }
+        else
+        {
+            for (const auto& candidate : legacy3101Candidates)
+            {
+                if (probePath(candidate))
+                {
+                    dllPath = candidate;
+                    break;
+                }
+            }
+            if (dllPath.empty() && !rootDll.empty())
+            {
+                dllPath = rootDll;
+            }
+        }
+    }
+    else
+    {
+        if (!rootDll.empty())
+        {
+            dllPath = rootDll;
+        }
+        else
+        {
+            for (const auto& candidate : legacy3101Candidates)
+            {
+                if (probePath(candidate))
+                {
+                    dllPath = candidate;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!dllPath.empty())
+    {
+        s_status.DllFound = true;
+        s_status.LoadedDllPath = dllPath.wstring();
+        s_status.HasSm75Support = HasSm75KernelFamily(dllPath);
+        s_status.Is3101Runtime = Is3101Runtime(dllPath);
+        s_status.Variant = DetectModVariant(dllPath, &s_status.ModName);
+        s_status.HasDynamicMfgSupport = (s_status.Variant == ModVariant::SilyNoMeta) || HasDynamicMfgSupport(dllPath);
+        s_status.LiveControlSupported = (s_status.Variant == ModVariant::SilyNoMeta);
+    }
+    else
+    {
+        s_status.DllFound = false;
+        s_status.LoadedDllPath.clear();
+        s_status.Variant = ModVariant::Unknown;
+        s_status.ModName = "Not found";
+        s_status.HasSm75Support = false;
+        s_status.Is3101Runtime = false;
+        s_status.HasDynamicMfgSupport = false;
+        s_status.LiveControlSupported = false;
+    }
+
+    return s_status;
+}
+
+Status LastStatus()
+{
+    std::lock_guard lock(s_mutex);
+    return s_status;
+}
+
+bool ApplyLiveControl(uint32_t mode, uint32_t targetFps, uint32_t multiplier)
+{
+    std::lock_guard lock(s_mutex);
+    if (!s_pfnRequestControl)
+        return false;
+
+    DLSSG_ControlRequest req {};
+    req.version = 1;
+    req.mode = mode;
+    req.targetFPS = (targetFps > 1000) ? 1000 : targetFps;
+    req.multiplier = (multiplier >= 2 && multiplier <= 6) ? multiplier : 0;
+    req.flags = 0;
+
+    LOG_INFO("AmpereMfgLoader: Dispatching live control: mode={}, targetFPS={}, multiplier={}", req.mode, req.targetFPS,
+             req.multiplier);
+
+    bool result = s_pfnRequestControl(&req);
+    s_status.LiveControlActive = result;
+    return result;
+}
+
+bool ApplyDisplayTargetLive(uint32_t targetFps)
+{
+    std::lock_guard lock(s_mutex);
+    if (!s_pfnSetDisplayTarget)
+        return false;
+
+    uint32_t clamped = (targetFps > 1000) ? 1000 : targetFps;
+    LOG_INFO("AmpereMfgLoader: Dispatching live display target: {} FPS", clamped);
+    return s_pfnSetDisplayTarget(clamped);
+}
+
+bool ApplyUIModeLive(uint32_t uiMode)
+{
+    std::lock_guard lock(s_mutex);
+    if (!s_pfnRequestUI)
+        return false;
+
+    uint32_t validMode = (uiMode <= 2) ? uiMode : 1;
+    LOG_INFO("AmpereMfgLoader: Dispatching live UI recomposition mode: {}", validMode);
+    return s_pfnRequestUI(validMode);
+}
+
+std::string ResolveAutoKernelImage()
+{
+    const auto& gpu = IdentifyGpu::getPrimaryGpu();
+    const bool onLinux = State::Instance().isRunningOnLinux || gpu.usesVkd3dProton;
+    return ResolveAutoKernelImage(static_cast<uint32_t>(gpu.nvidiaArchInfo.architecture_id), gpu.name, onLinux);
+}
+
+std::string ResolveRouter()
+{
+    auto* cfg = Config::Instance();
+    const auto& gpu = IdentifyGpu::getPrimaryGpu();
+    const std::string configuredRouter = cfg->FGDLSSGAmpereMfgRouter.value_or("Auto");
+    bool hasSm75Support = false;
+    {
+        std::lock_guard lock(s_mutex);
+        hasSm75Support = s_status.HasSm75Support;
+    }
+    return ResolveRouter(static_cast<uint32_t>(gpu.nvidiaArchInfo.architecture_id), gpu.name, configuredRouter,
+                         hasSm75Support);
+}
+
+std::string GenerateIniContent(bool hasSm75Support, bool is3101Runtime, bool hasDynamicMfgSupport)
+{
+    auto* cfg = Config::Instance();
+    const auto& gpu = IdentifyGpu::getPrimaryGpu();
+    const bool onLinux = State::Instance().isRunningOnLinux || gpu.usesVkd3dProton;
+    const int configuredFrames = cfg->FGDLSSGAmpereMfgMaxFrames.value_or_default();
+    const int maxCeiling = is3101Runtime ? 3 : 5;
+    const bool dynamicMfg = cfg->FGDLSSGOverrideForceDMFG.value_or(false) || cfg->FGDLSSGForceDMFG.value_or(false);
+    const int effectiveFrames = (dynamicMfg && hasDynamicMfgSupport) ? maxCeiling : configuredFrames;
+    const int maxFrames = ResolveMaxGeneratedFrames(effectiveFrames, onLinux, maxCeiling);
+
+    if (onLinux && configuredFrames == 1 && !dynamicMfg)
+    {
+        LOG_INFO("AmpereMfgLoader: On Linux/Proton with 2X FG (configured max frames 1); SetFlipConfig is stubbed in "
+                 "NvApiHooks to enable clean native 2X FG");
+    }
+
+    std::string kernelImg = cfg->FGDLSSGAmpereMfgKernelImage.value_or("Auto");
+    if (kernelImg != "PTX" && kernelImg != "Cubin")
+        kernelImg = "Auto";
+
+    if (kernelImg == "Auto")
+    {
+        std::string resolved = ResolveAutoKernelImage();
+        if (resolved != "Auto")
+        {
+            LOG_INFO("AmpereMfgLoader: Auto kernel image resolved to {} for GPU: {}", resolved,
+                     IdentifyGpu::getPrimaryGpu().name);
+            kernelImg = resolved;
+        }
+    }
+
+    int hwBilinear = cfg->FGDLSSGAmpereMfgHardwareBilinear.value_or_default() ? 1 : 0;
+    const std::string configuredRouter = cfg->FGDLSSGAmpereMfgRouter.value_or("Auto");
+    std::string router = ResolveRouter(static_cast<uint32_t>(gpu.nvidiaArchInfo.architecture_id), gpu.name,
+                                       configuredRouter, hasSm75Support);
+    const int optimized = cfg->FGDLSSGAmpereMfgOptimized.value_or(1);
+    const std::string preset = cfg->FGDLSSGAmpereMfgPreset.value_or("Auto");
+    const std::string spoofArch = cfg->FGDLSSGAmpereMfgSpoofArchToGame.value_or("Auto");
+    int logLevel = cfg->FGDLSSGAmpereMfgLogLevel.value_or(1);
+    if (logLevel < 0 || logLevel > 3)
+        logLevel = 1;
+
+    const float dynamicTargetFps = cfg->FGDLSSGFramerateTargetDMFG.value_or(0.0f);
+
+    LOG_INFO("AmpereMfgLoader: 0.3.x INI: MaxFrames: {}, Optimized: {}, Preset: {}, Router: {}, SpoofArch: {}, "
+             "LogLevel: {}, DynamicMFG: {}, TargetFPS: {} (hasSm75Support: {}, is3101Runtime: {}, "
+             "hasDynamicMfgSupport: {}) for GPU: {}",
+             maxFrames, optimized, preset, router, spoofArch, logLevel, dynamicMfg, dynamicTargetFps, hasSm75Support,
+             is3101Runtime, hasDynamicMfgSupport, IdentifyGpu::getPrimaryGpu().name);
+
+    return FormatIniContent030(maxFrames, optimized, preset, kernelImg, hwBilinear, router, logLevel, spoofArch,
+                               dynamicMfg, dynamicTargetFps, hasDynamicMfgSupport);
+}
+
+std::string GenerateIniContent(bool hasSm75Support, bool is3101Runtime)
+{
+    bool hasDynamicMfgSupport = false;
+    {
+        std::lock_guard lock(s_mutex);
+        hasDynamicMfgSupport = s_status.HasDynamicMfgSupport;
+    }
+    return GenerateIniContent(hasSm75Support, is3101Runtime, hasDynamicMfgSupport);
+}
+
+std::string GenerateIniContent(bool hasSm75Support) { return GenerateIniContent(hasSm75Support, false); }
+
+std::string GenerateIniContent()
+{
+    std::lock_guard lock(s_mutex);
+    return GenerateIniContent(s_status.HasSm75Support, s_status.Is3101Runtime, s_status.HasDynamicMfgSupport);
+}
+
+bool WriteCompanionIni()
+{
+    std::wstring dllPathStr;
+    bool hasSm75 = false;
+    bool is3101 = false;
+    bool hasDynamic = false;
+    {
+        std::lock_guard lock(s_mutex);
+        dllPathStr = s_status.LoadedDllPath;
+        hasSm75 = s_status.HasSm75Support;
+        is3101 = s_status.Is3101Runtime;
+        hasDynamic = s_status.HasDynamicMfgSupport;
+    }
+
+    if (dllPathStr.empty())
+        return false;
+
+    auto iniPath = std::filesystem::path(dllPathStr).parent_path() / L"dlssg_sm86.ini";
+    try
+    {
+        std::filesystem::create_directories(iniPath.parent_path());
+        std::ofstream iniFile(iniPath, std::ios::out | std::ios::trunc);
+        if (!iniFile.is_open())
+        {
+            std::lock_guard lock(s_mutex);
+            s_status.IniWritten = false;
+            s_status.ErrorMessage = "Failed to open dlssg_sm86.ini for writing.";
+            LOG_ERROR("AmpereMfgLoader: Failed to open {} for writing", wstring_to_string(iniPath.wstring()));
+            return false;
+        }
+        iniFile << GenerateIniContent(hasSm75, is3101, hasDynamic);
+        iniFile.close();
+        if (!iniFile)
+            throw std::runtime_error("Could not finish writing dlssg_sm86.ini");
+
+        {
+            std::lock_guard lock(s_mutex);
+            s_status.IniWritten = true;
+        }
+        LOG_INFO("AmpereMfgLoader: Successfully written companion INI at {}", wstring_to_string(iniPath.wstring()));
+
+        // When SilyNoMeta Dynamic MFG support is present, also synchronize [DLSSG-SM86-75-COMPANION] in ReShade.ini
+        if (hasDynamic)
+        {
+            auto reshadeIniPath = std::filesystem::path(dllPathStr).parent_path() / L"ReShade.ini";
+            std::string existingReshade;
+            std::ifstream existingFile(reshadeIniPath);
+            if (existingFile.is_open())
+            {
+                std::ostringstream ss;
+                ss << existingFile.rdbuf();
+                existingReshade = ss.str();
+                existingFile.close();
+            }
+
+            auto* cfg = Config::Instance();
+            const bool dynamicMfg =
+                cfg->FGDLSSGOverrideForceDMFG.value_or(false) || cfg->FGDLSSGForceDMFG.value_or(false);
+            const float dynamicTargetFps = cfg->FGDLSSGFramerateTargetDMFG.value_or(0.0f);
+            const int maxCeiling = is3101 ? 3 : 5;
+            const int explicitOverride = cfg->FGDLSSGOverrideInterpolationCount.value_or(0);
+            uint32_t mode = 0;
+            uint32_t multiplier = 0;
+            ResolveControlModeAndMultiplier(dynamicMfg, explicitOverride, maxCeiling, mode, multiplier);
+
+            std::string updatedReshade =
+                MergeReshadeCompanionContent(existingReshade, dynamicMfg, dynamicTargetFps, multiplier);
+            std::ofstream reshadeOut(reshadeIniPath, std::ios::out | std::ios::trunc);
+            if (reshadeOut.is_open())
+            {
+                reshadeOut << updatedReshade;
+                reshadeOut.close();
+                LOG_INFO("AmpereMfgLoader: Successfully synchronized companion section in {}",
+                         wstring_to_string(reshadeIniPath.wstring()));
+            }
+            else
+            {
+                LOG_WARN("AmpereMfgLoader: Could not open {} to synchronize companion section",
+                         wstring_to_string(reshadeIniPath.wstring()));
+            }
+        }
+
+        return true;
+    }
+    catch (const std::exception& ex)
+    {
+        std::lock_guard lock(s_mutex);
+        s_status.IniWritten = false;
+        s_status.ErrorMessage = std::string("Error writing dlssg_sm86.ini: ") + ex.what();
+        LOG_ERROR("AmpereMfgLoader: Exception writing INI: {}", ex.what());
+        return false;
+    }
+}
+
+void TrySetup()
+{
+    std::lock_guard lock(s_mutex);
+
+    auto* cfg = Config::Instance();
+
+    static const bool enabledAtStartup = cfg->FGDLSSGAmpereMfgUnlock.value_or_default();
+    if (!enabledAtStartup) return;
+    ProbeCandidate(false);
+
+    if (s_status.DllLoaded)
+        return;
+
+    if (!cfg->FGDLSSGAmpereMfgUnlock.value_or_default())
+        return;
+
+    if (s_setupAttempted)
+        return;
+    s_setupAttempted = true;
+
+    const auto& gpu = IdentifyGpu::getPrimaryGpu();
+    const bool onLinux = State::Instance().isRunningOnLinux || gpu.usesVkd3dProton;
+    const int configuredFrames = cfg->FGDLSSGAmpereMfgMaxFrames.value_or_default();
+
+    const std::string fallbackSetting = std::string("false");
+    const std::string fallbackType = ResolveFallbackFgType(std::string("fsrfg"));
+
+    s_status.Enabled = true;
+
+    // Mutual exclusion: fail if Ada MFG unlock is also enabled
+    if (cfg->FGDLSSGAdaMfgUnlock.value_or_default())
+    {
+        s_status.ErrorMessage = "Cannot enable SM86/SM75 MFG while Ada (RTX 40) MFG unlock is enabled.";
+        LOG_ERROR("AmpereMfgLoader: {}", s_status.ErrorMessage);
+        return;
+    }
+
+    // GPU guard: verify Nvidia Turing or Ampere architecture
+    if (gpu.vendorId != VendorId::Nvidia)
+    {
+        s_status.ErrorMessage = "SM86/SM75 MFG requires an NVIDIA GPU.";
+        LOG_ERROR("AmpereMfgLoader: {}", s_status.ErrorMessage);
+        return;
+    }
+
+    const uint32_t archId = static_cast<uint32_t>(gpu.nvidiaArchInfo.architecture_id);
+    const bool isAmpere =
+        IsAmpereArch(archId) ||
+        (gpu.name.find("RTX 30") != std::string::npos || gpu.name.find("Ampere") != std::string::npos ||
+         gpu.name.find("GA10") != std::string::npos || gpu.name.find("RTX A") != std::string::npos);
+
+    const bool isTuring =
+        IsTuringArch(archId) ||
+        (gpu.name.find("RTX 20") != std::string::npos || gpu.name.find("GTX 16") != std::string::npos ||
+         gpu.name.find("TITAN RTX") != std::string::npos || gpu.name.find("Turing") != std::string::npos ||
+         gpu.name.find("TU10") != std::string::npos || gpu.name.find("TU11") != std::string::npos);
+
+    if (!isAmpere && !isTuring)
+    {
+        s_status.ErrorMessage = std::format("SM86/SM75 MFG requires an RTX 20 series (Turing) or RTX 30 series "
+                                            "(Ampere) GPU. Detected arch 0x{:x} ({}).",
+                                            archId, gpu.name);
+        LOG_ERROR("AmpereMfgLoader: {}", s_status.ErrorMessage);
+        return;
+    }
+
+    // Locate dlssg_sm86.dll
+    auto basePath = Util::DllPath().parent_path();
+    std::filesystem::path dllPath;
+    std::error_code fileError;
+
+    auto probePath = [&](const std::filesystem::path& candidate) -> bool
+    { return !candidate.empty() && candidate != Util::DllPath() && std::filesystem::exists(candidate, fileError); };
+
+    auto mainOverride =
+        cfg->MainDllPath.has_value() ? std::filesystem::path(cfg->MainDllPath.value()) : std::filesystem::path();
+
+    // Standard candidates for root runtime (310.9)
+    std::filesystem::path rootCandidates[] = {
+        mainOverride.empty() ? std::filesystem::path() : mainOverride / L"dlssg_sm86" / L"dlssg_sm86.dll",
+        mainOverride.empty() ? std::filesystem::path() : mainOverride / L"dlssg_sm86" / L"version.dll",
+        mainOverride.empty() ? std::filesystem::path()
+                             : mainOverride / L"dlssg_for_sm86" / L"SilyNoMeta" / L"version.dll",
+        mainOverride.empty() ? std::filesystem::path()
+                             : mainOverride / L"dlssg_for_sm86" / L"sdli1995" / L"version.dll",
+        mainOverride.empty() ? std::filesystem::path() : mainOverride / L"dlssg_for_sm86" / L"version.dll",
+        basePath / L"OptiScaler" / L"dlssg_sm86" / L"dlssg_sm86.dll",
+        basePath / L"OptiScaler" / L"dlssg_sm86" / L"version.dll",
+        basePath / L"dlssg_sm86" / L"dlssg_sm86.dll",
+        basePath / L"dlssg_sm86" / L"version.dll",
+        basePath / L"dlssg_for_sm86" / L"SilyNoMeta" / L"version.dll",
+        basePath / L"dlssg_for_sm86" / L"sdli1995" / L"version.dll",
+        basePath / L"dlssg_for_sm86" / L"version.dll",
+        basePath / L"dlssg_for_sm86" / L"dlssg_sm86.dll",
+        basePath / L"dlssg_sm86.dll",
+        basePath / L"version.dll"
+    };
+
+    // Candidates for fallback 310.1 runtime (specifically providing SM75 kernels on legacy 0.3.0 builds)
+    std::filesystem::path legacy3101Candidates[] = {
+        mainOverride.empty() ? std::filesystem::path() : mainOverride / L"dlssg_sm86" / L"310.1" / L"dlssg_sm86.dll",
+        mainOverride.empty() ? std::filesystem::path() : mainOverride / L"dlssg_sm86" / L"310.1" / L"version.dll",
+        mainOverride.empty() ? std::filesystem::path()
+                             : mainOverride / L"dlssg_for_sm86" / L"sdli1995" / L"310.1" / L"version.dll",
+        basePath / L"OptiScaler" / L"dlssg_sm86" / L"310.1" / L"dlssg_sm86.dll",
+        basePath / L"OptiScaler" / L"dlssg_sm86" / L"310.1" / L"version.dll",
+        basePath / L"dlssg_sm86" / L"310.1" / L"dlssg_sm86.dll",
+        basePath / L"dlssg_sm86" / L"310.1" / L"version.dll",
+        basePath / L"dlssg_for_sm86" / L"sdli1995" / L"310.1" / L"version.dll",
+        basePath / L"310.1" / L"dlssg_sm86.dll",
+        basePath / L"310.1" / L"version.dll"
+    };
+
+    // Probe root runtime candidate first
+    std::filesystem::path rootDll;
+    for (const auto& candidate : rootCandidates)
+    {
+        if (probePath(candidate))
+        {
+            rootDll = candidate;
+            break;
+        }
+    }
+
+    if (isTuring)
+    {
+        // If root binary is found and already contains native SM75 support (0.3.1+ unified build),
+        // use it directly so Turing benefits from the latest 310.9 runtime, 6X MFG, and optimizations.
+        if (!rootDll.empty() && HasSm75KernelFamily(rootDll))
+        {
+            dllPath = rootDll;
+            LOG_INFO("AmpereMfgLoader: Turing GPU detected; root runtime at {} contains native SM75 support (0.3.1+)",
+                     wstring_to_string(dllPath.wstring()));
+        }
+        else
+        {
+            // Root binary lacks SM75 support (e.g. legacy 0.3.0 310.9 build); fallback to 310.1 runtime
+            for (const auto& candidate : legacy3101Candidates)
+            {
+                if (probePath(candidate))
+                {
+                    dllPath = candidate;
+                    LOG_INFO("AmpereMfgLoader: Turing GPU detected; root runtime lacks SM75 kernels, falling back to "
+                             "310.1 runtime at {}",
+                             wstring_to_string(dllPath.wstring()));
+                    break;
+                }
+            }
+
+            // If 310.1 was not found either, fall back to rootDll if available
+            if (dllPath.empty() && !rootDll.empty())
+            {
+                dllPath = rootDll;
+            }
+        }
+    }
+    else
+    {
+        // Ampere (or other supported Nvidia arch): use root runtime, or fallback to 310.1 if root not present
+        if (!rootDll.empty())
+        {
+            dllPath = rootDll;
+        }
+        else
+        {
+            for (const auto& candidate : legacy3101Candidates)
+            {
+                if (probePath(candidate))
+                {
+                    dllPath = candidate;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (dllPath.empty())
+    {
+        s_status.DllFound = false;
+        s_status.ErrorMessage = "dlssg_sm86.dll not found in OptiScaler/dlssg_sm86/ or dlssg_sm86/ subfolders.";
+        LOG_ERROR("AmpereMfgLoader: {}", s_status.ErrorMessage);
+        return;
+    }
+
+    s_status.DllFound = true;
+    s_status.LoadedDllPath = dllPath.wstring();
+    s_status.HasSm75Support = HasSm75KernelFamily(dllPath);
+    s_status.Is3101Runtime = Is3101Runtime(dllPath);
+    s_status.Variant = DetectModVariant(dllPath, &s_status.ModName);
+    s_status.HasDynamicMfgSupport = (s_status.Variant == ModVariant::SilyNoMeta) || HasDynamicMfgSupport(dllPath);
+
+    LOG_INFO("AmpereMfgLoader: Located binary at {}, Mod: {} (Variant: {}), HasSm75Support: {}, Is3101Runtime: {}, "
+             "HasDynamicMfgSupport: {}",
+             wstring_to_string(dllPath.wstring()), s_status.ModName, static_cast<uint32_t>(s_status.Variant),
+             s_status.HasSm75Support, s_status.Is3101Runtime, s_status.HasDynamicMfgSupport);
+
+    // Generate and write companion dlssg_sm86.ini beside the DLL
+    auto iniPath = dllPath.parent_path() / L"dlssg_sm86.ini";
+    try
+    {
+        std::filesystem::create_directories(iniPath.parent_path());
+        std::ofstream iniFile(iniPath, std::ios::out | std::ios::trunc);
+        if (!iniFile.is_open())
+        {
+            s_status.IniWritten = false;
+            s_status.ErrorMessage = "Failed to open dlssg_sm86.ini for writing.";
+            LOG_ERROR("AmpereMfgLoader: Failed to open {} for writing", wstring_to_string(iniPath.wstring()));
+            return;
+        }
+        iniFile << GenerateIniContent(s_status.HasSm75Support, s_status.Is3101Runtime, s_status.HasDynamicMfgSupport);
+        iniFile.close();
+        if (!iniFile)
+            throw std::runtime_error("Could not finish writing dlssg_sm86.ini");
+        s_status.IniWritten = true;
+
+        if (s_status.HasDynamicMfgSupport)
+        {
+            auto reshadeIniPath = dllPath.parent_path() / L"ReShade.ini";
+            std::string existingReshade;
+            std::ifstream existingFile(reshadeIniPath);
+            if (existingFile.is_open())
+            {
+                std::ostringstream ss;
+                ss << existingFile.rdbuf();
+                existingReshade = ss.str();
+                existingFile.close();
+            }
+
+            const bool dynamicMfg =
+                cfg->FGDLSSGOverrideForceDMFG.value_or(false) || cfg->FGDLSSGForceDMFG.value_or(false);
+            const float dynamicTargetFps = cfg->FGDLSSGFramerateTargetDMFG.value_or(0.0f);
+            const int maxCeiling = s_status.Is3101Runtime ? 3 : 5;
+            const int explicitOverride = cfg->FGDLSSGOverrideInterpolationCount.value_or(0);
+            uint32_t mode = 0;
+            uint32_t multiplier = 0;
+            ResolveControlModeAndMultiplier(dynamicMfg, explicitOverride, maxCeiling, mode, multiplier);
+
+            std::string updatedReshade =
+                MergeReshadeCompanionContent(existingReshade, dynamicMfg, dynamicTargetFps, multiplier);
+            std::ofstream reshadeOut(reshadeIniPath, std::ios::out | std::ios::trunc);
+            if (reshadeOut.is_open())
+            {
+                reshadeOut << updatedReshade;
+                reshadeOut.close();
+                LOG_INFO("AmpereMfgLoader: Successfully synchronized companion section in {}",
+                         wstring_to_string(reshadeIniPath.wstring()));
+            }
+            else
+            {
+                LOG_WARN("AmpereMfgLoader: Could not open {} to synchronize companion section",
+                         wstring_to_string(reshadeIniPath.wstring()));
+            }
+        }
+    }
+    catch (const std::exception& ex)
+    {
+        s_status.IniWritten = false;
+        s_status.ErrorMessage = std::string("Error writing dlssg_sm86.ini: ") + ex.what();
+        LOG_ERROR("AmpereMfgLoader: Exception writing INI: {}", ex.what());
+        return;
+    }
+
+    const bool dynamicMfg =
+        cfg->FGDLSSGOverrideForceDMFG.value_or_default() || cfg->FGDLSSGForceDMFG.value_or_default();
+    const bool shouldFallback = ShouldFallbackToFsrFg(configuredFrames, onLinux, true, fallbackSetting, dynamicMfg);
+    s_status.FsrFallbackActive = shouldFallback;
+    if (shouldFallback)
+    {
+        s_status.ErrorMessage.clear();
+        LOG_INFO("AmpereMfgLoader: On Linux with FG fallback active (mode: {}), falling back to internal {} instead of "
+                 "sideloading dlssg_sm86",
+                 fallbackSetting, (fallbackType == "xefg" ? "XeFG" : "FSR FG"));
+        return;
+    }
+
+    // Load dlssg_sm86.dll
+    NtdllProxy::Init();
+    LOG_INFO("AmpereMfgLoader: Loading {}", wstring_to_string(dllPath.wstring()));
+    HMODULE hMod = NtdllProxy::LoadLibraryExW_Ldr(dllPath.c_str(), NULL, 0);
+    if (!hMod)
+        hMod = LoadLibraryW(dllPath.c_str());
+
+    if (!hMod)
+    {
+        DWORD err = GetLastError();
+        s_status.DllLoaded = false;
+        s_status.ErrorMessage = "Failed to load dlssg_sm86.dll (error code " + std::to_string(err) + ").";
+        LOG_ERROR("AmpereMfgLoader: Failed to load dlssg_sm86.dll, error: {}", err);
+        return;
+    }
+
+    s_status.DllLoaded = true;
+    s_status.ErrorMessage.clear();
+    LOG_INFO("AmpereMfgLoader: SM86/SM75 MFG loaded successfully from {}", wstring_to_string(dllPath.wstring()));
+
+    // Store module handle for live programmatic control
+    s_hModule = hMod;
+
+    // Resolve SilyNoMeta v0.3.5-2 live control exports
+    s_pfnRequestControl = reinterpret_cast<PFN_DLSSG_RequestControl>(GetProcAddress(hMod, "DLSSG_RequestControl"));
+    s_pfnSetDisplayTarget =
+        reinterpret_cast<PFN_DLSSG_SetDisplayTarget>(GetProcAddress(hMod, "DLSSG_SetDisplayTarget"));
+    s_pfnRequestUI = reinterpret_cast<PFN_DLSSG_RequestUI>(GetProcAddress(hMod, "DLSSG_RequestUI"));
+
+    if (s_pfnRequestControl != nullptr || s_pfnSetDisplayTarget != nullptr)
+    {
+        s_status.LiveControlSupported = true;
+        LOG_INFO("AmpereMfgLoader: Live programmatic control exports resolved (RequestControl: {}, SetDisplayTarget: "
+                 "{}, RequestUI: {})",
+                 (s_pfnRequestControl != nullptr), (s_pfnSetDisplayTarget != nullptr), (s_pfnRequestUI != nullptr));
+
+        // Initial sync of live settings if configured
+        const bool dynamicMfg = cfg->FGDLSSGOverrideForceDMFG.value_or(false) || cfg->FGDLSSGForceDMFG.value_or(false);
+        const float targetFps = cfg->FGDLSSGFramerateTargetDMFG.value_or(0.0f);
+        const int maxCeiling = s_status.Is3101Runtime ? 3 : 5;
+        const int explicitOverride = cfg->FGDLSSGOverrideInterpolationCount.value_or(0);
+        uint32_t mode = 0;
+        uint32_t multiplier = 0;
+        ResolveControlModeAndMultiplier(dynamicMfg, explicitOverride, maxCeiling, mode, multiplier);
+        uint32_t targetInt = (targetFps > 0.0f) ? static_cast<uint32_t>(targetFps + 0.5f) : 0;
+
+        if (s_pfnRequestControl)
+        {
+            DLSSG_ControlRequest req {};
+            req.version = 1;
+            req.mode = mode;
+            req.multiplier = multiplier;
+            req.targetFPS = targetInt;
+            req.flags = 0;
+            s_status.LiveControlActive = s_pfnRequestControl(&req);
+        }
+    }
+
+    // SilyNoMeta ASI & UniversalProxy compatibility: when loaded under a custom filename (such as dlssg_sm86.dll),
+    // DllMain skips self-initialization to avoid conflict with standard proxy names.
+    // Explicitly invoke InitializeASI or DLSSG_UniversalProxy export so the mod installs hooks and starts worker
+    // threads.
+    using PFN_InitializeASI = void (*)();
+    auto pfnInitAsi = reinterpret_cast<PFN_InitializeASI>(GetProcAddress(hMod, "InitializeASI"));
+    if (pfnInitAsi != nullptr)
+    {
+        LOG_INFO("AmpereMfgLoader: Invoking InitializeASI() export on {}", wstring_to_string(dllPath.wstring()));
+        pfnInitAsi();
+        s_status.AsiInitInvoked = true;
+    }
+    else
+    {
+        using PFN_UniversalProxy = void (*)();
+        auto pfnUniversalProxy = reinterpret_cast<PFN_UniversalProxy>(GetProcAddress(hMod, "DLSSG_UniversalProxy"));
+        if (pfnUniversalProxy != nullptr)
+        {
+            LOG_INFO("AmpereMfgLoader: Invoking DLSSG_UniversalProxy() export on {}",
+                     wstring_to_string(dllPath.wstring()));
+            pfnUniversalProxy();
+            s_status.AsiInitInvoked = true;
+        }
+    }
+}
+
+} // namespace AmpereMfgLoader

@@ -18,6 +18,7 @@
 //   Resolve  proxy + model answer + untouched copy -> the frame, edited
 
 #include "DlssNr_Common.h"
+#include "DlssNr_Spatial.h"
 
 #include <d3d12.h>
 #include <d3dx/d3dx12.h>
@@ -29,10 +30,9 @@
 // there has to be enough for three passes times the deepest pipeline we might sit behind.
 // Descriptor and constant slots, consumed one per dispatch and reused round-robin with no fence.
 //
-// The shader still records at most meter + encode + downsample + resolve per frame. Extra model layers
-// are NGX evaluates and do not consume this ring; their A/B resources and feature histories are
-// persistent. Forty-eight slots leave twelve fully populated frames before descriptor/constant reuse.
-#define DLSSNR_NUM_OF_HEAPS 48
+// Includes optional interpass feedback (up to 29 dispatches) and spatial pack/guide/unpack.
+// 384 slots cover eight frames even with the maximum multipass dispatch count.
+#define DLSSNR_NUM_OF_HEAPS 384
 
 class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
 {
@@ -48,6 +48,11 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     ID3D12Resource* _constantBuffers[DLSSNR_NUM_OF_HEAPS] = {};
 
     uint32_t _heapIndex = 0;
+    ID3D12PipelineState* _spatialPipeline = nullptr;
+    ID3D12PipelineState* _spatialGuidesPipeline = nullptr;
+    bool DispatchSpatial(ID3D12GraphicsCommandList* cmd, const DlssNr::Spatial::Constants& constants,
+                         ID3D12Resource* source, ID3D12Resource* depthOrAnswer, ID3D12Resource* motion,
+                         ID3D12Resource* target, ID3D12Resource* second);
 
     // The shader reads five inputs and writes two, and not every mode uses all of them. Unused slots
     // still need a view bound -- an unbound descriptor is not an empty read, it is a read from
@@ -85,5 +90,5 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                   // nothing reads it now and every caller passes nullptr. Kept only so the binding
                   // table keeps its shape -- not evidence that temporal accumulation exists.
                   ID3D12Resource* InPrevEdit, ID3D12Resource* OutTarget,
-                  ID3D12Resource* OutKeep);
+                  ID3D12Resource* OutKeep, ID3D12PipelineState* pipeline = nullptr);
 };

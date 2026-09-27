@@ -20,6 +20,10 @@ class GpuLifetime
     GpuLifetime(const GpuLifetime&) = delete;
     GpuLifetime& operator=(const GpuLifetime&) = delete;
     void Record(ID3D12GraphicsCommandList* commands);
+    // Owner must outlive the returned probe. Never blocks the rendering thread.
+    std::function<bool()> CompletionProbe(ID3D12GraphicsCommandList* commands);
+    // Safe to overwrite resources only after completion AND reset/destruction of the recording.
+    std::function<bool()> ReuseProbe(ID3D12GraphicsCommandList* commands);
     // One reusable monotonic fence per queue; aliases are normalized at every notification.
     // Only call after the real ExecuteCommandLists or a successful command-list Reset.
     void Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);

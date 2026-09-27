@@ -621,6 +621,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="gpu_time\GpuTime_Dx12.cpp" />
     <ClCompile Include="hooks\Amdxc64_Hooks.cpp" />
     <ClCompile Include="framegen\dlssg\DLSSG_Dx12.cpp" />
+    <ClCompile Include="framegen\dlssg\AmpereMfgLoader.cpp" />
     <ClCompile Include="framegen\dlssg\MfgUnlock.cpp" />
     <ClCompile Include="framegen\ffx\FSRFG_Dx12.cpp" />
     <ClCompile Include="framegen\IFGFeature.cpp" />
@@ -845,6 +846,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="dlssnr\DlssNr_ExposureScan.cpp" />
     <ClCompile Include="dlssnr\DlssNr_GpuLifetime.cpp" />
     <ClInclude Include="dlssnr\DlssNr_GpuLifetime.h" />
+    <ClInclude Include="dlssnr\DlssNrVitReuse.h" />
+    <ClInclude Include="dlssnr\NrModelSize.h" />
     <ClCompile Include="dlssnr\amd\AmdBridge.cpp" />
     <ClCompile Include="dlssnr\amd\AmdPreSr.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClInclude Include="dlssnr\amd\AmdBridge.h" />

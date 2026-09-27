@@ -154,6 +154,29 @@ void GpuLifetime::Record(ID3D12GraphicsCommandList* commands)
     impl->currentGeneration.push_back(use);
     impl->recordings.push_back(std::move(use));
 }
+std::function<bool()> GpuLifetime::CompletionProbe(ID3D12GraphicsCommandList* commands)
+{
+    std::lock_guard lock(impl->mutex);
+    commands = Identity(commands);
+    for (const auto& use : impl->recordings)
+        if (use->open && use->commands == commands)
+            return [this, use] {
+                std::lock_guard lock(impl->mutex);
+                return !use->signalFailed && !use->completions.empty() &&
+                    std::all_of(use->completions.begin(), use->completions.end(),
+                                [](const auto& completion) { return completion.Complete(); });
+            };
+    return [] { return false; };
+}
+std::function<bool()> GpuLifetime::ReuseProbe(ID3D12GraphicsCommandList* commands)
+{
+    std::lock_guard lock(impl->mutex);
+    commands = Identity(commands);
+    for (const auto& use : impl->recordings)
+        if (use->open && use->commands == commands)
+            return [this, use] { std::lock_guard lock(impl->mutex); return use->Complete(); };
+    return [] { return false; };
+}
 void GpuLifetime::Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
 {
     std::lock_guard lock(impl->mutex);

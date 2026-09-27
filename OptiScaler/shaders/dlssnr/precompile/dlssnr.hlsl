@@ -37,6 +37,8 @@ cbuffer Params : register(b0)
     float gEnvironmentColour;
     uint gResidualRejection;
     float gReferencePreExposure;
+    float gPassFeedback;
+    uint gSpatialResidual;
 };
 
 // Bringing an impossible colour back into a possible one.
@@ -577,6 +579,14 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         gTarget[id.xy] = float4(reference + saturate(fraction) * delta, 1.0);
         return;
     }
+    if (gMode == 13)
+    {
+        float4 raw = gSource.Load(int3(id.xy, 0));
+        float3 proxy = SanitizeFinite3(gModel.Load(int3(id.xy, 0)).rgb, 0.5);
+        float3 restored = CubeScaleResidual(proxy, SanitizeFinite3(raw.rgb, 0.5));
+        gTarget[id.xy] = float4(saturate(lerp(proxy, restored, saturate(gPassFeedback))), raw.a);
+        return;
+    }
     if (gMode == 7)
     {
         gTarget[id.xy] = 1.0;
@@ -962,7 +972,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     gSource.GetDimensions(proxyW, proxyH);
     const bool modelRanSmall = proxyW != gWidth || proxyH != gHeight;
 
-    if (gTransfer == 1 && modelRanSmall)
+    if (gTransfer == 1 && (modelRanSmall || gSpatialResidual != 0))
     {
         // Saturated, because that is what the encode does and this has to reproduce it exactly.
         //
