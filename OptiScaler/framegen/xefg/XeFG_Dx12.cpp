@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "XeFGCamera.h"
 #include "XeFG_Dx12.h"
+#include "XeFGHdr.h"
 #include <hudfix/Hudfix_Dx12.h>
 #include <menu/menu_overlay_dx.h>
 #include <resource_tracking/ResTrack_dx12.h>
@@ -679,7 +680,7 @@ void XeFG_Dx12::Deactivate()
             auto closeResult = _uiCommandList[fIndex]->Close();
 
             if (closeResult == S_OK)
-                _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_uiCommandList[fIndex]);
+                Hdr10::ExecuteCommands(_gameCommandQueue, 1, (ID3D12CommandList**) &_uiCommandList[fIndex]);
             else
                 LOG_ERROR("_uiCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
 
@@ -1300,7 +1301,7 @@ bool XeFG_Dx12::Present()
     auto fIndex = GetIndexWillBeDispatched();
     LOG_DEBUG("fIndex: {}", fIndex);
 
-    if (Config::Instance()->FGDrawUIOverFG.value_or_default())
+    if (!Hdr10::Active() && Config::Instance()->FGDrawUIOverFG.value_or_default())
     {
         auto ui = GetResource(FG_ResourceType::UIColor, fIndex);
         if (ui && (ui->validity == FG_ResourceValidity::UntilPresent ||
@@ -1336,7 +1337,7 @@ bool XeFG_Dx12::Present()
 
     if (IsActive() && !IsPaused())
     {
-        if (State::Instance().fgHudlessCompare)
+        if (!Hdr10::Active() && State::Instance().fgHudlessCompare)
         {
             auto hudless = GetResource(FG_ResourceType::HudlessColor, fIndex);
             if (hudless && (hudless->validity == FG_ResourceValidity::UntilPresent ||
@@ -1376,7 +1377,7 @@ bool XeFG_Dx12::Present()
             auto closeResult = _uiCommandList[fIndex]->Close();
 
             if (closeResult == S_OK)
-                _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_uiCommandList[fIndex]);
+                Hdr10::ExecuteCommands(_gameCommandQueue, 1, (ID3D12CommandList**) &_uiCommandList[fIndex]);
             else
                 LOG_ERROR("_uiCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
 
@@ -1435,6 +1436,12 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
         inputResource = &matched;
     }
     auto& type = inputResource->type;
+
+    // Use XeFG's backbuffer + HUD-less composition for OptiHDR. An SDR UI-only
+    // texture cannot be alpha-blended in PQ space (and RGB10A2 loses alpha
+    // precision). The native HUD is already in the converted backbuffer.
+    if (Hdr10::Active() && type == FG_ResourceType::UIColor)
+        return false;
 
     std::unique_lock<std::shared_mutex> lock(_resourceMutex[fIndex]);
 
@@ -1616,6 +1623,26 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
         }
 
         xefg_swapchain_d3d12_resource_data_t resourceParam = GetResourceData(type, fIndex);
+        bool changedCopySourceState = false;
+
+        if (Hdr10::Active() && type == FG_ResourceType::HudlessColor)
+        {
+            if (!fResource->cmdList) fResource->cmdList = GetUICommandList(fIndex);
+            if (!XeFGHdr::PrepareHudless(_device, fResource->cmdList, resourceParam))
+            {
+                LOG_ERROR("XeFG OptiHDR HUD-less conversion failed; disabling FG rather than tagging SDR with HDR10 output");
+                Deactivate();
+                return false;
+            }
+            // The SDK owns a same-list copy; do not re-tag the SDR source at Present.
+            fResource->validity = FG_ResourceValidity::ValidNow;
+            static bool reported = false;
+            if (!reported)
+            {
+                LOG_INFO("XeFG OptiHDR: RGB10A2 PQ HUD-less input, immediate SDK copy, HUD extracted from HDR backbuffer");
+                reported = true;
+            }
+        }
 
         // SDK version 2.1.1 fixes those issues
         if (version < feature_version { 1, 2, 2 })
@@ -1629,11 +1656,12 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
             // HACK: XeFG seems to crash if the resource is in COPY_SOURCE state
             // even though the docs say it's the preferred state
             // https://github.com/intel/xess/issues/47
-            if (inputResource->state == D3D12_RESOURCE_STATE_COPY_SOURCE)
+            if (resourceParam.incomingState == D3D12_RESOURCE_STATE_COPY_SOURCE)
             {
-                ResourceBarrier(inputResource->cmdList, inputResource->resource, inputResource->state,
+                ResourceBarrier(fResource->cmdList, resourceParam.pResource, resourceParam.incomingState,
                                 D3D12_RESOURCE_STATE_COPY_DEST);
 
+                changedCopySourceState = true;
                 resourceParam.incomingState = D3D12_RESOURCE_STATE_COPY_DEST;
             }
         }
@@ -1663,10 +1691,10 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
         }
 
         // Potentially we don't need to restore but do it just to be safe
-        if (inputResource->state == D3D12_RESOURCE_STATE_COPY_SOURCE)
+        if (changedCopySourceState)
         {
-            ResourceBarrier(inputResource->cmdList, inputResource->resource, D3D12_RESOURCE_STATE_COPY_DEST,
-                            inputResource->state);
+            ResourceBarrier(fResource->cmdList, resourceParam.pResource, D3D12_RESOURCE_STATE_COPY_DEST,
+                            D3D12_RESOURCE_STATE_COPY_SOURCE);
         }
 
         SetResourceReady(type, fIndex);

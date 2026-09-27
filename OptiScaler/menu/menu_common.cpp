@@ -3074,7 +3074,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         bool hdr = config->FfxivHDR.value_or_default();
         if (ImGui::Checkbox("Enable OptiScaler HDR (restart)", &hdr)) config->FfxivHDR = hdr;
         ImGui::TextWrapped("%s", Hdr10::Status().c_str());
-        ImGui::TextWrapped("Requires Windows HDR. Disable RTX HDR and Auto HDR for this test. DLSS-G or FG off only. Game HUD shares the highlight curve.");
+        ImGui::TextWrapped("Requires Windows HDR. Disable RTX HDR and Auto HDR. Supports DLSS-G, XeFG, or FG off. Game HUD shares the highlight curve. XeFG extracts the HUD from the HDR image; separate SDR UI overlays and HUD comparison are bypassed.");
         float peak=config->FfxivHDRPeak.value_or_default(), paper=config->FfxivHDRPaper.value_or_default(), expansion=config->FfxivHDRExpansion.value_or_default();
         if(ImGui::SliderFloat("Peak brightness (nits)",&peak,400,4000,"%.0f"))config->FfxivHDRPeak=peak;
         if(ImGui::SliderFloat("Paper white (nits)",&paper,80,400,"%.0f"))config->FfxivHDRPaper=paper;

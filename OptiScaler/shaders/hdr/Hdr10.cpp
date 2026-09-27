@@ -54,7 +54,7 @@ bool Init(Packet& p,ID3D12Device*d,UINT w,UINT h){
 bool Request(HWND hwnd){
  if(!Config::Instance()->FfxivHDR.value_or_default() || State::Instance().gameExe!="ffxiv_dx11.exe")return false;
  const auto fg=Config::Instance()->FGOutput.value_or_default();
- if(fg!=FGOutput::NoFG && fg!=FGOutput::DLSSG){Message("HDR test requires DLSS-G or FG off");return false;}
+ if(fg!=FGOutput::NoFG && fg!=FGOutput::DLSSG && fg!=FGOutput::XeFG){Message("OptiHDR requires DLSS-G, XeFG, or FG off");return false;}
  ComPtr<IDXGIFactory1> factory; if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))return false;
  auto monitor=MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST);
  for(UINT i=0;;++i){ComPtr<IDXGIAdapter1>a;if(factory->EnumAdapters1(i,&a)!=S_OK)break;

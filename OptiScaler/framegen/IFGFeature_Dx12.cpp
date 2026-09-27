@@ -2,6 +2,7 @@
 #include "IFGFeature_Dx12.h"
 #include <State.h>
 #include <Config.h>
+#include <shaders/hdr/Hdr10.h>
 
 #include <magic_enum.hpp>
 
@@ -130,7 +131,7 @@ bool IFGFeature_Dx12::SubmitUICommandList(UINT index)
         return false;
     }
 
-    _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_uiCommandList[index]);
+    Hdr10::ExecuteCommands(_gameCommandQueue, 1, (ID3D12CommandList**) &_uiCommandList[index]);
     _uiCommandListResetted[index] = false;
 
     auto signalResult = _gameCommandQueue->Signal(_uiFence, _uiAllocatorFenceValues[index]);
@@ -181,7 +182,7 @@ ID3D12GraphicsCommandList* IFGFeature_Dx12::GetUICommandList(int index)
 
         if (result == S_OK)
         {
-            result = _uiCommandList[index]->Reset(_uiCommandAllocator[index], nullptr);
+            result = Hdr10::ResetCommands(_uiCommandList[index], _uiCommandAllocator[index]);
 
             if (result == S_OK)
             {
