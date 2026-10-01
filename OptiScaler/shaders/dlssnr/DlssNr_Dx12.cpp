@@ -1,6 +1,7 @@
 #include "pch.h"
 #include <dlssnr/PassProfiles.h>
 #include <dlssnr/NrModelSize.h>
+#include <dlssnr/PreSrModelHints.h>
 
 #include <set>
 

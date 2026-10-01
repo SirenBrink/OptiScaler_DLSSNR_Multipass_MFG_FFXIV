@@ -771,8 +771,8 @@ template <HasDefaultValue B> void MenuCommon::AddDLSSRenderPreset(std::string na
             "Reserved; DLSS 310.9.1 falls back to its default behavior." },
         { NVSDK_NGX_DLSS_Hint_Render_Preset_O, "PRESET O",
             "Reserved; DLSS 310.9.1 falls back to its default behavior." },
-        { NV_PRESET_LATEST, "Latest",
-            "Latest supported by the dll" }
+        { NV_PRESET_LATEST, "Automatic (DLL default)",
+            "Uses the runtime default for each quality mode. Previously labelled Latest; that value is not a valid NGX preset." }
     };
     // clang-format on
 
@@ -2981,6 +2981,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
                 ImGui::PushItemWidth(135.0f * menuResScale);
 
                 AddDLSSRenderPreset("Model preset", &comboPreset);
+                ShowHelpMarker("Model presets are requests. The loaded DLSS runtime may reject unavailable presets and select its default. NVIDIA driver overrides can also take priority.");
 
                 ImGui::PopItemWidth();
                 ImGui::EndDisabled();

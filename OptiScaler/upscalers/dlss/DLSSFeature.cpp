@@ -1,6 +1,7 @@
 #include <pch.h>
 #include <Config.h>
 #include <Util.h>
+#include <dlssnr/PreSrModelHints.h>
 
 #include "DLSSFeature.h"
 
@@ -256,6 +257,18 @@ void DLSSFeature::ProcessInitParams(NVSDK_NGX_Parameter* InParameters)
         }
 
         State::Instance().dlssPresetsOverridenByOpti = false;
+    }
+
+    // Normalize the legacy UI "Latest" sentinel at the NGX boundary.
+    for(const char* key : {NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA,
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality,
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced,
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance}) {
+        uint32_t preset=0;
+        if(InParameters->Get(key,&preset)==NVSDK_NGX_Result_Success && preset==NV_PRESET_LATEST)
+            InParameters->Set(key,DlssModelHints::NgxPreset(preset));
     }
 
     UINT perfQ = NVSDK_NGX_PerfQuality_Value_Balanced;

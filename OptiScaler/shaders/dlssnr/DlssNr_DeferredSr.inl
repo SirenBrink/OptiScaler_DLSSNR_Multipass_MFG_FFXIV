@@ -40,6 +40,7 @@ struct HalfRate
 };
 struct Generation
 {
+    DlssModelHints::Settings modelHints;
     ID3D12Device* device = nullptr;
     ID3D12CommandQueue* queue = nullptr; // identity/reference only; no private submissions
     unsigned w = 0, h = 0, outW = 0, outH = 0, flags = 0;
@@ -517,10 +518,27 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
         flags = (flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
     const bool splitWork = wantsHalf && !sampleAndHold && State::Instance().gameExe == "ffxiv_dx11.exe" &&
         cfg.DlssNrSplitFrameWork.value_or_default();
+    static constexpr std::array<const char*,6> presetKeys {
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA,
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality,
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced,
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
+        NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance };
+    std::array<uint32_t,6> sourcePresets{};
+    for(size_t i=0;i<presetKeys.size();++i)sourcePresets[i]=UInt(source,presetKeys[i]);
+    const auto option=[](const auto& value)->std::optional<uint32_t>{
+        return value.has_value()?std::optional<uint32_t>(value.value()):std::nullopt;
+    };
+    const auto modelHints=DlssModelHints::Resolve(
+        UInt(source,NVSDK_NGX_Parameter_PerfQualityValue,NVSDK_NGX_PerfQuality_Value_MaxPerf),
+        sourcePresets,cfg.RenderPresetOverride.value_or_default(),option(cfg.RenderPresetForAll),
+        {option(cfg.RenderPresetDLAA),option(cfg.RenderPresetUltraQuality),option(cfg.RenderPresetQuality),
+         option(cfg.RenderPresetBalanced),option(cfg.RenderPresetPerformance),option(cfg.RenderPresetUltraPerformance)});
     if (current && (current->device != device || current->queue != ownerQueue || current->w != active->width ||
         current->h != active->height || current->outW != outDesc.Width || current->outH != outDesc.Height ||
         current->inputFormat != inDesc.Format || current->outputFormat != outDesc.Format || current->flags != flags ||
-        current->halfRequested != wantsHalf ||
+        current->modelHints != modelHints || current->halfRequested != wantsHalf ||
         current->splitWork != splitWork ||
         current->sampleAndHold != sampleAndHold ||
         current->approximateCamera != cfg.DlssNrResidualFgApproxCamera.value_or_default()))
@@ -535,6 +553,7 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
         current->w = active->width; current->h = active->height;
         current->outW = (unsigned)outDesc.Width; current->outH = outDesc.Height;
         current->inputFormat = inDesc.Format; current->outputFormat = outDesc.Format; current->flags = flags;
+        current->modelHints = modelHints;
         current->halfRequested = wantsHalf;
         current->splitWork = splitWork;
         current->sampleAndHold = sampleAndHold;
@@ -583,8 +602,11 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
         p->Set(NVSDK_NGX_Parameter_Width, g.w); p->Set(NVSDK_NGX_Parameter_Height, g.h);
         p->Set(NVSDK_NGX_Parameter_OutWidth, g.outW); p->Set(NVSDK_NGX_Parameter_OutHeight, g.outH);
         p->Set(NVSDK_NGX_Parameter_CreationNodeMask, 1u); p->Set(NVSDK_NGX_Parameter_VisibilityNodeMask, 1u);
-        p->Set(NVSDK_NGX_Parameter_PerfQualityValue, (int)UInt(source, NVSDK_NGX_Parameter_PerfQualityValue,
-                                                           NVSDK_NGX_PerfQuality_Value_MaxPerf));
+        p->Set(NVSDK_NGX_Parameter_PerfQualityValue, (int)g.modelHints.quality);
+        for(size_t i=0;i<presetKeys.size();++i)p->Set(presetKeys[i],g.modelHints.presets[i]);
+        LOG_INFO("PreSR private DLSS hints: quality={}, DLAA={}, UltraQuality={}, Quality={}, Balanced={}, Performance={}, UltraPerformance={}",
+            g.modelHints.quality,g.modelHints.presets[0],g.modelHints.presets[1],g.modelHints.presets[2],
+            g.modelHints.presets[3],g.modelHints.presets[4],g.modelHints.presets[5]);
         // LDR biased carrier, constant unit exposure, no auto-exposure/sharpening. No main-game presets
         // or feature handle are overwritten. NGX is called directly, bypassing OptiScaler's NR hooks.
         p->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, g.flags);
