@@ -180,7 +180,7 @@ void RenderMenu(Config* config, float menuResScale)
         bool vitReuse = config->DlssNrVitEvery.value_or_default() > 1;
         if (ImGui::Checkbox("Reuse NR bottleneck every second evaluation (experimental)", &vitReuse))
             config->DlssNrVitEvery = vitReuse ? 2u : 1u;
-        HelpMarker("NVIDIA FP8 only, verified kernel module only. May cause stale detail during motion. Off by default; hybrid mode always computes fully.");
+        HelpMarker("Requires a verified NVIDIA NR kernel module. Alternate/patched runtimes may remain unavailable; the status explains why. May cause stale detail during motion. Off by default; hybrid mode always computes fully.");
         if (vitReuse) ImGui::TextWrapped("%s", DlssNrNative::VitStatus().c_str());
         ImGui::EndDisabled();
         ImGui::BeginDisabled(config->DlssNrPasses.value_or_default() < 2 || !amdStatus.empty());

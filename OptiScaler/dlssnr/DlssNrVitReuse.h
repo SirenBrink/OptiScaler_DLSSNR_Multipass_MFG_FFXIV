@@ -44,11 +44,13 @@ public:
         auto it = entries.find(function);
         return it == entries.end() ? Role::None : it->second.role;
     }
-    void RemoveFunction(Handle function) { entries.erase(function); }
-    void RemoveModule(Handle module) {
+    bool RemoveFunction(Handle function) { return entries.erase(function) != 0; }
+    bool RemoveModule(Handle module) {
+        bool removed = false;
         for (auto it = entries.begin(); it != entries.end();)
-            if (it->second.module == module) it = entries.erase(it);
+            if (it->second.module == module) { it = entries.erase(it); removed = true; }
             else ++it;
+        return removed;
     }
 };
 
