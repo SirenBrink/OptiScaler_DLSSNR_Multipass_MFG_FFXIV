@@ -908,6 +908,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             FfxivHDRContrast.set_from_config(readFloat("HDR", "Contrast"));
             FfxivHDRSaturation.set_from_config(readFloat("HDR", "Saturation"));
             FfxivHDRVibrance.set_from_config(readFloat("HDR", "Vibrance"));
+            FfxivHDRScreenshotKey.set_from_config(readInt("HDR", "ScreenshotKey"));
+            FfxivHDRScreenshotFormat.set_from_config(readInt("HDR", "ScreenshotFormat"));
             ForceHDR.set_from_config(readBool("HDR", "ForceHDR"));
             UseHDR10.set_from_config(readBool("HDR", "UseHDR10"));
             SkipColorSpace.set_from_config(readBool("HDR", "SkipColorSpace"));
@@ -1358,6 +1360,11 @@ bool Config::SaveIni()
     ini.SetValue("HDR", "Contrast", GetFloatValue(Instance()->FfxivHDRContrast.value_for_config()).c_str());
     ini.SetValue("HDR", "Saturation", GetFloatValue(Instance()->FfxivHDRSaturation.value_for_config()).c_str());
     ini.SetValue("HDR", "Vibrance", GetFloatValue(Instance()->FfxivHDRVibrance.value_for_config()).c_str());
+    ini.Delete("HDR", "MenuNits"); // Retired: menu HDR mapping is automatic.
+    ini.Delete("HDR", "ScreenshotHotkey"); // Retire the old fixed Ctrl+Alt+F12 toggle.
+    auto screenshotKey = Instance()->FfxivHDRScreenshotKey.value_for_config();
+    ini.SetValue("HDR", "ScreenshotKey", GetIntValue(screenshotKey, screenshotKey > 0).c_str());
+    ini.SetValue("HDR", "ScreenshotFormat", GetIntValue(Instance()->FfxivHDRScreenshotFormat.value_for_config()).c_str());
     ini.SetValue("DlssNr", "VitEvery", GetIntValue(Instance()->DlssNrVitEvery.value_for_config()).c_str());
     ini.SetValue("DlssNr", "SpatialCompression", GetBoolValue(Instance()->DlssNrSpatialCompression.value_for_config()).c_str());
     ini.SetValue("DlssNr", "SpatialCenterX", GetFloatValue(Instance()->DlssNrSpatialCenterX.value_for_config()).c_str());

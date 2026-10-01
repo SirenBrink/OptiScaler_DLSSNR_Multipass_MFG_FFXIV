@@ -52,9 +52,11 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     bool InitCopyCmdList();
     void DestroyCopyCmdList();
     bool WaitForUIAllocator(UINT index);
+    bool WaitForSCAllocator(UINT index);
     bool SubmitUICommandList(UINT index);
 
   protected:
+    bool SubmitSCCommandList(UINT index);
     struct GuideSnapshot
     {
         ID3D12Resource* resource = nullptr;
@@ -87,6 +89,8 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     ID3D12CommandAllocator* _scCommandAllocator[BUFFER_COUNT] {};
     bool _scCommandListResetted[BUFFER_COUNT] { false, false, false, false };
     UINT64 _scAllocatorFenceValues[BUFFER_COUNT] {};
+    UINT64 _scFenceValue = 0;
+    bool _scSubmissionFailed = false;
     ID3D12Fence* _scFence = nullptr;
     HANDLE _scFenceEvent = nullptr;
 

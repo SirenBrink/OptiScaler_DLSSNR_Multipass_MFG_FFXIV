@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <cstring>
 #include "../OptiScaler/shaders/hdr/Hdr10.h"
+#include "../OptiScaler/shaders/hdr/HdrScreenshotReadback.h"
 #include "../OptiScaler/framegen/xefg/XeFGHdr.h"
 using Microsoft::WRL::ComPtr;
 void check(HRESULT h){if(FAILED(h))throw std::runtime_error("D3D12 failure");}
@@ -30,8 +31,22 @@ int main(int argc,char** argv)try{
    out=tag.pResource;
   }else out=Hdr10::Convert(d.Get(),c.Get(),src.Get(),D3D12_RESOURCE_STATE_COPY_DEST);if(!out){if(untracked && frame==33){puts("PASS: negative control reproduces original 32-packet exhaustion without notifications");CloseHandle(event);return 0;}throw std::runtime_error("conversion/pool failed");}
   D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;b.Transition={out,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE};c->ResourceBarrier(1,&b);
+  Hdr10::Screenshot::Readback screenshot;
+  if(SUCCEEDED(screenshot.Allocate(d.Get(),src.Get())))throw std::runtime_error("SDR screenshot source accepted");
+  check(screenshot.Allocate(d.Get(),out));screenshot.Record(c.Get());
+  Hdr10::Screenshot::Readback sdrScreenshot;
+  if(SUCCEEDED(sdrScreenshot.Allocate(d.Get(),out,false)))throw std::runtime_error("HDR source accepted as original SDR");
+  check(sdrScreenshot.Allocate(d.Get(),src.Get(),false));sdrScreenshot.RecordPreservingState(c.Get(),D3D12_RESOURCE_STATE_COPY_DEST);
   from={};from.pResource=out;from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;dst={};dst.pResource=read.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;dst.PlacedFootprint.Footprint={DXGI_FORMAT_R10G10B10A2_UNORM,4,1,1,256};c->CopyTextureRegion(&dst,0,0,0,&from,nullptr);b.Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_SOURCE;b.Transition.StateAfter=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;c->ResourceBarrier(1,&b);check(c->Close());ID3D12CommandList*l[]={c.Get()};if(untracked)q->ExecuteCommandLists(1,l);else Hdr10::ExecuteCommands(q.Get(),1,l);check(q->Signal(fence.Get(),frame));check(fence->SetEventOnCompletion(frame,event));WaitForSingleObject(event,10000);
   check(read->Map(0,nullptr,&ptr));auto*p=(unsigned*)ptr;if((p[0]&0x3fffffff)!=0 || (p[1]&1023)<590 || (p[1]&1023)>600)throw std::runtime_error("HDR10 pixel incorrect");read->Unmap(0,nullptr);
+  check(q->Signal(screenshot.fence.Get(),1));check(screenshot.fence->SetEventOnCompletion(1,event));
+  if(WaitForSingleObject(event,10000)!=WAIT_OBJECT_0)throw std::runtime_error("screenshot fence timeout");
+  check(screenshot.readback->Map(0,nullptr,&ptr));p=(unsigned*)((BYTE*)ptr+screenshot.footprint.Offset);
+  if((p[0]&0x3fffffff)!=0 || (p[1]&1023)<590 || (p[1]&1023)>600)throw std::runtime_error("screenshot pixel incorrect");
+  screenshot.readback->Unmap(0,nullptr);
+  check(sdrScreenshot.readback->Map(0,nullptr,&ptr));p=(unsigned*)((BYTE*)ptr+sdrScreenshot.footprint.Offset);
+  if(p[0]!=0 || p[1]!=0xffffffff)throw std::runtime_error("pre-HDR screenshot source changed");
+  sdrScreenshot.readback->Unmap(0,nullptr);
  }
  if(untracked)throw std::runtime_error("negative control failed to reproduce exhaustion");
  CloseHandle(event);puts("PASS: production DX12 HDR converter, 10-bit output, black/203-nit white, 256 bridge-owned submission/reset cycles without global tracking hooks");return 0;

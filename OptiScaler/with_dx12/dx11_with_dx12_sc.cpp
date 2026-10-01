@@ -1,5 +1,6 @@
 #include "pch.h"
 #include <shaders/hdr/Hdr10.h>
+#include <shaders/hdr/HdrScreenshot.h>
 #include <misc/FfxivLightingCapture.h>
 #include <misc/companion/Companion.h>
 #include "dx11_with_dx12_sc.h"
@@ -991,8 +992,7 @@ bool Dx11wDx12SC::_WaitDx11ThenDx12()
 
 bool Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
 {
-    if (_copyFence == nullptr || _copyFenceEvent == nullptr)
-        return true;
+    if (_copySubmissionFailed) return false;
 
     if (slot >= _copyAllocatorFenceValues.size())
     {
@@ -1005,7 +1005,9 @@ bool Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
     if (fenceValue == 0)
         return true;
 
+    if (_copyFence == nullptr || _copyFenceEvent == nullptr) return false;
     const auto completedValue = _copyFence->GetCompletedValue();
+    if (completedValue == UINT64_MAX) return false;
     if (completedValue >= fenceValue)
         return true;
 
@@ -1024,6 +1026,9 @@ bool Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
                   fenceValue, _copyFence->GetCompletedValue(), waitResult);
         return false;
     }
+
+    const auto retiredValue = _copyFence->GetCompletedValue();
+    if (retiredValue == UINT64_MAX || retiredValue < fenceValue) return false;
 
     return true;
 }
@@ -1088,6 +1093,11 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
                        D3D12_RESOURCE_STATE_COPY_DEST);
 
     _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, copySource);
+    // SDR captures preserve the pre-HDR ReShade image; HDR captures use the
+    // converted frame. Opti's menu and external Companion window are later.
+    auto hdrCapture = _hdrOutput ? Hdr10::Screenshot::Prepare(_handle, _dx12Device,
+        _copyCommandLists[copySlot], copySource, _openedDx11BackBuffers[copySlot],
+        _openedDx11BackBufferStates[copySlot]) : nullptr;
 
     TransitionResource(_copyCommandLists[copySlot], fgBackBuffer, D3D12_RESOURCE_STATE_COPY_DEST,
                        D3D12_RESOURCE_STATE_PRESENT);
@@ -1108,12 +1118,16 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     ID3D12CommandList* lists[] = { _copyCommandLists[copySlot] };
     if (_hdrOutput) Hdr10::ExecuteCommands(_dx12CommandQueue, 1, lists);
     else _dx12CommandQueue->ExecuteCommandLists(1, lists);
+    Hdr10::Screenshot::Submit(hdrCapture, _dx12CommandQueue);
 
     const auto signalValue = ++_copyFenceValue;
 
     result = _dx12CommandQueue->Signal(_copyFence, signalValue);
     if (FAILED(result))
     {
+        // Work was submitted, but its completion cannot be proved. Never
+        // reset its allocator or destroy its resources using an older fence.
+        _copySubmissionFailed = true;
         LOG_ERROR("interop copy fence signal failed: {:X}", (UINT) result);
         return false;
     }
@@ -1126,7 +1140,7 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
 
 bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue()
 {
-    if (_copyFence == nullptr)
+    if (_copySubmissionFailed || _copyFence == nullptr)
         return false;
 
     // A plain HDR presenter uses the same queue as the interop copy. Queue
@@ -1151,8 +1165,7 @@ bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue()
 
 bool Dx11wDx12SC::_WaitForCopyQueueIdle()
 {
-    if (_copyFence == nullptr || _copyFenceEvent == nullptr)
-        return true;
+    if (_copySubmissionFailed) return false;
 
     UINT64 waitValue = _lastInteropCopyFenceValue;
 
@@ -1162,7 +1175,9 @@ bool Dx11wDx12SC::_WaitForCopyQueueIdle()
     if (waitValue == 0)
         return true;
 
+    if (_copyFence == nullptr || _copyFenceEvent == nullptr) return false;
     const auto completedValue = _copyFence->GetCompletedValue();
+    if (completedValue == UINT64_MAX) return false;
     if (completedValue >= waitValue)
         return true;
 
@@ -1181,6 +1196,9 @@ bool Dx11wDx12SC::_WaitForCopyQueueIdle()
                   _copyFence->GetCompletedValue(), waitResult);
         return false;
     }
+
+    const auto retiredValue = _copyFence->GetCompletedValue();
+    if (retiredValue == UINT64_MAX || retiredValue < waitValue) return false;
 
     for (auto& fenceValue : _copyAllocatorFenceValues)
         fenceValue = 0;
@@ -1211,7 +1229,14 @@ void Dx11wDx12SC::_ReleaseInteropBackBuffers()
 
 void Dx11wDx12SC::_ReleaseInteropObjects()
 {
-    _WaitForCopyQueueIdle();
+    if (!_WaitForCopyQueueIdle())
+    {
+        // Raw COM ownership is intentionally retained on this failure path.
+        // A timeout or failed signal cannot justify freeing GPU-visible memory.
+        _interopInitialized = false;
+        LOG_ERROR("Interop cleanup deferred: copy completion could not be established");
+        return;
+    }
     _ReleaseInteropBackBuffers();
 
     _lastInteropCopyFenceValue = 0;

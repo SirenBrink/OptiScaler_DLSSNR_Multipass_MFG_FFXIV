@@ -1061,6 +1061,8 @@ class Config
     CustomOptional<float> FfxivHDRContrast { 1.0f };
     CustomOptional<float> FfxivHDRSaturation { 1.0f };
     CustomOptional<float> FfxivHDRVibrance { 0.0f };
+    CustomOptional<int> FfxivHDRScreenshotKey { UnboundKey };
+    CustomOptional<int> FfxivHDRScreenshotFormat { 0 }; // 0: SDR PNG, 1: HDR PNG
     CustomOptional<bool> ForceHDR { false };
     CustomOptional<bool> UseHDR10 { false };
     CustomOptional<bool> SkipColorSpace { false };

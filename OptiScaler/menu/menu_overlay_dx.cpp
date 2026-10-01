@@ -5,6 +5,8 @@
 #include <Util.h>
 #include <Logger.h>
 #include <Config.h>
+#include <shaders/hdr/Hdr10.h>
+#include <shaders/hdr/HdrMenuLayer.h>
 
 #include <imgui/imgui_impl_dx11.h>
 #include <imgui/imgui_impl_dx12.h>
@@ -45,6 +47,9 @@ static ID3D12GraphicsCommandList* g_pd3dCommandList = nullptr;
 static ID3D12CommandAllocator* g_commandAllocators[NUM_BACK_BUFFERS] = {};
 static ID3D12Fence* g_overlayFence = nullptr;
 static UINT64 g_overlayFenceValue = 0;
+// Retired only after the overlay fence completes, never under loader lock.
+static Hdr10::MenuLayer* g_hdrMenuLayer = nullptr;
+static bool g_hdrMenuLayerEnabled = false;
 static HANDLE g_overlayFenceEvent = nullptr;
 static ID3D12Resource* g_mainRenderTargetResource[NUM_BACK_BUFFERS] = {};
 static D3D12_CPU_DESCRIPTOR_HANDLE g_mainRenderTargetDescriptor[NUM_BACK_BUFFERS] = {};
@@ -162,6 +167,9 @@ static void CleanupRenderTargetDx12(bool clearQueue)
             ImGui_ImplDX12_Shutdown(false);
         }
 
+        delete g_hdrMenuLayer;
+        g_hdrMenuLayer = nullptr;
+        g_hdrMenuLayerEnabled = false;
         SAFE_RELEASE(g_pd3dRtvDescHeap);
         SAFE_RELEASE(g_pd3dSrvDescHeap);
 
@@ -440,7 +448,10 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
         initInfo.Device = device;
         initInfo.CommandQueue = (ID3D12CommandQueue*) currentSCCommandQueue;
         initInfo.NumFramesInFlight = NUM_BACK_BUFFERS;
-        initInfo.RTVFormat = scDesc.BufferDesc.Format;
+        g_hdrMenuLayerEnabled = Hdr10::Active() && scDesc.BufferDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM;
+        initInfo.RTVFormat = g_hdrMenuLayerEnabled ? DXGI_FORMAT_R8G8B8A8_UNORM : scDesc.BufferDesc.Format;
+        if (g_hdrMenuLayerEnabled)
+            LOG_INFO("OptiHDR menu: SDR layer compositing followed by HDR conversion (203-nit reference)");
         initInfo.DSVFormat = DXGI_FORMAT_UNKNOWN;
         initInfo.SrvDescriptorHeap = g_pd3dSrvDescHeap;
         initInfo.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu_handle,
@@ -505,8 +516,34 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
             {
                 ImGui::Render();
 
+                if (ImGui::GetDrawData()->TotalVtxCount == 0)
+                {
+                    pSwapChain->Release();
+                    return;
+                }
                 UINT backBufferIdx = pSwapChain->GetCurrentBackBufferIndex();
                 ID3D12CommandAllocator* commandAllocator = g_commandAllocators[backBufferIdx];
+                D3D12_RECT hdrMenuBounds{};
+                if (g_hdrMenuLayerEnabled)
+                {
+                    const auto outputDesc = g_mainRenderTargetResource[backBufferIdx]->GetDesc();
+                    hdrMenuBounds = Hdr10::MenuBounds(*ImGui::GetDrawData(), UINT(outputDesc.Width), outputDesc.Height);
+                    if (hdrMenuBounds.left >= hdrMenuBounds.right || hdrMenuBounds.top >= hdrMenuBounds.bottom)
+                    {
+                        pSwapChain->Release();
+                        return;
+                    }
+                    if (!g_hdrMenuLayer) g_hdrMenuLayer = new Hdr10::MenuLayer;
+                    ScopedSkipHeapCapture skipHeapCapture {};
+                    const auto hr = g_hdrMenuLayer->Ensure(g_pd3dDeviceParam,
+                        g_mainRenderTargetResource[backBufferIdx]->GetDesc());
+                    if (FAILED(hr))
+                    {
+                        LOG_ERROR("OptiHDR menu layer preparation failed: {:X}", (UINT)hr);
+                        pSwapChain->Release();
+                        return; // Never draw SDR colours directly into the HDR target.
+                    }
+                }
 
                 auto result = commandAllocator->Reset();
                 if (result != S_OK)
@@ -537,7 +574,11 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                 g_pd3dCommandList->OMSetRenderTargets(1, &g_mainRenderTargetDescriptor[backBufferIdx], FALSE, NULL);
                 g_pd3dCommandList->SetDescriptorHeaps(1, &g_pd3dSrvDescHeap);
 
+                if (g_hdrMenuLayerEnabled)
+                    g_hdrMenuLayer->Begin(g_pd3dCommandList, g_mainRenderTargetResource[backBufferIdx], &hdrMenuBounds);
                 ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_pd3dCommandList);
+                if (g_hdrMenuLayerEnabled)
+                    g_hdrMenuLayer->End(g_pd3dCommandList, g_mainRenderTargetDescriptor[backBufferIdx]);
 
                 barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
                 barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;

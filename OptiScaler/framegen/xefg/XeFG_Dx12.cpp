@@ -1386,18 +1386,8 @@ bool XeFG_Dx12::Present()
             _uiCommandListResetted[fIndex] = false;
         }
 
-        if (_scCommandListResetted[fIndex])
-        {
-            LOG_DEBUG("Executing _scCommandList[{}]: {:X}", fIndex, (size_t) _scCommandList[fIndex]);
-            auto closeResult = _scCommandList[fIndex]->Close();
-
-            if (closeResult == S_OK)
-                _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_scCommandList[fIndex]);
-            else
-                LOG_ERROR("_scCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
-
-            _scCommandListResetted[fIndex] = false;
-        }
+        if (!SubmitSCCommandList((UINT) fIndex))
+            return false;
     }
 
     if ((_fgFramePresentId - _lastFGFramePresentId) > 3 && IsActive() && !_waitingNewFrameData)

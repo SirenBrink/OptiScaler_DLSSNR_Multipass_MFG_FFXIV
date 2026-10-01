@@ -54,6 +54,8 @@
 #include "imgui.h"
 #ifndef IMGUI_DISABLE
 #include "imgui_impl_dx12.h"
+#include <shaders/hdr/Hdr10.h>
+#include <shaders/hdr/HdrMenu.h>
 
 // DirectX
 #include <d3d12.h>
@@ -240,6 +242,10 @@ static void ImGui_ImplDX12_SetupRenderState(ImDrawData* draw_data, ID3D12Graphic
     command_list->SetPipelineState(bd->pPipelineState);
     command_list->SetGraphicsRootSignature(bd->pRootSignature);
     command_list->SetGraphicsRoot32BitConstants(0, 16, &vertex_constant_buffer, 0);
+    // Only the actual HDR10 target receives PQ colours. Separate SDR overlays
+    // retain their normal theme even while the game uses OptiHDR.
+    const float hdrMenu = Hdr10::Active() && bd->RTVFormat == DXGI_FORMAT_R10G10B10A2_UNORM ? 1.0f : 0.0f;
+    command_list->SetGraphicsRoot32BitConstants(2, 1, &hdrMenu, 0);
 
     // Setup blend factor
     const float blend_factor[4] = { 0.f, 0.f, 0.f, 0.f };
@@ -632,7 +638,7 @@ bool    ImGui_ImplDX12_CreateDeviceObjects()
         descRange.RegisterSpace = 0;
         descRange.OffsetInDescriptorsFromTableStart = 0;
 
-        D3D12_ROOT_PARAMETER param[2] = {};
+        D3D12_ROOT_PARAMETER param[3] = {};
 
         param[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         param[0].Constants.ShaderRegister = 0;
@@ -644,6 +650,10 @@ bool    ImGui_ImplDX12_CreateDeviceObjects()
         param[1].DescriptorTable.NumDescriptorRanges = 1;
         param[1].DescriptorTable.pDescriptorRanges = &descRange;
         param[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        param[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        param[2].Constants.ShaderRegister = 1;
+        param[2].Constants.Num32BitValues = 1;
+        param[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         // Bilinear sampling is required by default. Set 'io.Fonts->Flags |= ImFontAtlasFlags_NoBakedLines' or 'style.AntiAliasedLinesUseTex = false' to allow point/nearest sampling.
         D3D12_STATIC_SAMPLER_DESC staticSampler = {};
@@ -772,23 +782,7 @@ bool    ImGui_ImplDX12_CreateDeviceObjects()
 
     // Create the pixel shader
     {
-        static const char* pixelShader =
-            "struct PS_INPUT\
-            {\
-              float4 pos : SV_POSITION;\
-              float4 col : COLOR0;\
-              float2 uv  : TEXCOORD0;\
-            };\
-            SamplerState sampler0 : register(s0);\
-            Texture2D texture0 : register(t0);\
-            \
-            float4 main(PS_INPUT input) : SV_Target\
-            {\
-              float4 out_col = input.col * texture0.Sample(sampler0, input.uv); \
-              return out_col; \
-            }";
-
-        if (FAILED(D3DCompile(pixelShader, strlen(pixelShader), nullptr, nullptr, nullptr, "main", "ps_5_0", 0, 0, &pixelShaderBlob, nullptr)))
+        if (FAILED(D3DCompile(Hdr10::MenuPixelShader, strlen(Hdr10::MenuPixelShader), nullptr, nullptr, nullptr, "main", "ps_5_0", 0, 0, &pixelShaderBlob, nullptr)))
         {
             vertexShaderBlob->Release();
             return false; // NB: Pass ID3DBlob* pErrorBlob to D3DCompile() to get error showing in (const char*)pErrorBlob->GetBufferPointer(). Make sure to Release() the blob!

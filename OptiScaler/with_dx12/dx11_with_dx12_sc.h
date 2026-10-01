@@ -115,6 +115,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
 
     ID3D12Fence* _copyFence = nullptr;
     UINT64 _copyFenceValue = 1;
+    bool _copySubmissionFailed = false;
 
     ID3D11Fence* _dx11Fence = nullptr;
     HANDLE _dx11FenceEvent = nullptr;

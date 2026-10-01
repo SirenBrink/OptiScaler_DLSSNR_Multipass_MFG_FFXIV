@@ -1,5 +1,7 @@
 #include "pch.h"
 #include <shaders/hdr/Hdr10.h>
+#include "menu_hdr_colors.h"
+#include <shaders/hdr/HdrScreenshot.h>
 #include <framegen/dlssg/AmpereMfgLoader.h>
 #include <misc/FfxivNativeQuality.h>
 #include <misc/companion/Companion.h>
@@ -286,6 +288,9 @@ void MenuCommon::UpdateManualInput(HWND targetHwnd)
                       "Menu key pressed, will be switching FPS mode");
         CheckShortcut(config->DlssNrToggleKey.value_or_default(), inputDlssNr,
                       "Neural Rendering key pressed, will be toggling the pass");
+        bool screenshot = false;
+        CheckShortcut(config->FfxivHDRScreenshotKey.value_or_default(), screenshot, "OptiHDR screenshot key released");
+        if (screenshot) Hdr10::Screenshot::Request();
     }
     else if (capturingKey)
     {
@@ -841,43 +846,25 @@ void MenuCommon::PopulateCombo(const std::string& name, TStorage& currentValue,
     }
 }
 
+static bool LegacyMenuToneMapRequired()
+{
+    const auto& state = State::Instance();
+    const bool nativeHdrInput = !Config::Instance()->OverlayMenu.value_or_default() &&
+                                state.currentFeature != nullptr && state.currentFeature->IsHdr();
+    return MenuHdrColors::NeedsLegacyToneMap(Hdr10::Active(), state.isHdrActive, nativeHdrInput);
+}
+
 static ImVec4 toneMapColor(const ImVec4& color)
 {
-    if (State::Instance().isHdrActive ||
-        (!Config::Instance()->OverlayMenu.value_or_default() && State::Instance().currentFeature != nullptr &&
-         State::Instance().currentFeature->IsHdr()))
-    {
-        // Controls how strongly HDR/UI colors are pushed into the tone mapper before compression.
-        // Higher values make colors brighter before mapping; lower values make the result dimmer.
-        constexpr float exposure = 1.0f;
-
-        // Blends between original color and fully tone-mapped color.
-        // 0.0 = no tone mapping, 1.0 = full Reinhard compression.
-        constexpr float strength = 1.0f;
-
-        float peak = std::max(color.x, std::max(color.y, color.z));
-
-        if (peak <= 0.0f)
-            return color;
-
-        float exposedPeak = peak * exposure;
-        float mappedPeak = exposedPeak / (1.0f + exposedPeak);
-
-        float reinhardScale = mappedPeak / peak;
-        float scale = 1.0f + (reinhardScale - 1.0f) * strength;
-
-        return ImVec4(color.x * scale, color.y * scale, color.z * scale, color.w);
-    }
-
-    return color;
+    return MenuHdrColors::Transform(color, LegacyMenuToneMapRequired());
 }
 
 static void MenuHdrCheck(ImGuiIO io)
 {
-    // If game is using HDR, apply tone mapping to the ImGui style
-    if (State::Instance().isHdrActive ||
-        (!Config::Instance()->OverlayMenu.value_or_default() && State::Instance().currentFeature != nullptr &&
-         State::Instance().currentFeature->IsHdr()))
+    // OptiHDR needs the original theme colours; only older HDR paths use the
+    // CPU-side compression. The else branch also restores a previously mapped
+    // palette when switching from the legacy path to OptiHDR.
+    if (LegacyMenuToneMapRequired())
     {
         if (!_hdrTonemapApplied)
         {
@@ -1107,6 +1094,14 @@ static void ApplyThemeStyle()
     c[ImGuiCol_ChildBg] = BgTint(bgMid, 1.10f, minAlpha + 0.1f);
     c[ImGuiCol_PopupBg] =
         lightTheme ? BgTint(bgLight, 0.90f) : BgTint(ImVec4(0.09f, 0.10f, 0.13f, 0.97f), 0.90f, 0.97f);
+    // Keep HDR scene highlights from bleeding through the menu's dark panels.
+    // Preserve the saved SDR transparency preference; do not modify the config.
+    if (Hdr10::Active())
+    {
+        c[ImGuiCol_WindowBg].w = 1.0f;
+        c[ImGuiCol_ChildBg].w = 1.0f;
+        c[ImGuiCol_PopupBg].w = 1.0f;
+    }
     c[ImGuiCol_MenuBarBg] = BgTint(bgDark, 0.85f);
     c[ImGuiCol_DockingEmptyBg] = BgTint(bgDark, 0.75f);
 
@@ -1588,9 +1583,7 @@ void MenuCommon::RenderNotifications(RenderMenuContext& ctx)
     auto& io = ctx.io;
 
     // Notifications
-    bool tonemapRequired = State::Instance().isHdrActive ||
-                           (!Config::Instance()->OverlayMenu.value_or_default() &&
-                            State::Instance().currentFeature != nullptr && State::Instance().currentFeature->IsHdr());
+    const bool tonemapRequired = LegacyMenuToneMapRequired();
 
     float screenHeight = State::Instance().screenHeight;
     if (io.DisplaySize.y != 0)
@@ -3079,6 +3072,14 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         float peak=config->FfxivHDRPeak.value_or_default(), paper=config->FfxivHDRPaper.value_or_default(), expansion=config->FfxivHDRExpansion.value_or_default();
         if(ImGui::SliderFloat("Peak brightness (nits)",&peak,400,4000,"%.0f"))config->FfxivHDRPeak=peak;
         if(ImGui::SliderFloat("Paper white (nits)",&paper,80,400,"%.0f"))config->FfxivHDRPaper=paper;
+        int screenshotFormat = config->FfxivHDRScreenshotFormat.value_or_default() == 1 ? 1 : 0;
+        const char* screenshotFormats[] = { "SDR PNG (sharing)", "HDR PNG" };
+        if (ImGui::Combo("Screenshot format", &screenshotFormat, screenshotFormats, 2)) config->FfxivHDRScreenshotFormat = screenshotFormat;
+        ShowHelpMarker("Saves one PNG to game/OptiScaler/Screenshots while OptiHDR is active. SDR preserves the image before OptiHDR, including ReShade. HDR captures OptiHDR output and needs a compatible viewer.\nThe separate Companion nameplate window is not captured. FFXIV's original screenshot function is unchanged.");
+        static auto screenshotShortcut = Keybind("Screenshot shortcut", 15);
+        screenshotShortcut.Render(config->FfxivHDRScreenshotKey);
+        ImGui::TextWrapped("Optional: one key, Escape cancels, Backspace unbinds. Save Settings to keep your choice.");
+        ImGui::TextWrapped("%s", Hdr10::Screenshot::Status().c_str());
         if(ImGui::SliderFloat("Highlight expansion",&expansion,0,1,"%.2f"))config->FfxivHDRExpansion=expansion;
         float contrast=config->FfxivHDRContrast.value_or_default();
         if(ImGui::SliderFloat("Contrast",&contrast,0.5f,1.5f,"%.2fx"))config->FfxivHDRContrast=contrast;

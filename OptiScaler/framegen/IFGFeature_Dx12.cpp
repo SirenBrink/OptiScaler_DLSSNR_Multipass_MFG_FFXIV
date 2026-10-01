@@ -43,7 +43,6 @@ void IFGFeature_Dx12::CancelPendingUpscalerWork()
 {
     // The input feature can disappear before its final Present (FFXIV exit/scene changes).
     // These lists may reference its shaders/resources. Close without submitting them.
-    Deactivate();
     UINT cancelled = 0;
     for (UINT i = 0; i < BUFFER_COUNT; ++i)
     {
@@ -64,6 +63,9 @@ void IFGFeature_Dx12::CancelPendingUpscalerWork()
         _frameResources[i].clear();
         _resourceReady[i].clear();
     }
+    // XeFG/FSR Deactivate can submit the current UI list. Cancel first so no
+    // queued work can reference the upscaler that is about to be destroyed.
+    Deactivate();
     _lastDispatchedFrame = _frameCount;
     _waitingNewFrameData = true;
     LOG_INFO("FFXIV upscaler release: cancelled {} pending FG command lists", cancelled);
@@ -79,14 +81,17 @@ bool IFGFeature_Dx12::HasResource(FG_ResourceType type, int index)
 
 bool IFGFeature_Dx12::WaitForUIAllocator(UINT index)
 {
-    if (_uiFence == nullptr || _uiFenceEvent == nullptr)
-        return true;
-
+    if (index >= BUFFER_COUNT)
+        return false;
     const auto fenceValue = _uiAllocatorFenceValues[index];
     if (fenceValue == 0)
         return true;
 
+    if (_uiFence == nullptr || _uiFenceEvent == nullptr)
+        return false;
     const auto completedValue = _uiFence->GetCompletedValue();
+    if (completedValue == UINT64_MAX)
+        return false; // Device removal is not completion.
     if (completedValue >= fenceValue)
         return true;
 
@@ -106,6 +111,71 @@ bool IFGFeature_Dx12::WaitForUIAllocator(UINT index)
         return false;
     }
 
+    const auto retiredValue = _uiFence->GetCompletedValue();
+    return retiredValue != UINT64_MAX && retiredValue >= fenceValue;
+}
+
+bool IFGFeature_Dx12::WaitForSCAllocator(UINT index)
+{
+    if (_scSubmissionFailed || index >= BUFFER_COUNT)
+        return false;
+    const auto fenceValue = _scAllocatorFenceValues[index];
+    if (fenceValue == 0)
+        return true;
+
+    if (_scFence == nullptr || _scFenceEvent == nullptr)
+        return false;
+    const auto completedValue = _scFence->GetCompletedValue();
+    if (completedValue == UINT64_MAX)
+        return false; // Device removal is not completion.
+    if (completedValue >= fenceValue)
+        return true;
+
+    auto result = _scFence->SetEventOnCompletion(fenceValue, _scFenceEvent);
+    if (FAILED(result))
+    {
+        LOG_ERROR("SC allocator fence SetEventOnCompletion failed. slot {}, fence {}, completed {}, result {:X}", index,
+                  fenceValue, completedValue, (UINT) result);
+        return false;
+    }
+
+    const auto waitResult = WaitForSingleObject(_scFenceEvent, 5000);
+    if (waitResult != WAIT_OBJECT_0)
+    {
+        LOG_ERROR("SC allocator fence wait failed. slot {}, fence {}, completed {}, waitResult {:X}", index, fenceValue,
+                  _scFence->GetCompletedValue(), waitResult);
+        return false;
+    }
+
+    const auto retiredValue = _scFence->GetCompletedValue();
+    return retiredValue != UINT64_MAX && retiredValue >= fenceValue;
+}
+
+bool IFGFeature_Dx12::SubmitSCCommandList(UINT index)
+{
+    if (index >= BUFFER_COUNT || _scSubmissionFailed)
+        return false;
+    if (!_scCommandListResetted[index])
+        return true;
+    if (!_gameCommandQueue || !_scFence || !_scCommandList[index])
+        return false;
+    const auto closeResult = _scCommandList[index]->Close();
+    _scCommandListResetted[index] = false;
+    if (FAILED(closeResult))
+    {
+        _scSubmissionFailed = true;
+        LOG_ERROR("SC command list close failed: {:X}", (UINT) closeResult);
+        return false;
+    }
+    _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_scCommandList[index]);
+    // Assign values in submission order, not recording order.
+    _scAllocatorFenceValues[index] = ++_scFenceValue;
+    if (FAILED(_gameCommandQueue->Signal(_scFence, _scAllocatorFenceValues[index])))
+    {
+        _scSubmissionFailed = true;
+        LOG_ERROR("SC allocator completion signal failed; further SC rendering disabled");
+        return false;
+    }
     return true;
 }
 
@@ -207,7 +277,9 @@ ID3D12GraphicsCommandList* IFGFeature_Dx12::GetUICommandList(int index)
 
 ID3D12GraphicsCommandList* IFGFeature_Dx12::GetSCCommandList(int index)
 {
-    if (index < 0)
+    if (_scSubmissionFailed)
+        return nullptr;
+    if (index < 0 || index >= BUFFER_COUNT)
         index = GetIndex();
 
     LOG_DEBUG("index: {}", index);
@@ -222,13 +294,16 @@ ID3D12GraphicsCommandList* IFGFeature_Dx12::GetSCCommandList(int index)
             return nullptr;
     }
 
+    if (!_scCommandAllocator[index] || !_scCommandList[index])
+        return nullptr;
+
     for (size_t j = 0; j < 2; j++)
     {
         auto i = (index + j) % BUFFER_COUNT;
 
         if (i != index && _scCommandListResetted[i])
         {
-            LOG_DEBUG("Executing _scCommandList[{}]: {:X}", i, (size_t) _scCommandList[i]);
+            LOG_DEBUG("Discarding unsubmitted _scCommandList[{}]: {:X}", i, (size_t) _scCommandList[i]);
             auto closeResult = _scCommandList[i]->Close();
 
             if (closeResult != S_OK)
@@ -240,6 +315,8 @@ ID3D12GraphicsCommandList* IFGFeature_Dx12::GetSCCommandList(int index)
 
     if (!_scCommandListResetted[index])
     {
+        if (!WaitForSCAllocator((UINT) index))
+            return nullptr;
         auto result = _scCommandAllocator[index]->Reset();
 
         if (result == S_OK)
@@ -249,11 +326,15 @@ ID3D12GraphicsCommandList* IFGFeature_Dx12::GetSCCommandList(int index)
             if (result == S_OK)
                 _scCommandListResetted[index] = true;
             else
+            {
                 LOG_ERROR("_scCommandList[{}]->Reset() error: {:X}", index, (UINT) result);
+                return nullptr;
+            }
         }
         else
         {
             LOG_ERROR("_scCommandAllocator[{}]->Reset() error: {:X}", index, (UINT) result);
+            return nullptr;
         }
     }
 
