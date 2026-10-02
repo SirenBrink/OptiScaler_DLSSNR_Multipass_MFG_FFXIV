@@ -1395,6 +1395,18 @@ void Dx11wDx12SC::_CopyExternalHudlessToShared()
         return;
     }
 
+    // A HUD-less image must be the display-ready frame minus UI. A different format (typically
+    // R16G16B16A16_FLOAT) means it was captured from the HDR scene buffer earlier in the frame.
+    if (ExternalHudlessTypedFormat(sourceDesc.Format) != ExternalHudlessTypedFormat(backBufferDesc.Format))
+    {
+        source->Release();
+        auto message = std::format("Format {} does not match the backbuffer format {} (marker is in a Toggler "
+                                   "group that runs too early)",
+                                   (UINT) sourceDesc.Format, (UINT) backBufferDesc.Format);
+        ExternalHudless::MarkRejected(message.c_str());
+        return;
+    }
+
     if (_sharedHudlessCopies.size() < _bufferCount)
     {
         _sharedHudlessCopies.resize(_bufferCount, nullptr);

@@ -1138,6 +1138,11 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
 
             if (lastFormat[fIndex] != DXGI_FORMAT_UNKNOWN && lastFormat[fIndex] != desc.Format)
             {
+                LOG_INFO("HUD-less format changed {} -> {}, resetting FG once", (UINT) lastFormat[fIndex],
+                         (UINT) desc.Format);
+                // Remember the new format: otherwise every following frame sees the same "change"
+                // and FG is reset over and over (WAITING/PAUSED loop).
+                lastFormat[fIndex] = desc.Format;
                 State::Instance().fgChanged = true;
                 return false;
             }
