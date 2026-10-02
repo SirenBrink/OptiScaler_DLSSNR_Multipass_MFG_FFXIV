@@ -63,6 +63,7 @@ struct State{DlssNrVitReuse::Filter vit;DlssNrVitReuse::RoleRegistry<NVDX_Object
  std::map<NVDX_ObjectHandle,ModuleIdentity>moduleIdentities;
  std::map<NVDX_ObjectHandle,ObservedFunction>observedFunctions;
  uint64_t evaluations=0, legacyCalls=0, extendedCalls=0;
+ bool allowUnverified=false;
  std::string reuseReason="waiting for a DX12 NR evaluation";
  std::atomic<decltype(&NvAPI_D3D12_LaunchCuKernelChainEx)>launchEx{nullptr};
  decltype(&NvAPI_D3D12_CreateCuModule) createModule=nullptr;decltype(&NvAPI_D3D12_CreateCuFunction)createFunction=nullptr;decltype(&NvAPI_D3D12_LaunchCuKernelChain)launch=nullptr;
@@ -143,7 +144,7 @@ NvAPI_Status __cdecl CreateFunction(ID3D12Device*d,NVDX_ObjectHandle m,const cha
         auto role=DlssNrVitReuse::RoleOf(n);
         if(role!=DlssNrVitReuse::Role::None){
             s.observedFunctions[*out]={m,n};
-            if(s.modules[m])s.vitRole.Add(*out,m,role);
+            s.vitRole.Add(*out,m,role,s.modules[m]);
             auto& id=s.moduleIdentities[m];
             if(!id.reported){
                 id.reported=true;
@@ -165,7 +166,7 @@ bool VitDrop(State&s,const Kernel*k,NvU32 count,std::vector<Kernel>&kept)
     bool any=false;auto&o=Observation();
     for(NvU32 i=0;i<count;++i){
         ++o.launches;
-        const auto role=s.vitRole.Lookup(k[i].hFunction);
+        const auto role=s.vitRole.Lookup(k[i].hFunction,s.allowUnverified);
         if(role!=DlssNrVitReuse::Role::None)++o.known;
         else if(auto it=s.observedFunctions.find(k[i].hFunction);it!=s.observedFunctions.end()){
             ++o.unknown;
@@ -249,10 +250,15 @@ void SetPrecision(unsigned precision){auto&s=S();std::lock_guard<std::recursive_
  s.enabled=on;s.candidate=candidate;s.status=candidate?"Candidate hybrid selected; waiting for original model":on?"Hybrid FFN selected; waiting for supported original model":"Original FP8 selected";
 }
 void SetEnabled(bool on){SetPrecision(on?4u:0u);}
-void BeginEvaluate(const void*feature,bool reset,unsigned every)
+void BeginEvaluate(const void*feature,bool reset,unsigned every,bool allowUnverified)
 {
     auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);
-    if(s.enabled || every<2){s.vit.Clear();return;}
+    if(s.allowUnverified!=allowUnverified){
+        s.vit.Clear();s.allowUnverified=allowUnverified;
+        LOG_INFO("NR reuse unverified-kernel override: {}",allowUnverified ? "enabled (experimental)" : "disabled");
+    }
+    if(s.enabled){s.vit.Clear();return;}
+    if(every<2){s.vit.Invalidate(feature);return;}
     ++s.evaluations;Observation()={};Observation().reset=reset;
     s.vit.Begin(feature,reset,2);
 }
@@ -268,7 +274,7 @@ void EndEvaluate(bool success)
     else if(o.unknown)reason="unverified NR kernel module; compatibility profile needed";
     else if(!o.known)reason="kernel launches observed, but no recognized NR bottleneck";
     else if(o.reset)reason="history reset requires a full evaluation";
-    else reason="verified kernel module active";
+    else reason=s.allowUnverified ? "experimental override active; module fingerprint check bypassed" : "verified kernel module active";
     if(reason!=s.reuseReason){
         s.reuseReason=reason;
         // Bound recurring reset/active transitions in the main log.

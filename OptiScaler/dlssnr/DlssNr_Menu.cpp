@@ -180,12 +180,26 @@ void RenderMenu(Config* config, float menuResScale)
         bool vitReuse = config->DlssNrVitEvery.value_or_default() > 1;
         if (ImGui::Checkbox("Reuse NR bottleneck every second evaluation (experimental)", &vitReuse))
             config->DlssNrVitEvery = vitReuse ? 2u : 1u;
-        HelpMarker("Requires a verified NVIDIA NR kernel module. Alternate/patched runtimes may remain unavailable; the status explains why. May cause stale detail during motion. Off by default; hybrid mode always computes fully.");
+        HelpMarker("Requires a verified NVIDIA NR kernel module unless the experimental override below is enabled. Alternate/patched runtimes may remain unavailable; the status explains why. May cause stale detail during motion. Off by default; hybrid mode always computes fully.");
+        ImGui::BeginDisabled(!vitReuse);
+        bool firstPassOnly = config->DlssNrVitFirstPassOnly.value_or_default();
+        if (ImGui::Checkbox("First pass only (later passes compute fully)", &firstPassOnly))
+            config->DlssNrVitFirstPassOnly = firstPassOnly;
+        HelpMarker("On: limits reuse to pass 1 to reduce multipass flicker. Off: restores the original reuse on every pass, which may save more work but can flicker on VFX or transparent effects. Applies live. Save Settings to keep your choice.");
+        bool allowUnverified = config->DlssNrVitAllowUnverified.value_or_default();
+        if (ImGui::Checkbox("Allow unverified NR kernels (experimental)", &allowUnverified))
+            config->DlssNrVitAllowUnverified = allowUnverified;
+        HelpMarker("Bypasses the exact kernel-module fingerprint check for bottleneck reuse. Kernel names and launch-order checks remain required. May cause corruption, GPU hangs or crashes on incompatible runtimes. Off by default. Applies live; changing this forces a fresh computation. Save Settings to retain it.");
+        ImGui::EndDisabled();
+        if (vitReuse && allowUnverified)
+            ImGui::TextWrapped("Experimental: NR kernel compatibility is not verified.");
         if (vitReuse) ImGui::TextWrapped("%s", DlssNrNative::VitStatus().c_str());
+        if (vitReuse && config->DlssNrPasses.value_or_default() > 1)
+            ImGui::TextWrapped("%s", firstPassOnly ? "Multipass: reuse on pass 1 only." : "Multipass: reuse on every pass (original behaviour).");
         ImGui::EndDisabled();
         ImGui::BeginDisabled(config->DlssNrPasses.value_or_default() < 2 || !amdStatus.empty());
         float feedback = config->DlssNrPassFeedback.value_or_default();
-        if (ImGui::SliderFloat("Multipass feedback", &feedback, 0.0f, 1.0f)) config->DlssNrPassFeedback = feedback;
+        if (ImGui::SliderFloat("Multipass feedback", &feedback, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp)) config->DlssNrPassFeedback = feedback;
         HelpMarker("How much of each pass's edit reaches the next pass. 1 preserves the existing behavior. Single-pass NR is unchanged.");
         ImGui::EndDisabled();
         const auto hybridStatus = DlssNrNative::Status();

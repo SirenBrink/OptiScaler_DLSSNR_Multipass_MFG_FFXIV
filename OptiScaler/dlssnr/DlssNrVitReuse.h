@@ -36,13 +36,13 @@ enum class Role : uint8_t
 // preserve function roles belonging to other, still-live NR features.
 template<class Handle> class RoleRegistry
 {
-    struct Entry { Handle module; Role role; };
+    struct Entry { Handle module; Role role; bool verified; };
     std::unordered_map<Handle, Entry> entries;
 public:
-    void Add(Handle function, Handle module, Role role) { entries[function] = {module, role}; }
-    Role Lookup(Handle function) const {
+    void Add(Handle function, Handle module, Role role, bool verified = true) { entries[function] = {module, role, verified}; }
+    Role Lookup(Handle function, bool allowUnverified = false) const {
         auto it = entries.find(function);
-        return it == entries.end() ? Role::None : it->second.role;
+        return it == entries.end() || (!it->second.verified && !allowUnverified) ? Role::None : it->second.role;
     }
     bool RemoveFunction(Handle function) { return entries.erase(function) != 0; }
     bool RemoveModule(Handle module) {
@@ -185,6 +185,13 @@ class Filter
 
         c = Ctx {};
         return wellFormed;
+    }
+
+    // Disabling reuse for one pass must not invalidate other passes' cached work.
+    void Invalidate(const void* feature)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        entries_.erase(feature);
     }
 
     // The modules were destroyed: no cached result can be trusted any more.

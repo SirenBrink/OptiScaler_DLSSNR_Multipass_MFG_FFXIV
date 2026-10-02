@@ -353,6 +353,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrPrecision.set_from_config(readUInt("DlssNr", "Precision"));
             if (DlssNrPrecision.value_or_default() != 4) DlssNrPrecision = 0u;
             DlssNrVitEvery.set_from_config(readUInt("DlssNr", "VitEvery"));
+            DlssNrVitFirstPassOnly.set_from_config(readBool("DlssNr", "VitFirstPassOnly"));
+            DlssNrVitAllowUnverified.set_from_config(readBool("DlssNr", "VitAllowUnverified"));
             if (DlssNrVitEvery.value_or_default() < 1u || DlssNrVitEvery.value_or_default() > 2u)
                 DlssNrVitEvery = std::clamp<uint32_t>(DlssNrVitEvery.value_or_default(), 1u, 2u);
             DlssNrResidualFgApproxCamera.set_from_config(readBool("DlssNr", "ResidualFGApproxCamera"));
@@ -752,8 +754,10 @@ bool Config::Reload(std::filesystem::path iniPath)
                 AnisotropyOverride.reset();
 
             AnisotropySkipPointFilter.set_from_config(readBool("Anisotropy", "SkipPointFilter"));
-            AnisotropyModifyComp.set_from_config(readBool("Anisotropy", "AFModifyComparison"));
-            AnisotropyModifyMinMax.set_from_config(readBool("Anisotropy", "AFModifyMinMax"));
+            AnisotropyModifyComp.set_from_config(readBool("Anisotropy",
+                ini.GetValue("Anisotropy", "ModifyComparison", nullptr) ? "ModifyComparison" : "AFModifyComparison"));
+            AnisotropyModifyMinMax.set_from_config(readBool("Anisotropy",
+                ini.GetValue("Anisotropy", "ModifyMinMax", nullptr) ? "ModifyMinMax" : "AFModifyMinMax"));
         }
 
         // Mipmap
@@ -901,6 +905,12 @@ bool Config::Reload(std::filesystem::path iniPath)
         {
             CompanionHudReplacement.set_from_config(readBool("Companion", "HudReplacement"));
             CompanionHudInterpolation.set_from_config(readBool("Companion", "HudInterpolation"));
+            if (auto v = readUInt("LowLatency", "Input"); v && *v < static_cast<uint32_t>(::LowLatencyInput::_))
+                LowLatencyInput.set_from_config(static_cast<::LowLatencyInput>(*v));
+            if (auto v = readUInt("LowLatency", "Output"); v && *v <= static_cast<uint32_t>(LowLatencyMode::Reflex))
+                LowLatencyOutput.set_from_config(static_cast<LowLatencyMode>(*v));
+            VulkanUseCopyForInputs.set_from_config(readBool("Vulkan", "UseCopyForInputs"));
+            VulkanUseCopyForOutput.set_from_config(readBool("Vulkan", "UseCopyForOutput"));
             FfxivHDR.set_from_config(readBool("HDR", "FfxivHDR"));
             FfxivHDRPeak.set_from_config(readFloat("HDR", "PeakNits"));
             FfxivHDRPaper.set_from_config(readFloat("HDR", "PaperWhiteNits"));
@@ -1353,6 +1363,10 @@ bool Config::SaveIni()
                  GetFloatValue(Instance()->DlssNrTagScale.value_for_config()).c_str());
     ini.SetValue("Companion", "HudReplacement", GetBoolValue(Instance()->CompanionHudReplacement.value_for_config()).c_str());
     ini.SetValue("Companion", "HudInterpolation", GetBoolValue(Instance()->CompanionHudInterpolation.value_for_config()).c_str());
+    ini.SetValue("LowLatency", "Input", GetIntValue(Instance()->LowLatencyInput.value_for_config()).c_str());
+    ini.SetValue("LowLatency", "Output", GetIntValue(Instance()->LowLatencyOutput.value_for_config()).c_str());
+    ini.SetValue("Vulkan", "UseCopyForInputs", GetBoolValue(Instance()->VulkanUseCopyForInputs.value_for_config()).c_str());
+    ini.SetValue("Vulkan", "UseCopyForOutput", GetBoolValue(Instance()->VulkanUseCopyForOutput.value_for_config()).c_str());
     ini.SetValue("HDR", "FfxivHDR", GetBoolValue(Instance()->FfxivHDR.value_for_config()).c_str());
     ini.SetValue("HDR", "PeakNits", GetFloatValue(Instance()->FfxivHDRPeak.value_for_config()).c_str());
     ini.SetValue("HDR", "PaperWhiteNits", GetFloatValue(Instance()->FfxivHDRPaper.value_for_config()).c_str());
@@ -1365,6 +1379,8 @@ bool Config::SaveIni()
     auto screenshotKey = Instance()->FfxivHDRScreenshotKey.value_for_config();
     ini.SetValue("HDR", "ScreenshotKey", GetIntValue(screenshotKey, screenshotKey > 0).c_str());
     ini.SetValue("HDR", "ScreenshotFormat", GetIntValue(Instance()->FfxivHDRScreenshotFormat.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "VitAllowUnverified", GetBoolValue(Instance()->DlssNrVitAllowUnverified.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "VitFirstPassOnly", GetBoolValue(Instance()->DlssNrVitFirstPassOnly.value_for_config()).c_str());
     ini.SetValue("DlssNr", "VitEvery", GetIntValue(Instance()->DlssNrVitEvery.value_for_config()).c_str());
     ini.SetValue("DlssNr", "SpatialCompression", GetBoolValue(Instance()->DlssNrSpatialCompression.value_for_config()).c_str());
     ini.SetValue("DlssNr", "SpatialCenterX", GetFloatValue(Instance()->DlssNrSpatialCenterX.value_for_config()).c_str());
@@ -1901,7 +1917,10 @@ bool Config::SaveIni()
 
     LOG_INFO("Trying to save ini to: {0}", wstring_to_string(pathWStr));
 
-    return ini.SaveFile(absoluteFileName.wstring().c_str()) >= 0;
+    const auto result = ini.SaveFile(absoluteFileName.wstring().c_str());
+    if (result < 0) LOG_ERROR("Failed to save ini to {} (SimpleIni error {})", wstring_to_string(pathWStr), result);
+    else LOG_INFO("Saved ini to {}", wstring_to_string(pathWStr));
+    return result >= 0;
 }
 
 bool Config::SaveXeFG()
@@ -1913,7 +1932,10 @@ bool Config::SaveXeFG()
     auto pathWStr = absoluteFileName.wstring();
     LOG_INFO("Trying to save ini to: {0}", wstring_to_string(pathWStr));
 
-    return ini.SaveFile(absoluteFileName.wstring().c_str()) >= 0;
+    const auto result = ini.SaveFile(absoluteFileName.wstring().c_str());
+    if (result < 0) LOG_ERROR("Failed to save ini to {} (SimpleIni error {})", wstring_to_string(pathWStr), result);
+    else LOG_INFO("Saved ini to {}", wstring_to_string(pathWStr));
+    return result >= 0;
 }
 
 void Config::CheckUpscalerFiles()

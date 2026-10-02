@@ -377,6 +377,10 @@ struct NrState
     bool beforeUpscale = false;
     bool rayReconstruction = false;
     bool reset = true;
+    unsigned previousReuseEvery = 1;
+    bool previousReuseOverride = false;
+    bool previousReuseFirstPassOnly = true;
+    float previousPassFeedback = 1.0f;
 
     // Dimensions of the guides as the upscaler handed them over, kept for the present path, which runs
     // long after that call has returned.
@@ -2651,6 +2655,23 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     };
 
+    const unsigned reuseEvery = DlssNrNative::ReuseEveryForPass(0, cfg.DlssNrVitEvery.value_or_default());
+    const bool reuseFirstPassOnly = cfg.DlssNrVitFirstPassOnly.value_or_default();
+    const bool reuseOverride = cfg.DlssNrVitAllowUnverified.value_or_default();
+    const float passFeedback = std::isfinite(cfg.DlssNrPassFeedback.value_or_default())
+        ? std::clamp(cfg.DlssNrPassFeedback.value_or_default(), 0.0f, 1.0f) : 1.0f;
+    if (g_nr.previousReuseEvery != reuseEvery || g_nr.previousReuseOverride != reuseOverride ||
+        g_nr.previousReuseFirstPassOnly != reuseFirstPassOnly)
+    {
+        g_nr.reset = true;
+        LOG_INFO("DLSS-NR reuse policy: every {}, first-pass-only {}", reuseEvery, reuseFirstPassOnly);
+    }
+    if (g_nr.previousPassFeedback != passFeedback)
+        for (unsigned int pass = 1; pass < DlssNr::MaxPassCount; ++pass) g_nr.passNeedsReset[pass] = true;
+    g_nr.previousReuseEvery = reuseEvery;
+    g_nr.previousReuseOverride = reuseOverride;
+    g_nr.previousReuseFirstPassOnly = reuseFirstPassOnly;
+    g_nr.previousPassFeedback = passFeedback;
     int result = NVSDK_NGX_Result_Success;
 
     for (unsigned int pass = 0; spatialPacked && pass < effectivePasses && result == NVSDK_NGX_Result_Success;
@@ -2662,7 +2683,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         MakeModelWritable(passOutput);
         // ViT reuse of the NVIDIA model: tell the NvAPI wrapper which feature this is, whether it starts over, and how often to compute the bottleneck
-        DlssNrNative::BeginEvaluate(passFeature, passReset, cfg.DlssNrVitEvery.value_or_default());
+        DlssNrNative::BeginEvaluate(passFeature, passReset,
+            DlssNrNative::ReuseEveryForPass(pass, reuseEvery, reuseFirstPassOnly), reuseOverride);
         result = g_nr.evaluate(
             cmdList, passFeature, g_nr.capabilityParams, passInput, depthIn, motionIn, passOutput,
             workWidth, workHeight, spatial ? workWidth : guideWidth, spatial ? workHeight : guideHeight,

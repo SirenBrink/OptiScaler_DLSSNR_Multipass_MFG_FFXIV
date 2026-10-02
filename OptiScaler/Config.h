@@ -548,6 +548,8 @@ class Config
     CustomOptional<float> DlssNrSpatialShiftY { 0.0f };
     CustomOptional<float> DlssNrPassFeedback { 1.0f };
     CustomOptional<uint32_t> DlssNrVitEvery { 1 };
+    CustomOptional<bool> DlssNrVitAllowUnverified { false };
+    CustomOptional<bool> DlssNrVitFirstPassOnly { true };
 
     // Which depth convention the model is told the guide uses.
     //
@@ -1032,7 +1034,7 @@ class Config
     CustomOptional<bool> FN_ForceLatencyFlex { false };
     CustomOptional<LFXMode> FN_LatencyFlexMode { LFXMode::Conservative };
     CustomOptional<ForceReflex> FN_ForceReflex { ForceReflex::InGame };
-    CustomOptional<LowLatencyInput> LowLatencyInput { LowLatencyInput::Auto }; // TODO: no reading/saving to config
+    CustomOptional<LowLatencyInput> LowLatencyInput { LowLatencyInput::Auto };
     CustomOptional<LowLatencyMode> LowLatencyOutput { LowLatencyMode::Auto };
 
     // Inputs

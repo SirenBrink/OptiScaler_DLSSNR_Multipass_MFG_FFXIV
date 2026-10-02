@@ -401,7 +401,7 @@ class Keybind
         return "Unknown";
     }
 
-    void Render(CustomOptional<int>& configKey)
+    void Render(CustomOptional<int>& configKey, const char* resetLabel = "R")
     {
         ImGui::PushID(id);
         if (ImGui::Button(name.c_str()))
@@ -441,9 +441,9 @@ class Keybind
 
         ImGui::SameLine();
         ImGui::PushID(id);
-        if (ImGui::Button("R"))
+        if (ImGui::Button(resetLabel))
         {
-            configKey.reset();
+            configKey = std::nullopt;
         }
         ImGui::PopID();
     }
@@ -3066,29 +3066,44 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     auto config = ctx.config;
     if (state.gameExe == "ffxiv_dx11.exe" && ImGui::TreeNode("FFXIV HDR10 output (experimental)"))
     {
+        const auto resetHdr = [](const char* id, auto& setting) {
+            ImGui::SameLine();
+            ImGui::PushID(id);
+            if (ImGui::SmallButton("Reset")) setting = std::nullopt;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Restore this setting to its default. Save Settings to keep the reset.");
+            ImGui::PopID();
+        };
         bool hdr = config->FfxivHDR.value_or_default();
         if (ImGui::Checkbox("Enable OptiScaler HDR (restart)", &hdr)) config->FfxivHDR = hdr;
+        resetHdr("FfxivHDR", config->FfxivHDR);
         ImGui::TextWrapped("%s", Hdr10::Status().c_str());
         ImGui::TextWrapped("Requires Windows HDR. Disable RTX HDR and Auto HDR. Supports DLSS-G, XeFG, or FG off. Game HUD shares the highlight curve. XeFG extracts the HUD from the HDR image; separate SDR UI overlays and HUD comparison are bypassed.");
         float peak=config->FfxivHDRPeak.value_or_default(), paper=config->FfxivHDRPaper.value_or_default(), expansion=config->FfxivHDRExpansion.value_or_default();
         if(ImGui::SliderFloat("Peak brightness (nits)",&peak,400,4000,"%.0f"))config->FfxivHDRPeak=peak;
+        resetHdr("FfxivHDRPeak", config->FfxivHDRPeak);
         if(ImGui::SliderFloat("Paper white (nits)",&paper,80,400,"%.0f"))config->FfxivHDRPaper=paper;
+        resetHdr("FfxivHDRPaper", config->FfxivHDRPaper);
         int screenshotFormat = config->FfxivHDRScreenshotFormat.value_or_default() == 1 ? 1 : 0;
         const char* screenshotFormats[] = { "SDR PNG (sharing)", "HDR PNG" };
         if (ImGui::Combo("Screenshot format", &screenshotFormat, screenshotFormats, 2)) config->FfxivHDRScreenshotFormat = screenshotFormat;
+        resetHdr("FfxivHDRScreenshotFormat", config->FfxivHDRScreenshotFormat);
         ShowHelpMarker("Saves one PNG to game/OptiScaler/Screenshots while OptiHDR is active. SDR preserves the image before OptiHDR, including ReShade. HDR captures OptiHDR output and needs a compatible viewer.\nThe separate Companion nameplate window is not captured. FFXIV's original screenshot function is unchanged.");
         static auto screenshotShortcut = Keybind("Screenshot shortcut", 15);
-        screenshotShortcut.Render(config->FfxivHDRScreenshotKey);
+        screenshotShortcut.Render(config->FfxivHDRScreenshotKey, "Reset");
         ImGui::TextWrapped("Optional: one key, Escape cancels, Backspace unbinds. Save Settings to keep your choice.");
         ImGui::TextWrapped("%s", Hdr10::Screenshot::Status().c_str());
         if(ImGui::SliderFloat("Highlight expansion",&expansion,0,1,"%.2f"))config->FfxivHDRExpansion=expansion;
+        resetHdr("FfxivHDRExpansion", config->FfxivHDRExpansion);
         float contrast=config->FfxivHDRContrast.value_or_default();
         if(ImGui::SliderFloat("Contrast",&contrast,0.5f,1.5f,"%.2fx"))config->FfxivHDRContrast=contrast;
+        resetHdr("FfxivHDRContrast", config->FfxivHDRContrast);
         ShowHelpMarker("Applies immediately. 1.00 preserves the original contrast.\nHigher values deepen shadows and lift highlights around middle grey.\nBlack, white and the HDR peak limit are preserved. Applies to the game HUD too.");
         float saturation=config->FfxivHDRSaturation.value_or_default(), vibrance=config->FfxivHDRVibrance.value_or_default();
         if(ImGui::SliderFloat("Saturation##OptiHDR",&saturation,0.0f,2.0f,"%.2fx"))config->FfxivHDRSaturation=saturation;
+        resetHdr("FfxivHDRSaturation", config->FfxivHDRSaturation);
         ShowHelpMarker("Applies immediately. 1.00 is unchanged; 0 removes colour.\nAdjusts colour strength while preserving luminance and respecting the HDR output range.");
         if(ImGui::SliderFloat("Vibrance##OptiHDR",&vibrance,-1.0f,1.0f,"%.2f"))config->FfxivHDRVibrance=vibrance;
+        resetHdr("FfxivHDRVibrance", config->FfxivHDRVibrance);
         ShowHelpMarker("Applies immediately. 0 is unchanged. Positive values favour muted colours; negative values soften them.\nBoth colour controls also affect the game HUD.");
         if(config->LoadReShade.value_or_default())
             ImGui::TextWrapped("ReShade compatibility: SDR presets run before OptiHDR. Their colour adjustments combine with these controls; detail clipped by a preset cannot be restored.");
@@ -7529,8 +7544,9 @@ void MenuCommon::RenderMainMenuBottomBar(RenderMenuContext& ctx)
 
     ImGui::SameLine(0.0f, 15.0f);
 
+    static int saveSettingsResult = 0;
     if (ImGui::Button("Save Settings"))
-        config->SaveIni();
+        saveSettingsResult = config->SaveIni() ? 1 : -1;
 
     ImGui::SameLine(0.0f, 6.0f);
 
@@ -7572,6 +7588,10 @@ void MenuCommon::RenderMainMenuBottomBar(RenderMenuContext& ctx)
                    "Compatibility list with known game issues\nand workarounds, FG options explained\n"
                    "and other useful info");
 
+    if (saveSettingsResult != 0)
+    {
+        ImGui::TextWrapped("%s", saveSettingsResult > 0 ? "Settings saved to OptiScaler.ini." : "Could not save settings. Check that OptiScaler.ini is writable; see the log for its location.");
+    }
     ImGui::Spacing();
     ImGui::Separator();
 
