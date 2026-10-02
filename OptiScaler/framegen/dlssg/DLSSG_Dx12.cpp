@@ -928,8 +928,10 @@ bool DLSSG_Dx12::Present()
             LOG_DEBUG("Executing _uiCommandList[{}]: {:X}", fIndex, (size_t) _uiCommandList[fIndex]);
             auto closeResult = _uiCommandList[fIndex]->Close();
 
+            // Go through Hdr10 so HDR10 HUD-less conversion packets recorded on this list are
+            // marked submitted and can be recycled (same as IFGFeature_Dx12::SubmitUICommandList).
             if (closeResult == S_OK)
-                _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_uiCommandList[fIndex]);
+                Hdr10::ExecuteCommands(_gameCommandQueue, 1, (ID3D12CommandList**) &_uiCommandList[fIndex]);
             else
                 LOG_ERROR("_uiCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
 

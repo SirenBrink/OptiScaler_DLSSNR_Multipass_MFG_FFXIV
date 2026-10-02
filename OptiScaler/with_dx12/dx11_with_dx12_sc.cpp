@@ -2,6 +2,8 @@
 #include <shaders/hdr/Hdr10.h>
 #include <misc/FfxivLightingCapture.h>
 #include <misc/companion/Companion.h>
+#include <misc/ExternalHudless.h>
+#include <framegen/IFGFeature_Dx12.h>
 #include "dx11_with_dx12_sc.h"
 
 #include <with_dx12/with_dx12.h>
@@ -327,6 +329,10 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (!_CopyDx11BackBufferToShared(dx11Index))
         return DXGI_ERROR_DEVICE_REMOVED;
 
+    // Recorded on the D3D11 context before the interop fence below, so the same
+    // DX11 -> DX12 wait covers both the backbuffer and the HUD-less copy.
+    _CopyExternalHudlessToShared();
+
     if (!_WaitDx11ThenDx12())
         return DXGI_ERROR_DEVICE_REMOVED;
 
@@ -335,6 +341,10 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     if (!_WaitForInteropCopyOnPresentQueue())
         return DXGI_ERROR_DEVICE_REMOVED;
+
+    // The FG queue now waits for the interop copy (which itself waited for D3D11),
+    // so the shared HUD-less texture is complete for anything recorded from here on.
+    _TagExternalHudless();
 
     const bool fgHookedPresenter =
         State::Instance().currentFGSwapchain == _fgSwapChain && !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
@@ -1194,6 +1204,8 @@ void Dx11wDx12SC::_ReleaseInteropBackBuffers()
 {
     _interopInitialized = false;
 
+    _ReleaseExternalHudless();
+
     for (auto& resource : _openedDx11BackBuffers)
         SafeRelease(resource);
 
@@ -1255,3 +1267,266 @@ UINT Dx11wDx12SC::_GetDx11BackBufferIndexForPresent() const
 }
 
 void Dx11wDx12SC::_AdvanceFakeBackBufferIndex() { _currentFakeIndex = (_currentFakeIndex + 1) % _bufferCount; }
+
+// ---------------------------------------------------------------------------------------------
+// External HUD-less (ReShade add-on)
+// ---------------------------------------------------------------------------------------------
+
+static DXGI_FORMAT ExternalHudlessTypedFormat(DXGI_FORMAT format)
+{
+    switch (format)
+    {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+        return DXGI_FORMAT_R10G10B10A2_UNORM;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+        return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    default:
+        return format;
+    }
+}
+
+void Dx11wDx12SC::_ReleaseExternalHudlessSlot(UINT slot)
+{
+    if (slot < _openedHudless.size())
+        SafeRelease(_openedHudless[slot]);
+
+    if (slot < _sharedHudlessCopies.size())
+        SafeRelease(_sharedHudlessCopies[slot]);
+
+    if (slot < _sharedHudlessHandles.size())
+        SafeCloseHandle(_sharedHudlessHandles[slot]);
+}
+
+void Dx11wDx12SC::_ReleaseExternalHudless()
+{
+    // The HUD-less copies are read on the FG queue (not the interop copy queue), so drain
+    // that queue before releasing them. Only happens on resize/teardown.
+    bool anyOpened = false;
+    for (auto resource : _openedHudless)
+        anyOpened |= resource != nullptr;
+
+    auto fg = State::Instance().currentFG;
+    auto fgQueue = fg != nullptr ? fg->GetCommandQueue() : nullptr;
+
+    if (anyOpened && fgQueue != nullptr && _dx12Device != nullptr)
+    {
+        ID3D12Fence* fence = nullptr;
+        if (SUCCEEDED(_dx12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))) && fence != nullptr)
+        {
+            HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+            if (event != nullptr && SUCCEEDED(fgQueue->Signal(fence, 1)) &&
+                SUCCEEDED(fence->SetEventOnCompletion(1, event)))
+            {
+                if (WaitForSingleObject(event, 2000) != WAIT_OBJECT_0)
+                    LOG_WARN("Timed out waiting for FG queue before releasing external HUD-less");
+            }
+
+            if (event != nullptr)
+                CloseHandle(event);
+
+            fence->Release();
+        }
+    }
+
+    for (UINT i = 0; i < (UINT) _sharedHudlessCopies.size(); ++i)
+        _ReleaseExternalHudlessSlot(i);
+
+    _openedHudless.clear();
+    _sharedHudlessCopies.clear();
+    _sharedHudlessHandles.clear();
+    _hudlessPending = false;
+
+    ExternalHudless::Clear();
+}
+
+void Dx11wDx12SC::_CopyExternalHudlessToShared()
+{
+    _hudlessPending = false;
+
+    ID3D11Texture2D* source = ExternalHudless::Take();
+    if (source == nullptr)
+        return;
+
+    auto fg = State::Instance().currentFG;
+    if (fg == nullptr || !fg->IsActive() || fg->IsPaused() || !Config::Instance()->FGEnabled.value_or_default())
+    {
+        source->Release();
+        ExternalHudless::MarkRejected("Frame generation is not active");
+        return;
+    }
+
+    const UINT slot = _currentFakeIndex;
+    if (_dx11Context == nullptr || _dx12Device == nullptr || slot >= _sharedDx11BackBufferCopies.size() ||
+        _sharedDx11BackBufferCopies[slot] == nullptr)
+    {
+        source->Release();
+        ExternalHudless::MarkRejected("Interop backbuffer is not ready");
+        return;
+    }
+
+    D3D11_TEXTURE2D_DESC backBufferDesc {};
+    _sharedDx11BackBufferCopies[slot]->GetDesc(&backBufferDesc);
+
+    D3D11_TEXTURE2D_DESC sourceDesc {};
+    source->GetDesc(&sourceDesc);
+
+    ExternalHudless::NoteFormats(sourceDesc.Width, sourceDesc.Height, (uint32_t) sourceDesc.Format,
+                                 (uint32_t) backBufferDesc.Format);
+
+    if (sourceDesc.Width != backBufferDesc.Width || sourceDesc.Height != backBufferDesc.Height)
+    {
+        source->Release();
+        auto message = std::format("Size {}x{} does not match the backbuffer {}x{}", sourceDesc.Width,
+                                   sourceDesc.Height, backBufferDesc.Width, backBufferDesc.Height);
+        ExternalHudless::MarkRejected(message.c_str());
+        return;
+    }
+
+    if (sourceDesc.SampleDesc.Count != 1 || sourceDesc.ArraySize != 1)
+    {
+        source->Release();
+        ExternalHudless::MarkRejected("Multisampled or array textures are not supported");
+        return;
+    }
+
+    if (_sharedHudlessCopies.size() < _bufferCount)
+    {
+        _sharedHudlessCopies.resize(_bufferCount, nullptr);
+        _openedHudless.resize(_bufferCount, nullptr);
+        _sharedHudlessHandles.resize(_bufferCount, nullptr);
+    }
+
+    if (slot >= _sharedHudlessCopies.size())
+    {
+        source->Release();
+        ExternalHudless::MarkRejected("Backbuffer slot out of range");
+        return;
+    }
+
+    const DXGI_FORMAT sharedFormat = ExternalHudlessTypedFormat(sourceDesc.Format);
+
+    // Recreate the slot if the incoming texture changed shape or format (resolution change, preset swap).
+    if (_sharedHudlessCopies[slot] != nullptr)
+    {
+        D3D11_TEXTURE2D_DESC sharedDesc {};
+        _sharedHudlessCopies[slot]->GetDesc(&sharedDesc);
+
+        if (sharedDesc.Width != sourceDesc.Width || sharedDesc.Height != sourceDesc.Height ||
+            sharedDesc.Format != sharedFormat)
+        {
+            LOG_INFO("External HUD-less slot {} changed, recreating", slot);
+            _ReleaseExternalHudlessSlot(slot);
+        }
+    }
+
+    if (_sharedHudlessCopies[slot] == nullptr)
+    {
+        D3D11_TEXTURE2D_DESC desc {};
+        desc.Width = sourceDesc.Width;
+        desc.Height = sourceDesc.Height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = sharedFormat;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE; // HDR10 conversion and Streamline read it as an SRV
+        desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+
+        auto result = _dx11Device->CreateTexture2D(&desc, nullptr, &_sharedHudlessCopies[slot]);
+        if (FAILED(result) || _sharedHudlessCopies[slot] == nullptr)
+        {
+            LOG_ERROR("CreateTexture2D external hudless slot {} failed: {:X}", slot, (UINT) result);
+            source->Release();
+            ExternalHudless::MarkRejected("Could not create shared HUD-less texture");
+            return;
+        }
+
+        IDXGIResource1* dxgiResource = nullptr;
+        result = _sharedHudlessCopies[slot]->QueryInterface(IID_PPV_ARGS(&dxgiResource));
+        if (SUCCEEDED(result) && dxgiResource != nullptr)
+        {
+            result = dxgiResource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ, nullptr,
+                                                      &_sharedHudlessHandles[slot]);
+            dxgiResource->Release();
+        }
+
+        if (SUCCEEDED(result) && _sharedHudlessHandles[slot] != nullptr)
+            result = _dx12Device->OpenSharedHandle(_sharedHudlessHandles[slot], IID_PPV_ARGS(&_openedHudless[slot]));
+
+        if (FAILED(result) || _openedHudless[slot] == nullptr)
+        {
+            LOG_ERROR("Sharing external hudless slot {} with D3D12 failed: {:X}", slot, (UINT) result);
+            _ReleaseExternalHudlessSlot(slot);
+            source->Release();
+            ExternalHudless::MarkRejected("Could not share HUD-less texture with D3D12");
+            return;
+        }
+
+        _openedHudless[slot]->SetName(std::format(L"External HUD-less [{}]", slot).c_str());
+        LOG_INFO("External HUD-less slot {} created: {}x{} format {}", slot, desc.Width, desc.Height,
+                 (UINT) desc.Format);
+    }
+
+    // Same type group (typeless -> typed) is a legal CopyResource.
+    _dx11Context->CopyResource(_sharedHudlessCopies[slot], source);
+    source->Release();
+
+    _hudlessPending = true;
+    _hudlessSlot = slot;
+}
+
+void Dx11wDx12SC::_TagExternalHudless()
+{
+    if (!_hudlessPending)
+        return;
+
+    _hudlessPending = false;
+
+    auto fg = State::Instance().currentFG;
+    if (fg == nullptr || !fg->IsActive() || fg->IsPaused())
+    {
+        ExternalHudless::MarkRejected("Frame generation became inactive before Present");
+        return;
+    }
+
+    if (_hudlessSlot >= _openedHudless.size() || _openedHudless[_hudlessSlot] == nullptr)
+    {
+        ExternalHudless::MarkRejected("Shared HUD-less slot missing");
+        return;
+    }
+
+    // Tag it on the frame that is about to be dispatched, i.e. the frame whose backbuffer was
+    // just copied above. FG Present executes this UI command list on the FG queue before Dispatch.
+    const int fIndex = fg->GetIndexWillBeDispatched();
+    auto cmdList = fg->GetUICommandList(fIndex);
+    if (cmdList == nullptr)
+    {
+        ExternalHudless::MarkRejected("Frame generator has no command list for this frame");
+        return;
+    }
+
+    auto desc = _openedHudless[_hudlessSlot]->GetDesc();
+
+    Dx12Resource resource {};
+    resource.type = FG_ResourceType::HudlessColor;
+    resource.resource = _openedHudless[_hudlessSlot];
+    resource.cmdList = cmdList;
+    resource.state = D3D12_RESOURCE_STATE_COMMON;
+    resource.validity = FG_ResourceValidity::ValidNow;
+    resource.width = desc.Width;
+    resource.height = desc.Height;
+    resource.frameIndex = fIndex;
+
+    if (fg->SetResource(&resource))
+        ExternalHudless::MarkTagged();
+    else if (Config::Instance()->FGDisableHudless.value_or_default())
+        ExternalHudless::MarkRejected("\"Disable HUDless\" is checked in the OptiScaler menu");
+    else
+        ExternalHudless::MarkRejected("Frame generator refused the HUD-less texture (see OptiScaler.log)");
+}

@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <misc/ExternalHudless.h>
 #include <shaders/hdr/Hdr10.h>
 #include <framegen/dlssg/AmpereMfgLoader.h>
 #include <misc/FfxivNativeQuality.h>
@@ -3594,6 +3595,18 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                         ShowHelpMarker("For when the game sends HUDless, but you want to disable it");
 
                         ImGui::EndDisabled();
+
+                        if (const auto extHudless = ExternalHudless::Snapshot(); extHudless.submitted > 0)
+                        {
+                            ImGui::Text("External HUDless (ReShade): %llu tagged, %llu rejected",
+                                        (unsigned long long) extHudless.tagged,
+                                        (unsigned long long) extHudless.rejected);
+                            ShowHelpMarker("HUD-less frames captured by the OptiScaler HUDless ReShade add-on.\n"
+                                           "Use \"Disable HUDless\" to compare with and without it.");
+
+                            if (extHudless.lastMessage[0] != '\0')
+                                ImGui::TextDisabled("%s", extHudless.lastMessage);
+                        }
 
                         bool depthValidNow = config->FGDepthValidNow.value_or_default();
                         if (ImGui::Checkbox("Depth as ValidNow", &depthValidNow))
