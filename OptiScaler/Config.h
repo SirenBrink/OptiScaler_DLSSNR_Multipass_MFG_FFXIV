@@ -895,6 +895,7 @@ class Config
     // External HUD-less: draw the newest real frame's UI over every frame-generation output (after FG)
     CustomOptional<bool> FGExternalUIPasteAfterFG { true };
     CustomOptional<bool> FGExternalUIPasteCleanup { true };
+    CustomOptional<bool> FGExternalUIPasteSteadyTiming { false };
     CustomOptional<bool> FGSkipReset { false };
     CustomOptional<int> FGAllowedFrameAhead { 1 };
     CustomOptional<bool> FGDepthValidNow { false };

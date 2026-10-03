@@ -915,6 +915,12 @@ void UiPaste::Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
         return;
 
     // Pick the newest image whose write has completed, never older than one already shown.
+    // Steady timing caps the pick at one real frame behind the newest frame the game submitted:
+    // that image is almost always complete, so the switch to the next image happens at the same
+    // point of every base frame instead of whenever the newest image happens to finish on the GPU
+    // (which made world-anchored UI such as nameplates step unevenly). Costs ~1 base frame of UI latency.
+    const bool steady = Config::Instance()->FGExternalUIPasteSteadyTiming.value_or_default();
+    const UINT64 newestAllowed = steady ? (g_frame > 0 ? g_frame - 1 : 0) : UINT64_MAX;
     const auto produced = Completed(g_produceFence);
     const double now = Util::MillisecondsNow();
     int pick = -1;
@@ -923,6 +929,9 @@ void UiPaste::Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
     {
         const auto& slot = g_slots[i];
         if (slot.state != SlotState::Ready || slot.image == nullptr || slot.producedValue > produced)
+            continue;
+
+        if (slot.frame > newestAllowed)
             continue;
 
         if (slot.frame + 2 < g_frame || slot.frame < g_lastPastedFrame || now - slot.producedAtMs > StaleImageMs)

@@ -3567,6 +3567,15 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                                    "(a window closing, a tab switching), also paste the newest real frame there.\n"
                                    "Removes the fading ghost DLSS-G draws while the UI changes.");
 
+                    bool pasteSteady = config->FGExternalUIPasteSteadyTiming.value_or_default();
+                    if (ImGui::Checkbox("Steady UI timing", &pasteSteady))
+                        config->FGExternalUIPasteSteadyTiming = pasteSteady;
+
+                    ShowHelpMarker("Always paste the UI from one real frame behind the newest one, so it\n"
+                                   "changes at an even pace. Makes nameplates and other UI that follows\n"
+                                   "characters step evenly instead of jittering.\n"
+                                   "Adds about one base frame of UI delay (~22 ms at 45 fps).");
+
                     ImGui::SameLine(0.0f, 16.0f);
 
                     bool pasteTint = UiPaste::DebugTint();
