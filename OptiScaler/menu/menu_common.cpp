@@ -3525,6 +3525,16 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                 if (extHudless.lastMessage[0] != '\0')
                     ImGui::TextDisabled("%s", extHudless.lastMessage);
 
+                bool uiRecomposition = config->FGDLSSGUIRecomposition.has_value()
+                                           ? config->FGDLSSGUIRecomposition.value()
+                                           : true; // auto: on while this add-on feeds frames
+                if (ImGui::Checkbox("DLSS-G UI recomposition", &uiRecomposition))
+                    config->FGDLSSGUIRecomposition = uiRecomposition;
+
+                ShowHelpMarker("Tells DLSS-G to process the HUDless image and the UI image separately\n"
+                               "instead of only using them as hints. Without it the UI is still interpolated.\n"
+                               "Changing it may cause a short hitch while DLSS-G reallocates.");
+
                 bool uiFromHudless = config->FGExternalUIFromHudless.value_or_default();
                 if (ImGui::Checkbox("Build UI image from HUDless", &uiFromHudless))
                     config->FGExternalUIFromHudless = uiFromHudless;

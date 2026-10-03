@@ -10,6 +10,7 @@
 #include <hooks/Reflex_Hooks.h>
 #include <hooks/Streamline_Hooks.h>
 #include "MfgUnlock.h"
+#include <misc/ExternalHudless.h>
 #include <hooks/DxgiFactory_Hooks.h>
 
 #include <magic_enum.hpp>
@@ -379,6 +380,44 @@ bool DLSSG_Dx12::Dispatch()
     {
         options.mode = sl::DLSSGMode::eDynamic;
         options.dynamicTargetFrameRate = Config::Instance()->FGDLSSGFramerateTargetDMFG.value_or_default();
+    }
+
+    // Separate UI path: without this DLSS-G treats tagged HUD-less / UI images as hints only and still
+    // interpolates the UI. auto = on while the external HUD-less ReShade add-on is feeding frames.
+    {
+        const auto& recompositionConfig = Config::Instance()->FGDLSSGUIRecomposition;
+        const auto external = ExternalHudless::Snapshot();
+        const bool recomposition =
+            recompositionConfig.has_value() ? recompositionConfig.value() : external.submitted > 0;
+
+        if (recomposition)
+        {
+            options.enableUserInterfaceRecomposition = sl::Boolean::eTrue;
+
+            if (external.lastFormat != 0)
+            {
+                auto hudlessFormat = static_cast<DXGI_FORMAT>(external.lastFormat);
+                if (hudlessFormat == DXGI_FORMAT_R8G8B8A8_TYPELESS)
+                    hudlessFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+                else if (hudlessFormat == DXGI_FORMAT_B8G8R8A8_TYPELESS)
+                    hudlessFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+                else if (hudlessFormat == DXGI_FORMAT_R10G10B10A2_TYPELESS)
+                    hudlessFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
+
+                options.hudLessBufferFormat = static_cast<uint32_t>(hudlessFormat);
+            }
+
+            if (Config::Instance()->FGExternalUIFromHudless.value_or_default())
+                options.uiBufferFormat = static_cast<uint32_t>(DXGI_FORMAT_R8G8B8A8_UNORM);
+        }
+
+        static int lastLogged = -1;
+        if (lastLogged != (int) recomposition)
+        {
+            LOG_INFO("DLSSG UI recomposition: {} (hudless format {}, ui format {})", recomposition,
+                     options.hudLessBufferFormat, options.uiBufferFormat);
+            lastLogged = (int) recomposition;
+        }
     }
 
     StreamlineHooks::applyMenuDlssgInterlock(options, true);
