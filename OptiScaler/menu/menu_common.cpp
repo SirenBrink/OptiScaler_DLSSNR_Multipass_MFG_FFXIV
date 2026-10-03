@@ -3533,7 +3533,8 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
                 ShowHelpMarker("Tells DLSS-G to process the HUDless image and the UI image separately\n"
                                "instead of only using them as hints. Without it the UI is still interpolated.\n"
-                               "Changing it may cause a short hitch while DLSS-G reallocates.");
+                               "DLSS-G reads this when it starts: Save Settings and restart the game after changing it.\n"
+                               "A DLSS-G preset forced by the NVIDIA App or driver can still disable it.");
 
                 bool uiFromHudless = config->FGExternalUIFromHudless.value_or_default();
                 if (ImGui::Checkbox("Build UI image from HUDless", &uiFromHudless))

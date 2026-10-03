@@ -383,12 +383,15 @@ bool DLSSG_Dx12::Dispatch()
     }
 
     // Separate UI path: without this DLSS-G treats tagged HUD-less / UI images as hints only and still
-    // interpolates the UI. auto = on while the external HUD-less ReShade add-on is feeding frames.
+    // interpolates the UI. nvngx_dlssg reads it at feature *creation*, so it must already be on for the
+    // very first SetOptions. auto = on when the external HUD-less ReShade add-on is loaded in the process
+    // (it loads with ReShade, before frame generation starts) or has already submitted a frame.
     {
         const auto& recompositionConfig = Config::Instance()->FGDLSSGUIRecomposition;
         const auto external = ExternalHudless::Snapshot();
-        const bool recomposition =
-            recompositionConfig.has_value() ? recompositionConfig.value() : external.submitted > 0;
+        static const bool addonLoaded = GetModuleHandleW(L"OptiScalerHudless.addon64") != nullptr;
+        const bool recomposition = recompositionConfig.has_value() ? recompositionConfig.value()
+                                                                   : (addonLoaded || external.submitted > 0);
 
         if (recomposition)
         {
@@ -414,8 +417,9 @@ bool DLSSG_Dx12::Dispatch()
         static int lastLogged = -1;
         if (lastLogged != (int) recomposition)
         {
-            LOG_INFO("DLSSG UI recomposition: {} (hudless format {}, ui format {})", recomposition,
-                     options.hudLessBufferFormat, options.uiBufferFormat);
+            LOG_INFO("DLSSG UI recomposition: {} (add-on loaded {}, hudless format {}, ui format {}){}",
+                     recomposition, addonLoaded, options.hudLessBufferFormat, options.uiBufferFormat,
+                     lastLogged == -1 ? "" : " -- changed after start, only applies after a game restart");
             lastLogged = (int) recomposition;
         }
     }
