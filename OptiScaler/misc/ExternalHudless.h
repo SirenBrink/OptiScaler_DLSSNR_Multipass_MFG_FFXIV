@@ -45,4 +45,16 @@ void MarkRejected(const char* reason);
 void Clear();
 
 StatusV1 Snapshot();
+
+// UI image derived from final vs HUD-less (internal only, not part of the export ABI).
+struct UiStatus
+{
+    uint64_t tagged = 0;
+    uint64_t rejected = 0;
+    char lastMessage[160] = {};
+};
+
+void MarkUiTagged();
+void MarkUiRejected(const char* reason);
+UiStatus UiSnapshot();
 } // namespace ExternalHudless

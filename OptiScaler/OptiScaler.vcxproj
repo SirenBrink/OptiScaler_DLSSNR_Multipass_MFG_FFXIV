@@ -391,6 +391,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="hooks\VulkanwDx12_Hooks.h" />
     <ClInclude Include="misc\IdentifyGpu.h" />
     <ClInclude Include="misc\ExternalHudless.h" />
+    <ClInclude Include="shaders\ui_extract\UE_Common.h" />
+    <ClInclude Include="shaders\ui_extract\UE_Dx12.h" />
     <ClInclude Include="inputs\FSR2_Dx11.h" />
     <ClInclude Include="inputs\FSR2_Vk.h" />
     <ClInclude Include="inputs\XeSS_Dx11.h" />
@@ -659,6 +661,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="menu\input\input_system_xinput.cpp" />
     <ClCompile Include="misc\IdentifyGpu.cpp" />
     <ClCompile Include="misc\ExternalHudless.cpp" />
+    <ClCompile Include="shaders\ui_extract\UE_Dx12.cpp" />
     <ClCompile Include="misc\companion\Companion.cpp" />
     <ClCompile Include="misc\companion\CompanionNative.cpp" />
     <ClCompile Include="misc\companion\CompanionLayer.cpp" />

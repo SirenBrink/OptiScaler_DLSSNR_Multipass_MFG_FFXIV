@@ -114,6 +114,43 @@ void ExternalHudless::Clear()
         previous->Release();
 }
 
+namespace
+{
+ExternalHudless::UiStatus g_uiStatus;
+uint64_t g_lastLoggedUiRejectCount = 0;
+} // namespace
+
+void ExternalHudless::MarkUiTagged()
+{
+    std::lock_guard lock(g_mutex);
+
+    if (g_uiStatus.tagged == 0)
+        LOG_INFO("External HUD-less: first UI colour+alpha image tagged for frame generation");
+
+    g_uiStatus.tagged++;
+    strncpy_s(g_uiStatus.lastMessage, sizeof(g_uiStatus.lastMessage), "UI image tagged every frame", _TRUNCATE);
+}
+
+void ExternalHudless::MarkUiRejected(const char* reason)
+{
+    std::lock_guard lock(g_mutex);
+
+    g_uiStatus.rejected++;
+    strncpy_s(g_uiStatus.lastMessage, sizeof(g_uiStatus.lastMessage), reason != nullptr ? reason : "", _TRUNCATE);
+
+    if (g_uiStatus.rejected <= 5 || g_uiStatus.rejected - g_lastLoggedUiRejectCount >= 600)
+    {
+        g_lastLoggedUiRejectCount = g_uiStatus.rejected;
+        LOG_WARN("External UI image skipped ({} total): {}", g_uiStatus.rejected, reason != nullptr ? reason : "");
+    }
+}
+
+ExternalHudless::UiStatus ExternalHudless::UiSnapshot()
+{
+    std::lock_guard lock(g_mutex);
+    return g_uiStatus;
+}
+
 ExternalHudless::StatusV1 ExternalHudless::Snapshot()
 {
     std::lock_guard lock(g_mutex);

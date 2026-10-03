@@ -888,6 +888,10 @@ class Config
     CustomOptional<bool> FGUIPremultipliedAlpha { true };
     CustomOptional<bool> FGDisableHudless { false };
     CustomOptional<bool> FGDisableUI { false };
+    // External HUD-less (ReShade add-on): also derive a UI colour+alpha image from final vs HUD-less
+    CustomOptional<bool> FGExternalUIFromHudless { true };
+    CustomOptional<float> FGExternalUIThreshold { 0.008f };
+    CustomOptional<int> FGExternalUIDilation { 1 };
     CustomOptional<bool> FGSkipReset { false };
     CustomOptional<int> FGAllowedFrameAhead { 1 };
     CustomOptional<bool> FGDepthValidNow { false };

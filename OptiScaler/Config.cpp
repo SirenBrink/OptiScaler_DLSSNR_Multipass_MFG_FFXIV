@@ -153,6 +153,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGUIPremultipliedAlpha.set_from_config(readBool("FrameGen", "UIPremultipliedAlpha"));
             FGDisableHudless.set_from_config(readBool("FrameGen", "DisableHudless"));
             FGDisableUI.set_from_config(readBool("FrameGen", "DisableUI"));
+            FGExternalUIFromHudless.set_from_config(readBool("FrameGen", "ExternalUIFromHudless"));
+            FGExternalUIThreshold.set_from_config(readFloat("FrameGen", "ExternalUIThreshold"));
+            FGExternalUIDilation.set_from_config(readInt("FrameGen", "ExternalUIDilation"));
             FGSkipReset.set_from_config(readBool("FrameGen", "SkipReset"));
             FGRectLeft.set_from_config(readInt("FrameGen", "RectLeft"));
             FGRectTop.set_from_config(readInt("FrameGen", "RectTop"));
@@ -1101,6 +1104,12 @@ bool Config::SaveIni()
         ini.SetValue("FrameGen", "DisableHudless",
                      GetBoolValue(Instance()->FGDisableHudless.value_for_config()).c_str());
         ini.SetValue("FrameGen", "DisableUI", GetBoolValue(Instance()->FGDisableUI.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "ExternalUIFromHudless",
+                     GetBoolValue(Instance()->FGExternalUIFromHudless.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "ExternalUIThreshold",
+                     GetFloatValue(Instance()->FGExternalUIThreshold.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "ExternalUIDilation",
+                     GetIntValue(Instance()->FGExternalUIDilation.value_for_config()).c_str());
         ini.SetValue("FrameGen", "SkipReset", GetBoolValue(Instance()->FGSkipReset.value_for_config()).c_str());
         ini.SetValue("FrameGen", "RectLeft", GetIntValue(Instance()->FGRectLeft.value_for_config()).c_str());
         ini.SetValue("FrameGen", "RectTop", GetIntValue(Instance()->FGRectTop.value_for_config()).c_str());

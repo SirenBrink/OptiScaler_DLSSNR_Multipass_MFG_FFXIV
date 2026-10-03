@@ -3,6 +3,7 @@
 #include <misc/FfxivLightingCapture.h>
 #include <misc/companion/Companion.h>
 #include <misc/ExternalHudless.h>
+#include <shaders/ui_extract/UE_Dx12.h>
 #include <framegen/IFGFeature_Dx12.h>
 #include "dx11_with_dx12_sc.h"
 
@@ -891,7 +892,8 @@ bool Dx11wDx12SC::_RequestSharedBackBuffer(UINT index)
         sourceTexture->GetDesc(&desc);
         desc.Usage = D3D11_USAGE_DEFAULT;
         desc.CPUAccessFlags = 0;
-        if (_hdrOutput) desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+        // Readable as a texture: HDR10 conversion and the external-HUD-less UI extraction sample it.
+        desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
         desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
 
         result = _dx11Device->CreateTexture2D(&desc, nullptr, &_sharedDx11BackBufferCopies[_currentFakeIndex]);
@@ -1342,6 +1344,12 @@ void Dx11wDx12SC::_ReleaseExternalHudless()
     _sharedHudlessHandles.clear();
     _hudlessPending = false;
 
+    for (auto& image : _uiImages)
+        SafeRelease(image);
+
+    _uiImages.clear();
+    _uiImageStates.clear();
+
     ExternalHudless::Clear();
 }
 
@@ -1536,9 +1544,160 @@ void Dx11wDx12SC::_TagExternalHudless()
     resource.frameIndex = fIndex;
 
     if (fg->SetResource(&resource))
+    {
         ExternalHudless::MarkTagged();
+        _TagExternalUi(fg, fIndex, cmdList);
+    }
     else if (Config::Instance()->FGDisableHudless.value_or_default())
         ExternalHudless::MarkRejected("\"Disable HUDless\" is checked in the OptiScaler menu");
     else
         ExternalHudless::MarkRejected("Frame generator refused the HUD-less texture (see OptiScaler.log)");
+}
+
+void Dx11wDx12SC::_TagExternalUi(IFGFeature_Dx12* fg, int fIndex, ID3D12GraphicsCommandList* cmdList)
+{
+    auto& cfg = *Config::Instance();
+
+    if (!cfg.FGExternalUIFromHudless.value_or_default())
+        return;
+
+    if (_hdrOutput || Hdr10::Active())
+    {
+        ExternalHudless::MarkUiRejected("Off while FFXIV HDR10 output is on (DLSS-G refuses a UI image in HDR here)");
+        return;
+    }
+
+    if (cfg.FGDisableUI.value_or_default())
+    {
+        ExternalHudless::MarkUiRejected("\"DisableUI\" is true in OptiScaler.ini");
+        return;
+    }
+
+    const UINT slot = _hudlessSlot;
+    if (slot >= _openedDx11BackBuffers.size() || _openedDx11BackBuffers[slot] == nullptr ||
+        slot >= _openedHudless.size() || _openedHudless[slot] == nullptr)
+    {
+        ExternalHudless::MarkUiRejected("Backbuffer or HUD-less copy missing for this slot");
+        return;
+    }
+
+    ID3D12Resource* finalImage = _openedDx11BackBuffers[slot];
+    ID3D12Resource* hudless = _openedHudless[slot];
+
+    const auto finalDesc = finalImage->GetDesc();
+    const auto hudlessDesc = hudless->GetDesc();
+
+    if ((finalDesc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0 ||
+        (hudlessDesc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0)
+    {
+        ExternalHudless::MarkUiRejected("Backbuffer copy is not readable as a texture");
+        return;
+    }
+
+    if (finalDesc.Width != hudlessDesc.Width || finalDesc.Height != hudlessDesc.Height)
+    {
+        ExternalHudless::MarkUiRejected("Backbuffer and HUD-less sizes differ");
+        return;
+    }
+
+    if (_uiExtract == nullptr)
+        _uiExtract = std::make_unique<UE_Dx12>("UI extract", _dx12Device);
+
+    if (!_uiExtract->IsInit())
+    {
+        ExternalHudless::MarkUiRejected("UI extraction shader failed to initialise (see OptiScaler.log)");
+        return;
+    }
+
+    if (_uiImages.size() < _bufferCount)
+    {
+        _uiImages.resize(_bufferCount, nullptr);
+        _uiImageStates.resize(_bufferCount, D3D12_RESOURCE_STATE_COMMON);
+    }
+
+    if (slot >= _uiImages.size())
+    {
+        ExternalHudless::MarkUiRejected("Backbuffer slot out of range");
+        return;
+    }
+
+    auto& uiImage = _uiImages[slot];
+
+    if (uiImage != nullptr)
+    {
+        const auto uiDesc = uiImage->GetDesc();
+        if (uiDesc.Width != finalDesc.Width || uiDesc.Height != finalDesc.Height)
+            SafeRelease(uiImage);
+    }
+
+    if (uiImage == nullptr)
+    {
+        D3D12_HEAP_PROPERTIES heap = {};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        D3D12_RESOURCE_DESC desc = {};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = finalDesc.Width;
+        desc.Height = finalDesc.Height;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+        auto result = _dx12Device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                           IID_PPV_ARGS(&uiImage));
+        if (FAILED(result) || uiImage == nullptr)
+        {
+            LOG_ERROR("CreateCommittedResource for external UI image slot {} failed: {:X}", slot, (UINT) result);
+            ExternalHudless::MarkUiRejected("Could not create the UI image");
+            return;
+        }
+
+        uiImage->SetName(std::format(L"External UI [{}]", slot).c_str());
+        _uiImageStates[slot] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        LOG_INFO("External UI image slot {} created: {}x{}", slot, desc.Width, desc.Height);
+    }
+
+    // Both inputs rest in COMMON between uses (interop copy queue / Streamline tag copy).
+    TransitionResource(cmdList, finalImage, D3D12_RESOURCE_STATE_COMMON,
+                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    TransitionResource(cmdList, hudless, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    TransitionResource(cmdList, uiImage, _uiImageStates[slot], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    const bool dispatched = _uiExtract->Dispatch(
+        cmdList, finalImage, ExternalHudlessTypedFormat(finalDesc.Format), hudless,
+        ExternalHudlessTypedFormat(hudlessDesc.Format), uiImage, cfg.FGExternalUIThreshold.value_or_default(),
+        (uint32_t) std::max(0, cfg.FGExternalUIDilation.value_or_default()));
+
+    TransitionResource(cmdList, uiImage, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    _uiImageStates[slot] = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+    TransitionResource(cmdList, hudless, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+    TransitionResource(cmdList, finalImage, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                       D3D12_RESOURCE_STATE_COMMON);
+
+    if (!dispatched)
+    {
+        ExternalHudless::MarkUiRejected("UI extraction dispatch failed");
+        return;
+    }
+
+    Dx12Resource resource {};
+    resource.type = FG_ResourceType::UIColor;
+    resource.resource = uiImage;
+    resource.cmdList = cmdList;
+    resource.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    resource.validity = FG_ResourceValidity::ValidNow;
+    resource.width = finalDesc.Width;
+    resource.height = finalDesc.Height;
+    resource.frameIndex = fIndex;
+
+    if (fg->SetResource(&resource))
+        ExternalHudless::MarkUiTagged();
+    else
+        ExternalHudless::MarkUiRejected("Frame generator refused the UI image (see OptiScaler.log)");
 }

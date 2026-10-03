@@ -3516,6 +3516,49 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             ShowHelpMarker("Needs HUDless texture to compare with final image.\n"
                            "UI elements and ONLY UI elements should have a pink tint!");
 
+            if (const auto extHudless = ExternalHudless::Snapshot(); extHudless.submitted > 0)
+            {
+                const auto extUi = ExternalHudless::UiSnapshot();
+
+                ImGui::Text("External HUDless (ReShade): %llu tagged, %llu rejected",
+                            (unsigned long long) extHudless.tagged, (unsigned long long) extHudless.rejected);
+                if (extHudless.lastMessage[0] != '\0')
+                    ImGui::TextDisabled("%s", extHudless.lastMessage);
+
+                bool uiFromHudless = config->FGExternalUIFromHudless.value_or_default();
+                if (ImGui::Checkbox("Build UI image from HUDless", &uiFromHudless))
+                    config->FGExternalUIFromHudless = uiFromHudless;
+
+                ShowHelpMarker("Pixels that differ between the final frame and the HUDless frame are UI.\n"
+                               "They are given to frame generation as a separate UI image, which it\n"
+                               "pastes on top of generated frames instead of interpolating them.\n"
+                               "SDR only. Uses \"Show Detected UI\" logic to decide what is UI.");
+
+                if (uiFromHudless)
+                {
+                    float uiThreshold = config->FGExternalUIThreshold.value_or_default();
+                    if (ImGui::SliderFloat("UI threshold", &uiThreshold, 0.001f, 0.1f, "%.3f",
+                                           ImGuiSliderFlags_Logarithmic))
+                    {
+                        config->FGExternalUIThreshold = uiThreshold;
+                    }
+
+                    ShowHelpMarker("How different a pixel must be to count as UI.\n"
+                                   "Lower catches faint UI edges; higher ignores noise.");
+
+                    int uiDilation = config->FGExternalUIDilation.value_or_default();
+                    if (ImGui::SliderInt("UI edge grow (px)", &uiDilation, 0, 4))
+                        config->FGExternalUIDilation = uiDilation;
+
+                    ShowHelpMarker("Grows the UI area by this many pixels to include soft edges and glows.");
+
+                    ImGui::Text("UI image: %llu tagged, %llu skipped", (unsigned long long) extUi.tagged,
+                                (unsigned long long) extUi.rejected);
+                    if (extUi.lastMessage[0] != '\0')
+                        ImGui::TextDisabled("%s", extUi.lastMessage);
+                }
+            }
+
             const auto isUsingUIAny = fgOutput->IsUsingUIAny();
 
             ImGui::BeginDisabled(!isUsingUIAny);
