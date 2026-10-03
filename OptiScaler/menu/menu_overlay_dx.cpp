@@ -13,8 +13,16 @@
 #include <imgui/imgui_impl_win32.h>
 
 #include <mutex>
+#include <atomic>
 static std::recursive_mutex overlayRenderMutex;
 static unsigned int overlayResizeDepth = 0;
+// Lock misses cannot inspect ImGui state safely. Report them from the next owned menu draw.
+static std::atomic<unsigned int> overlayBusyPresents {0};
+static unsigned int overlayResizePresents = 0;
+static unsigned int overlayDraws = 0;
+static unsigned int overlayGpuWaits = 0;
+static ULONGLONG overlayGpuWaitMs = 0;
+static ULONGLONG overlayReportTime = 0;
 MenuOverlayDx::ScopedResize::ScopedResize()
 {
     const std::lock_guard<std::recursive_mutex> lock(overlayRenderMutex);
@@ -491,6 +499,8 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
             }
             if (g_overlayFence->GetCompletedValue() < g_overlayFenceValue)
             {
+                const auto waitStarted = GetTickCount64();
+                ++overlayGpuWaits;
                 if (!g_overlayFenceEvent)
                     g_overlayFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
                 const auto waitResult = g_overlayFenceEvent
@@ -509,6 +519,7 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                     pSwapChain->Release();
                     return;
                 }
+                overlayGpuWaitMs += GetTickCount64() - waitStarted;
             }
             ImGui_ImplDX12_NewFrame();
 
@@ -603,6 +614,17 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                     g_overlayFenceValue = UINT64_MAX;
                     LOG_ERROR("DX12 overlay completion signal failed: {:X}", (UINT) result);
                 }
+                ++overlayDraws;
+                const auto reportNow = GetTickCount64();
+                if (reportNow - overlayReportTime >= 5000)
+                {
+                    LOG_INFO("DX12 menu presentation: {} draws, {} busy-lock skips, {} resize skips, {} GPU waits ({} ms total); HDR layer {}",
+                        overlayDraws, overlayBusyPresents.exchange(0), overlayResizePresents,
+                        overlayGpuWaits, overlayGpuWaitMs, g_hdrMenuLayerEnabled);
+                    overlayDraws = overlayResizePresents = overlayGpuWaits = 0;
+                    overlayGpuWaitMs = 0;
+                    overlayReportTime = reportNow;
+                }
             }
         }
         else
@@ -645,8 +667,16 @@ void MenuOverlayDx::Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     // XeFG may present internally while ResizeBuffers is still on the stack.
     // Do not block its worker or rebuild resources released for that resize.
     const std::unique_lock<std::recursive_mutex> lock(overlayRenderMutex, std::try_to_lock);
-    if (!lock.owns_lock() || overlayResizeDepth != 0)
+    if (!lock.owns_lock())
+    {
+        overlayBusyPresents.fetch_add(1, std::memory_order_relaxed);
         return;
+    }
+    if (overlayResizeDepth != 0)
+    {
+        ++overlayResizePresents;
+        return;
+    }
     if (!Config::Instance()->OverlayMenu.value_or_default())
     {
         MenuOverlayBase::Present();
