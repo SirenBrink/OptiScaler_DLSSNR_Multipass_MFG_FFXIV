@@ -230,11 +230,27 @@ inline void Run(Package& package)
     // pass-through without forwarding/injecting clicks or disabling the window.
     if(!SetLayeredWindowAttributes(window.value,0,255,LWA_ALPHA))
         throw std::runtime_error("Cannot enable layer mouse pass-through");
-    DXGI_SWAP_CHAIN_DESC1 sd{};sd.Width=package.width;sd.Height=package.height;sd.Format=DXGI_FORMAT_B8G8R8A8_UNORM;sd.SampleDesc.Count=1;sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;sd.BufferCount=2;sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;sd.AlphaMode=DXGI_ALPHA_MODE_PREMULTIPLIED;sd.Flags=DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
-    ComPtr<IDXGISwapChain1> swap;Check(factory->CreateSwapChainForComposition(device.Get(),&sd,nullptr,&swap));ComPtr<IDXGISwapChain2> swap2;Check(swap.As(&swap2));Check(swap2->SetMaximumFrameLatency(1));Handle pacing{swap2->GetFrameLatencyWaitableObject()};if(!pacing.value)throw std::runtime_error("No layer pacing handle");
+    DXGI_SWAP_CHAIN_DESC1 sd{};sd.Width=package.width;sd.Height=package.height;sd.Format=DXGI_FORMAT_B8G8R8A8_UNORM;sd.SampleDesc.Count=1;sd.BufferUsage=DXGI_USAGE_SHADER_INPUT;sd.BufferCount=2;sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;sd.AlphaMode=DXGI_ALPHA_MODE_PREMULTIPLIED;sd.Flags=DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+    // Injected overlays (ReShade) attach a full effect runtime to every swap chain created with
+    // DXGI_USAGE_RENDER_TARGET_OUTPUT. On this transparent layer that ran the whole game preset at
+    // hundreds of presents per second and exhausted VRAM. Without that usage they skip the chain;
+    // all drawing goes to `canvas`, which is copied into the back buffer right before Present1.
+    ComPtr<IDXGISwapChain1> swap;
+    if(FAILED(factory->CreateSwapChainForComposition(device.Get(),&sd,nullptr,&swap)))
+    {
+        LOG_WARN("FFXIV nameplate live: shader-input-only layer swap chain refused; using a render-target swap chain (ReShade may attach to it)");
+        sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;swap.Reset();
+        Check(factory->CreateSwapChainForComposition(device.Get(),&sd,nullptr,&swap));
+    }ComPtr<IDXGISwapChain2> swap2;Check(swap.As(&swap2));Check(swap2->SetMaximumFrameLatency(1));Handle pacing{swap2->GetFrameLatencyWaitableObject()};if(!pacing.value)throw std::runtime_error("No layer pacing handle");
     ComPtr<IDXGIDevice> dxgi;Check(device.As(&dxgi));ComPtr<IDCompositionDevice> composition;Check(DCompositionCreateDevice(dxgi.Get(),IID_PPV_ARGS(&composition)));
     ComPtr<IDCompositionTarget> target;ComPtr<IDCompositionVisual> visual;Check(composition->CreateTargetForHwnd(window.value,TRUE,&target));Check(composition->CreateVisual(&visual));Check(visual->SetContent(swap.Get()));Check(target->SetRoot(visual.Get()));Check(composition->Commit());
-    ComPtr<ID3D11Texture2D> back;Check(swap->GetBuffer(0,IID_PPV_ARGS(&back)));ComPtr<ID3D11RenderTargetView> rtv;Check(device->CreateRenderTargetView(back.Get(),nullptr,&rtv));
+    ComPtr<ID3D11Texture2D> back;Check(swap->GetBuffer(0,IID_PPV_ARGS(&back)));
+    ComPtr<ID3D11Texture2D> canvas;
+    {
+        D3D11_TEXTURE2D_DESC cd{};cd.Width=package.width;cd.Height=package.height;cd.MipLevels=1;cd.ArraySize=1;cd.Format=sd.Format;cd.SampleDesc.Count=1;
+        cd.Usage=D3D11_USAGE_DEFAULT;cd.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;Check(device->CreateTexture2D(&cd,nullptr,&canvas));
+    }
+    ComPtr<ID3D11RenderTargetView> rtv;Check(device->CreateRenderTargetView(canvas.Get(),nullptr,&rtv));
     D3D11_DEPTH_STENCIL_DESC dd{};ComPtr<ID3D11DepthStencilState> depth;Check(device->CreateDepthStencilState(&dd,&depth));
     D3D11_BUFFER_DESC vbDesc{};vbDesc.ByteWidth=65536*40;vbDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;vbDesc.Usage=D3D11_USAGE_DYNAMIC;vbDesc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;ComPtr<ID3D11Buffer> vb;Check(device->CreateBuffer(&vbDesc,nullptr,&vb));
     std::vector<UINT> indices;for(UINT i=0;i<65536;i+=4)for(UINT off:{0u,1u,2u,0u,2u,3u})indices.push_back(i+off);D3D11_BUFFER_DESC ibDesc{};ibDesc.ByteWidth=static_cast<UINT>(indices.size()*4);ibDesc.BindFlags=D3D11_BIND_INDEX_BUFFER;ibDesc.Usage=D3D11_USAGE_IMMUTABLE;D3D11_SUBRESOURCE_DATA ii{indices.data(),0,0};ComPtr<ID3D11Buffer> ib;Check(device->CreateBuffer(&ibDesc,&ii,&ib));
@@ -287,7 +303,7 @@ inline void Run(Package& package)
             context->OMSetRenderTargets(0,nullptr,nullptr);
             if(visibility.Update(context.Get(),*package.visibility))
             {
-                context->CopyResource(back.Get(),visibility.image.Get());
+                context->CopyResource(canvas.Get(),visibility.image.Get());
                 const bool first=visibilityGate.seen!=visibility.serial;
                 const double imageAge=double(GetTickCount64()-visibility.time)/1000;
                 age=imageAge;
@@ -301,7 +317,7 @@ inline void Run(Package& package)
                     auto moves=FfxivCompanion::ImageMidpoint::Build(*visibility.previousSnapshot,*visibility.snapshot);
                     if(!moves.empty())
                     {
-                        FfxivCompanion::ImageMidpoint::Render(regionContext.Get(),visibility.image.Get(),back.Get(),rtv.Get(),moves);
+                        FfxivCompanion::ImageMidpoint::Render(regionContext.Get(),visibility.image.Get(),canvas.Get(),rtv.Get(),moves);
                         midpoint=true;
                     }
                     else ++noSafeMovement;
@@ -332,6 +348,8 @@ inline void Run(Package& package)
         // alone does not isolate third-party hooks: Layer also requires the tested
         // OptiFG presenter path. On failure, restore native drawing without retrying
         // through a different presentation entry.
+        context->OMSetRenderTargets(0,nullptr,nullptr);
+        context->CopyResource(back.Get(),canvas.Get());
         const DXGI_PRESENT_PARAMETERS presentParameters{};
         const auto presentResult=swap->Present1(1,0,&presentParameters);
         if(presents.load()==0 || FAILED(presentResult))
