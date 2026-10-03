@@ -1949,7 +1949,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             device->Release(); return;
         }
     }
-    if (reduced && g_nr.colorSmall == nullptr)
+    // Spatial packing supplies spatialColor directly; the ordinary resize raster is unused there.
+    if (reduced && !spatial && g_nr.colorSmall == nullptr)
         g_nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
 
     // The down-leg target is native (the answer is brought back to frame size before the resolve).
