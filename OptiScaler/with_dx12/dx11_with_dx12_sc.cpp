@@ -25,6 +25,8 @@
 
 static int scCount = 0;
 
+static DXGI_FORMAT ExternalHudlessTypedFormat(DXGI_FORMAT format);
+
 namespace
 {
 template <typename T> void SafeRelease(T*& value)
@@ -337,6 +339,10 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     if (!_WaitDx11ThenDx12())
         return DXGI_ERROR_DEVICE_REMOVED;
+
+    // UI-free frame generation: hand DLSS-G the HUD-less frame, the UI paste adds the UI back on
+    // every output frame (see misc/UiPaste.h). DLSS-G then has no UI of its own to interpolate.
+    _uiFreeThisFrame = _hudlessPending && _UiFreeFrameGenWanted();
 
     if (!_CopyDx11SharedToDx12FGBackBuffer(dx11Index))
         return DXGI_ERROR_DEVICE_REMOVED;
@@ -1093,6 +1099,29 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
 
     auto sourceBefore = _openedDx11BackBufferStates[copySlot];
     ID3D12Resource* copySource = _openedDx11BackBuffers[copySlot];
+    bool hudlessSource = false;
+
+    if (_uiFreeThisFrame && !_hdrOutput)
+    {
+        ID3D12Resource* hudless = _hudlessSlot == copySlot && copySlot < _openedHudless.size()
+                                      ? _openedHudless[copySlot]
+                                      : nullptr;
+        const auto fgDesc = fgBackBuffer->GetDesc();
+        if (hudless != nullptr)
+        {
+            const auto hudlessDesc = hudless->GetDesc();
+            if (hudlessDesc.Width == fgDesc.Width && hudlessDesc.Height == fgDesc.Height &&
+                ExternalHudlessTypedFormat(hudlessDesc.Format) == ExternalHudlessTypedFormat(fgDesc.Format))
+            {
+                copySource = hudless;
+                sourceBefore = D3D12_RESOURCE_STATE_COMMON; // shared HUD-less copies rest in COMMON
+                hudlessSource = true;
+            }
+        }
+
+        if (!hudlessSource)
+            _uiFreeThisFrame = false; // fall back to the normal frame (UI baked in) for this frame
+    }
     if (_hdrOutput)
     {
         copySource = Hdr10::Convert(_dx12Device, _copyCommandLists[copySlot], copySource, sourceBefore);
@@ -1112,7 +1141,8 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     TransitionResource(_copyCommandLists[copySlot], copySource, D3D12_RESOURCE_STATE_COPY_SOURCE,
                        sourceBefore);
 
-    _openedDx11BackBufferStates[copySlot] = D3D12_RESOURCE_STATE_COMMON;
+    if (!hudlessSource)
+        _openedDx11BackBufferStates[copySlot] = D3D12_RESOURCE_STATE_COMMON;
 
     fgBackBuffer->Release();
 
@@ -1554,7 +1584,10 @@ void Dx11wDx12SC::_TagExternalHudless()
     if (fg->SetResource(&resource))
     {
         ExternalHudless::MarkTagged();
-        _TagExternalUi(fg, fIndex, cmdList);
+        if (_uiFreeThisFrame)
+            ExternalHudless::MarkUiRejected("Not needed: frame generation gets the HUD-less frame (UI-free frame generation)");
+        else
+            _TagExternalUi(fg, fIndex, cmdList);
     }
     else if (Config::Instance()->FGDisableHudless.value_or_default())
         ExternalHudless::MarkRejected("\"Disable HUDless\" is checked in the OptiScaler menu");
@@ -1774,10 +1807,32 @@ void Dx11wDx12SC::_ProduceUiPaste(bool hudlessReady, UINT slot)
     UiPaste::ProduceParams params {};
     params.threshold = cfg.FGExternalUIThreshold.value_or_default();
     params.dilation = (uint32_t) std::max(0, cfg.FGExternalUIDilation.value_or_default());
-    params.cleanup = cfg.FGExternalUIPasteCleanup.value_or_default();
+    params.cleanup = cfg.FGExternalUIPasteCleanup.value_or_default() && !_uiFreeThisFrame;
 
     // Same queue that just waited for the interop copy, so both inputs are complete. This is
     // submitted before FG Present executes the UI command list and DLSS-G's own work.
     UiPaste::Produce(_dx12Device, fg->GetCommandQueue(), finalImage, ExternalHudlessTypedFormat(finalDesc.Format),
                      hudless, ExternalHudlessTypedFormat(hudlessDesc.Format), params);
+}
+
+bool Dx11wDx12SC::_UiFreeFrameGenWanted()
+{
+    auto& cfg = *Config::Instance();
+    auto& state = State::Instance();
+
+    if (!cfg.FGExternalUIPasteAfterFG.value_or_default() || !cfg.FGExternalUIFreeFrameGen.value_or_default())
+        return false;
+
+    // Same gates as UiPaste::Paste, so the UI is never removed from a frame nobody pastes it back onto.
+    if (state.activeFgOutput != FGOutput::DLSSG || state.fgHudlessCompare || state.isShuttingDown)
+        return false;
+
+    if (_hdrOutput || Hdr10::Active())
+        return false;
+
+    if (FGHooks::IsDx12InteropPresentSC(_fgSwapChain) || state.currentFGSwapchain != _fgSwapChain)
+        return false;
+
+    auto fg = _fg != nullptr ? _fg : state.currentFG;
+    return fg != nullptr && fg->IsActive() && !fg->IsPaused();
 }

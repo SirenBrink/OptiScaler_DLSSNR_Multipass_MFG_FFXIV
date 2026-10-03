@@ -896,6 +896,7 @@ class Config
     CustomOptional<bool> FGExternalUIPasteAfterFG { true };
     CustomOptional<bool> FGExternalUIPasteCleanup { true };
     CustomOptional<bool> FGExternalUIPasteSteadyTiming { false };
+    CustomOptional<bool> FGExternalUIFreeFrameGen { true };
     CustomOptional<bool> FGSkipReset { false };
     CustomOptional<int> FGAllowedFrameAhead { 1 };
     CustomOptional<bool> FGDepthValidNow { false };

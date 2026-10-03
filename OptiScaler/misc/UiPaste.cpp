@@ -941,6 +941,25 @@ void UiPaste::Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
             pick = i;
     }
 
+    // In UI-free frame generation DLSS-G's frames carry no UI at all, so skipping a paste would make
+    // the UI blink out. Fall back to the newest completed image, even an older one.
+    const auto& cfg = *Config::Instance();
+    if (pick < 0 && cfg.FGExternalUIFreeFrameGen.value_or_default())
+    {
+        for (int i = 0; i < (int) SlotCount; ++i)
+        {
+            const auto& slot = g_slots[i];
+            if (slot.state != SlotState::Ready || slot.image == nullptr || slot.producedValue > produced ||
+                now - slot.producedAtMs > StaleImageMs)
+            {
+                continue;
+            }
+
+            if (pick < 0 || slot.frame > g_slots[pick].frame)
+                pick = i;
+        }
+    }
+
     if (pick < 0)
     {
         ++g_status.skipped;

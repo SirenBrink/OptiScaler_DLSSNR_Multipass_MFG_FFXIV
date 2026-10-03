@@ -3559,6 +3559,16 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
                 if (pasteUi)
                 {
+                    bool uiFreeFg = config->FGExternalUIFreeFrameGen.value_or_default();
+                    if (ImGui::Checkbox("UI-free frame generation", &uiFreeFg))
+                        config->FGExternalUIFreeFrameGen = uiFreeFg;
+
+                    ShowHelpMarker("Gives DLSS-G the HUD-less frame, so it generates frames with no UI at all,\n"
+                                   "and the paste adds the UI to every frame. Removes the doubled/ghosted UI\n"
+                                   "next to the pasted UI. The UI image and DLSS-G UI recomposition are\n"
+                                   "not used while this is on.");
+
+                    ImGui::BeginDisabled(uiFreeFg);
                     bool pasteCleanup = config->FGExternalUIPasteCleanup.value_or_default();
                     if (ImGui::Checkbox("Clear UI that just closed", &pasteCleanup))
                         config->FGExternalUIPasteCleanup = pasteCleanup;
@@ -3566,6 +3576,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                     ShowHelpMarker("Where the previous real frame had UI and the newest one does not\n"
                                    "(a window closing, a tab switching), also paste the newest real frame there.\n"
                                    "Removes the fading ghost DLSS-G draws while the UI changes.");
+                    ImGui::EndDisabled();
 
                     bool pasteSteady = config->FGExternalUIPasteSteadyTiming.value_or_default();
                     if (ImGui::Checkbox("Steady UI timing", &pasteSteady))
