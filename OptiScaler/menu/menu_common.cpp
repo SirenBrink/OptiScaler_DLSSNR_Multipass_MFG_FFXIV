@@ -3076,8 +3076,30 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         bool hdr = config->FfxivHDR.value_or_default();
         if (ImGui::Checkbox("Enable OptiScaler HDR (restart)", &hdr)) config->FfxivHDR = hdr;
         resetHdr("FfxivHDR", config->FfxivHDR);
+        int hdrMode=config->FfxivHDRMode.value_or_default()==1?1:0;
+        const char* hdrModes[]={"SDR expansion (original)","RenoDX scene HDR (experimental)"};
+        if(ImGui::Combo("HDR method",&hdrMode,hdrModes,2))config->FfxivHDRMode=hdrMode;
+        resetHdr("FfxivHDRMode",config->FfxivHDRMode);
+        ImGui::BeginDisabled(hdrMode!=1);
+        bool reshadeHighlights=config->FfxivHDRReShadeHighlights.value_or_default();
+        if(ImGui::Checkbox("Preserve HDR highlights through ReShade (experimental)",&reshadeHighlights))config->FfxivHDRReShadeHighlights=reshadeHighlights;
+        resetHdr("FfxivHDRReShadeHighlights",config->FfxivHDRReShadeHighlights);
+        ShowHelpMarker("Uses captured scene highlight brightness with the final SDR effect colours.\nRelaxes colour-difference rejection only where both images are bright, and preserves post-effect colour ratios.\nSDR ReShade input is unchanged. Overlapping bright HUD elements may also brighten. Detail clipped by a preset cannot be recovered.\nApplies immediately; save settings to keep your choice.");
+        bool nrSceneInput=config->FfxivHDRNRSceneInput.value_or_default();
+        if(ImGui::Checkbox("Use scene HDR input for NR (experimental)",&nrSceneInput))config->FfxivHDRNRSceneInput=nrSceneInput;
+        resetHdr("FfxivHDRNRSceneInput",config->FfxivHDRNRSceneInput);
+        ShowHelpMarker("Feeds preserved linear scene brightness through NR's reversible HDR proxy. Supports ordinary NR before upscaling, PreSR and alternating NR anchors.\nThe private DLSS residual carrier and ReShade stay SDR. Exposure is already applied; NR normalization is 1.\nMissing or incompatible scene data uses SDR NR and resets affected history. Save Settings to retain your choice.");
+        if(nrSceneInput){
+            auto status=Hdr10::nrSceneState.load(std::memory_order_relaxed);
+            if(!config->DlssNrEnabled.value_or_default())status=Hdr10::NrSceneState::NRDisabled;
+            else if(hdrMode!=1 || !Hdr10::Active())status=Hdr10::NrSceneState::HDRInactive;
+            else if(!config->DlssNrRunBeforeSr.value_or_default() && !config->DlssNrDeferredDlss.value_or_default())status=Hdr10::NrSceneState::RequiresBeforeSR;
+            ImGui::TextWrapped("NR scene input: %s",Hdr10::NrSceneText(status));
+        }
+        ImGui::EndDisabled();
+        ImGui::TextWrapped("Scene HDR preserves a parallel FP16 scene through RenoDX shaders. ReShade keeps SDR input; NR can optionally use the captured scene. Final output remains 10-bit PQ for DLSS-G compatibility. Missing scene data falls back to paper-white SDR, without invented highlights.");
         ImGui::TextWrapped("%s", Hdr10::Status().c_str());
-        ImGui::TextWrapped("Requires Windows HDR. Disable RTX HDR and Auto HDR. Supports DLSS-G, XeFG, or FG off. Game HUD shares the highlight curve. XeFG extracts the HUD from the HDR image; separate SDR UI overlays and HUD comparison are bypassed.");
+        ImGui::TextWrapped("Requires Windows HDR. Disable RTX HDR and Auto HDR. Supports DLSS-G, XeFG, or FG off. The original expansion mode applies its curve to the HUD too. XeFG extracts the HUD from the HDR image; separate SDR UI overlays and HUD comparison are bypassed.");
         float peak=config->FfxivHDRPeak.value_or_default(), paper=config->FfxivHDRPaper.value_or_default(), expansion=config->FfxivHDRExpansion.value_or_default();
         if(ImGui::SliderFloat("Peak brightness (nits)",&peak,400,4000,"%.0f"))config->FfxivHDRPeak=peak;
         resetHdr("FfxivHDRPeak", config->FfxivHDRPeak);
@@ -3092,8 +3114,10 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         screenshotShortcut.Render(config->FfxivHDRScreenshotKey, "Reset");
         ImGui::TextWrapped("Optional: one key, Escape cancels, Backspace unbinds. Save Settings to keep your choice.");
         ImGui::TextWrapped("%s", Hdr10::Screenshot::Status().c_str());
+        ImGui::BeginDisabled(hdrMode==1);
         if(ImGui::SliderFloat("Highlight expansion",&expansion,0,1,"%.2f"))config->FfxivHDRExpansion=expansion;
         resetHdr("FfxivHDRExpansion", config->FfxivHDRExpansion);
+        ImGui::EndDisabled();
         float contrast=config->FfxivHDRContrast.value_or_default();
         if(ImGui::SliderFloat("Contrast",&contrast,0.5f,1.5f,"%.2fx"))config->FfxivHDRContrast=contrast;
         resetHdr("FfxivHDRContrast", config->FfxivHDRContrast);
@@ -3107,7 +3131,8 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         ShowHelpMarker("Applies immediately. 0 is unchanged. Positive values favour muted colours; negative values soften them.\nBoth colour controls also affect the game HUD.");
         if(config->LoadReShade.value_or_default())
             ImGui::TextWrapped("ReShade compatibility: SDR presets run before OptiHDR. Their colour adjustments combine with these controls; detail clipped by a preset cannot be restored.");
-        ImGui::TextWrapped("0 preserves SDR brightness at paper white; 1 expands white highlights to the peak. Black stays black. This cannot recover detail already clipped by the game.");
+        if(hdrMode==0)ImGui::TextWrapped("0 preserves SDR brightness at paper white; 1 expands white highlights to the peak. Black stays black. This cannot recover detail already clipped by the game.");
+        else ImGui::TextWrapped("Scene HDR uses actual pre-clipping scene brightness. SDR ReShade presets remain compatible; strong spatial effects or changed overlays can suppress the HDR residual in affected pixels. In-game validation is required.");
         ImGui::TreePop();
     }
     bool external = config->ExternalFrameGeneration.value_or_default();

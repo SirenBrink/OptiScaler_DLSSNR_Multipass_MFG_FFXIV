@@ -18,3 +18,6 @@ if ($LASTEXITCODE -ne 0) { throw "HDR missing-notification negative control fail
 
 & "$build/dx12.exe" --xefg
 if ($LASTEXITCODE -ne 0) { throw "XeFG HDR tag/copy lifetime test failed" }
+
+& "$build/dx12.exe" --scene
+if ($LASTEXITCODE -ne 0) { throw "Scene HDR bridge/lifetime test failed" }

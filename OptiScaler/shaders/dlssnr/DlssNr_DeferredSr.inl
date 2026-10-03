@@ -63,6 +63,7 @@ struct Generation
     std::unique_ptr<DlssNr_Dx12> codec;
     bool halfRequested = false, approximateCamera = false;
     bool splitWork = false;
+    bool sceneHdrInput = false;
     std::string halfStatus;
     bool sampleAndHold = false;
     DlssNrResidualHold hold;
@@ -563,6 +564,14 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
     else device->Release();
     auto& g = *current;
     if (g.failed) return;
+    // Capture CURRENT anchor scene only. Skipped frames never borrow a later HDR image.
+    auto scene=privateJob?Hdr10::SceneInput{}:OpenNrScene(cmd,color,g.w,g.h);
+    const bool sceneAvailable=scene.hdr && scene.reference && inDesc.Format==DXGI_FORMAT_R16G16B16A16_FLOAT;
+    if(g.sceneHdrInput!=sceneAvailable) {
+        g.sceneHdrInput=sceneAvailable;g.reset=true;g.hold.Reset();if(g.half)g.half->Reset();
+        g.privateHistoryResetPending=true;
+        LOG_INFO("PreSR HDR NR input {}; residual/alternating histories reset",sceneAvailable?"enabled":"SDR fallback/off");
+    }
     // Native seams have a logical per-evaluate identity. Bridges retain the submitted epoch
     // so a second upscale in the same bridge submission is still rejected.
     if (g.began && g.lastBeginEpoch == epoch)
@@ -716,7 +725,9 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
     const auto before = g_nr.successfulDispatches;
     {
         PreSrTiming::Scope cost(g.timing, cmd, use.slot, PreSrTiming::Nr);
-        g_compose->Dispatch(cmd, g.edited, depth, nrMotion, g.edited, frame, queue);
+        const bool hdrUsed=DispatchSceneNr(cmd,g.edited,depth,nrMotion,frame,queue,std::move(scene),
+            half?Hdr10::NrSceneState::Alternating:Hdr10::NrSceneState::PreSR);
+        if(hdrUsed!=g.sceneHdrInput){g.sceneHdrInput=hdrUsed;g.reset=true;g.hold.Reset();if(g.half)g.half->Reset();g.privateHistoryResetPending=true;}
     }
     const bool evaluated = g_nr.successfulDispatches != before;
     if (evaluated)

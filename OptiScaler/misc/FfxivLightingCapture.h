@@ -8,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include "FfxivLightingScan.h"
+#include "FfxivSceneHdr.h"
 #include <Config.h>
 #include "companion/CompanionGpu.h"
 #include "companion/CompanionLayer.h"
@@ -76,12 +77,12 @@ inline Copy copy=nullptr;inline CopyRegion copyRegion=nullptr;
 inline void STDMETHODCALLTYPE OnCopy(ID3D11DeviceContext* c,ID3D11Resource* dest,ID3D11Resource* source)
 {
     copy(c,dest,source);
-    if(c==context && !inside)FfxivLightingScan::ColorCopy(dest,source,true);
+    if(c==context && !inside){FfxivLightingScan::ColorCopy(dest,source,true);FfxivSceneHdr::Copy(dest,source,true);}
 }
 inline void STDMETHODCALLTYPE OnCopyRegion(ID3D11DeviceContext* c,ID3D11Resource* dest,UINT sub,UINT x,UINT y,UINT z,ID3D11Resource* source,UINT from,const D3D11_BOX* box)
 {
     copyRegion(c,dest,sub,x,y,z,source,from,box);
-    if(c==context && !inside)FfxivLightingScan::ColorCopy(dest,source,!sub && !from && !x && !y && !z && !box);
+    if(c==context && !inside){const bool full=!sub && !from && !x && !y && !z && !box;FfxivLightingScan::ColorCopy(dest,source,full);FfxivSceneHdr::Copy(dest,source,full);}
 }
 inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,SIZE_T size,ID3D11ClassLinkage* link,ID3D11PixelShader** out)
 {
@@ -93,12 +94,21 @@ inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,S
         {
             if (SUCCEEDED((*out)->SetPrivateData(tag,sizeof(id),&id))) ++created[id-1];
         }
+    if (SUCCEEDED(hr) && out && *out && code && size>=32 && !std::memcmp(code,"DXBC",4))
+        FfxivSceneHdr::Tag(*out,Crc(code,size));
     return hr;
 }
 template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&& original)
 {
     if(c==context && !inside) FfxivCompanion::Layer::Observe(c);
     const bool wanted=Config::Instance()->DlssNrWhitePointSource.value_or_default()==2;
+    if (!inside && c==context && FfxivSceneHdr::Requested()) {
+        struct HdrGuard { HdrGuard(){inside=true;} ~HdrGuard(){inside=false;} } guard;
+        UINT id=0,bytes=sizeof(id);ComPtr<ID3D11PixelShader> ps;c->PSGetShader(&ps,nullptr,nullptr);if(ps)ps->GetPrivateData(tag,&bytes,&id);
+        if(id==6 || !wanted)FfxivLightingScan::Tick(c,wanted);
+        FfxivLightingScan::Before(c,id);original();FfxivLightingScan::After(c,id);
+        FfxivSceneHdr::AfterDraw(c,original);return;
+    }
     if ((!wanted && !FfxivLightingScan::enabled.load()) || c!=context || inside)
     { original(); return; }
     struct Guard { Guard(){inside=true;} ~Guard(){inside=false;} } guard;
@@ -158,6 +168,7 @@ inline void Install(ID3D11Device* d)
 }
 inline void Detach()
 {
+    FfxivSceneHdr::EndFrame();
     FfxivLightingScan::Stop();
     installed.store(false);
     if (!create || DetourTransactionBegin()!=NO_ERROR) return;

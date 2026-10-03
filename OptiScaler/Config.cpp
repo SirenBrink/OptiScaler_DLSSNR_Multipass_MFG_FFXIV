@@ -912,6 +912,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             VulkanUseCopyForInputs.set_from_config(readBool("Vulkan", "UseCopyForInputs"));
             VulkanUseCopyForOutput.set_from_config(readBool("Vulkan", "UseCopyForOutput"));
             FfxivHDR.set_from_config(readBool("HDR", "FfxivHDR"));
+            FfxivHDRMode.set_from_config(readInt("HDR", "Mode"));
+            FfxivHDRReShadeHighlights.set_from_config(readBool("HDR", "ReShadeHighlights"));
+            FfxivHDRNRSceneInput.set_from_config(readBool("HDR", "NRSceneInput"));
             FfxivHDRPeak.set_from_config(readFloat("HDR", "PeakNits"));
             FfxivHDRPaper.set_from_config(readFloat("HDR", "PaperWhiteNits"));
             FfxivHDRExpansion.set_from_config(readFloat("HDR", "HighlightExpansion"));
@@ -1368,6 +1371,9 @@ bool Config::SaveIni()
     ini.SetValue("Vulkan", "UseCopyForInputs", GetBoolValue(Instance()->VulkanUseCopyForInputs.value_for_config()).c_str());
     ini.SetValue("Vulkan", "UseCopyForOutput", GetBoolValue(Instance()->VulkanUseCopyForOutput.value_for_config()).c_str());
     ini.SetValue("HDR", "FfxivHDR", GetBoolValue(Instance()->FfxivHDR.value_for_config()).c_str());
+    ini.SetValue("HDR", "NRSceneInput", GetBoolValue(Instance()->FfxivHDRNRSceneInput.value_for_config()).c_str());
+    ini.SetValue("HDR", "ReShadeHighlights", GetBoolValue(Instance()->FfxivHDRReShadeHighlights.value_for_config()).c_str());
+    ini.SetValue("HDR", "Mode", GetIntValue(Instance()->FfxivHDRMode.value_for_config()).c_str());
     ini.SetValue("HDR", "PeakNits", GetFloatValue(Instance()->FfxivHDRPeak.value_for_config()).c_str());
     ini.SetValue("HDR", "PaperWhiteNits", GetFloatValue(Instance()->FfxivHDRPaper.value_for_config()).c_str());
     ini.SetValue("HDR", "HighlightExpansion", GetFloatValue(Instance()->FfxivHDRExpansion.value_for_config()).c_str());

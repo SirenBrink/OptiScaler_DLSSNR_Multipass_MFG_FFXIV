@@ -969,6 +969,8 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
     if (fIndex < 0)
         fIndex = GetIndex();
 
+    const bool sceneRaw=Hdr10::Active() && Config::Instance()->FfxivHDRMode.value_or_default()==1 && inputResource->type==FG_ResourceType::HudlessColor && !inputResource->hdrEncoded;
+    if(sceneRaw && !inputResource->cmdList)return false;
     // This first HDR path uses final/HUD-less differencing, not a separate SDR UI tag.
     if (Hdr10::Active() && inputResource->type == FG_ResourceType::UIColor)
     { _noUi[fIndex] = true; return false; }
@@ -984,12 +986,12 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
     // Convert while the capture command list is still recording, not when the
     // deferred tag is revisited at Present (that recording may already be closed).
     Dx12Resource hdrCapture;
-    if (Hdr10::Active() && inputResource->type == FG_ResourceType::HudlessColor &&
+    if (Hdr10::Active() && !inputResource->hdrEncoded && inputResource->type == FG_ResourceType::HudlessColor &&
         inputResource->validity != FG_ResourceValidity::UntilPresentFromDispatch)
     {
         if (!inputResource->cmdList) return false;
         hdrCapture = *inputResource;
-        hdrCapture.validity = FG_ResourceValidity::ValidNow;
+        hdrCapture.validity = sceneRaw ? FG_ResourceValidity::ValidButMakeCopy : FG_ResourceValidity::ValidNow;
         inputResource = &hdrCapture;
     }
     auto& type = inputResource->type;
@@ -1065,6 +1067,8 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
     fResource->state = inputResource->state;
     fResource->validity = inputResource->validity;
     fResource->resource = inputResource->resource;
+    fResource->hdrEncoded=inputResource->hdrEncoded;
+    if(inputResource->hdrEncoded)fResource->copy=nullptr;
     if (type == FG_ResourceType::Depth || type == FG_ResourceType::Velocity) fResource->copy = nullptr;
     fResource->top = inputResource->top;
     fResource->left = inputResource->left;
@@ -1111,6 +1115,7 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
     else if (type == FG_ResourceType::HudlessColor)
         _noHudless[fIndex] = false;
 
+    if(sceneRaw){_noHudless[fIndex]=true;return true;} // SDR copy is converted/tagged after the interop fence.
     if ((type == FG_ResourceType::Depth || type == FG_ResourceType::Velocity) ||
         (fResource->validity != FG_ResourceValidity::UntilPresent &&
          fResource->validity != FG_ResourceValidity::JustTrackCmdlist))
@@ -1124,13 +1129,13 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
             static DXGI_FORMAT lastFormat[BUFFER_COUNT] = {};
             auto desc = fResource->GetResource()->GetDesc();
 
-            if (lastFormat[fIndex] != DXGI_FORMAT_UNKNOWN && lastFormat[fIndex] != desc.Format)
+            if (lastFormat[fIndex] != DXGI_FORMAT_UNKNOWN && lastFormat[fIndex] != (Hdr10::Active()?DXGI_FORMAT_R10G10B10A2_UNORM:desc.Format))
             {
                 State::Instance().fgChanged = true;
                 return false;
             }
 
-            lastFormat[fIndex] = desc.Format;
+            lastFormat[fIndex] = Hdr10::Active()?DXGI_FORMAT_R10G10B10A2_UNORM:desc.Format;
         }
 
         sl::Resource resource {};
@@ -1169,7 +1174,7 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
                                     ? ::sl::ResourceLifecycle::eValidUntilPresent
                                     : sl::ResourceLifecycle::eOnlyValidNow;
 
-        if (Hdr10::Active() && type == FG_ResourceType::HudlessColor)
+        if (Hdr10::Active() && !fResource->hdrEncoded && type == FG_ResourceType::HudlessColor)
         {
             auto* converted = Hdr10::Convert(_device, fResource->cmdList, fResource->GetResource(), fResource->state);
             if (!converted) { LOG_ERROR("HDR10 hudless conversion failed; refusing mismatched FG input"); Deactivate(); return false; }

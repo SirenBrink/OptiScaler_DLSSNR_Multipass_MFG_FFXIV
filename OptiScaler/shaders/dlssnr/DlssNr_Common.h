@@ -89,6 +89,7 @@ struct DlssNrFrameInfo
     // through a tonemapper. Getting this wrong encodes an encoded frame a second time, which looks
     // washed out and banded.
     bool ColourIsLinearHdr = true;
+    bool ExposedSceneHdr = false; // Already exposed RenoDX scene, unit paper white.
 
     // The SR colour input arrives readable, whereas a completed upscaler output normally arrives as
     // a UAV. The DX12 pass uses this to preserve the caller's state and to fall back through a copy

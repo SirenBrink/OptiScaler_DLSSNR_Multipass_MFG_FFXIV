@@ -31,6 +31,8 @@
 #include <Config.h>
 #include <State.h>
 #include <misc/FfxivLightingScan.h>
+#include <misc/FfxivSceneHdr.h>
+#include <shaders/hdr/NrSceneInput.h>
 #include <Util.h>
 
 #include <proxies/NVNGX_Proxy.h>
@@ -2338,7 +2340,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     g_nr.gamePreExposure = frame.PreExposure;
 
-    float whitePoint = ResolveWhitePoint(cfg, isHdrBuffer);
+    float whitePoint = frame.ExposedSceneHdr ? 1.0f : ResolveWhitePoint(cfg, isHdrBuffer);
 
     // Zero-latency exposure (D3D12, source 1): when the game hands us a live exposure texture, the
     // white point is recomputed in-shader every frame from it (ExposurePreMul / exposure) instead of
@@ -2348,7 +2350,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     uint32_t useGameExposure = 0;
     float exposurePreMul = 0.0f;
 
-    if (cfg.DlssNrWhitePointSource.value_or_default() == 1 && frame.ExposureTexture != nullptr)
+    if (!frame.ExposedSceneHdr && cfg.DlssNrWhitePointSource.value_or_default() == 1 && frame.ExposureTexture != nullptr)
     {
         exposureTex = (ID3D12Resource*) frame.ExposureTexture;
         useGameExposure = 1;
@@ -3077,6 +3079,57 @@ void CurrentModelSize(unsigned int& width, unsigned int& height)
     width = unsigned(packed >> 32); height = unsigned(packed);
 }
 
+bool SceneNrRequested() {
+    return Config::Instance()->FfxivHDRNRSceneInput.value_or_default() && FfxivSceneHdr::Requested() &&
+        State::Instance().gameExe=="ffxiv_dx11.exe";
+}
+Hdr10::SceneInput OpenNrScene(ID3D12GraphicsCommandList* cmd,ID3D12Resource* target,UINT width,UINT height) {
+    if(!SceneNrRequested() || !cmd || !target)return {};
+    const auto extent=PreSrColorExtent(target->GetDesc(),width,height);
+    Microsoft::WRL::ComPtr<ID3D12Device> device;
+    if(!extent || FAILED(target->GetDevice(IID_PPV_ARGS(&device))))return {};
+    return FfxivSceneHdr::Open(device.Get(),extent->width,extent->height,false);
+}
+// Both entry paths pass the colour matching their current depth/motion, on the bridge's fenced list.
+// PreSR sees the SDR NR edit afterwards; its private DLSS and alternating residual carrier stay SDR.
+bool DispatchSceneNr(ID3D12GraphicsCommandList* cmd,ID3D12Resource* target,ID3D12Resource* depth,
+                     ID3D12Resource* motion,DlssNrFrameInfo& frame,ID3D12CommandQueue* queue,
+                     Hdr10::SceneInput scene,Hdr10::NrSceneState path) {
+    const auto& cfg=*Config::Instance();
+    const bool requested=SceneNrRequested() && frame.BeforeUpscale && queue;
+    NrSceneInput::Packet* packet=nullptr;
+    auto state=Hdr10::NrSceneState::WaitingScene;
+    const auto arrival=frame.BeforeUpscale?(frame.PrivateColorCopy || !cfg.ColorResourceBarrier.has_value()?
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE:(D3D12_RESOURCE_STATES)cfg.ColorResourceBarrier.value()):
+        cfg.OutputResourceBarrier.has_value()?(D3D12_RESOURCE_STATES)cfg.OutputResourceBarrier.value():D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    ScopedNrStateEnvelope envelope(cmd);
+    if(requested && !g_nr.failed) {
+        const bool restorable=frame.IndependentCommands ||
+            !(cfg.RestoreComputeSignature.value_or_default() || cfg.RestoreGraphicSignature.value_or_default()) ||
+            D3D12Hooks::CanRestoreRootSignature(cmd);
+        Microsoft::WRL::ComPtr<ID3D12Device> device;
+        const auto extent=PreSrColorExtent(target->GetDesc(),frame.RenderSubrectWidth,frame.RenderSubrectHeight);
+        if(restorable && extent && SUCCEEDED(target->GetDevice(IID_PPV_ARGS(&device))) && ResTrack_Dx12::HookLateNrQueue(device.Get()))
+            packet=NrSceneInput::Prepare(device.Get(),cmd,target,arrival,extent->width,extent->height,std::move(scene),g_nrLifetime,&state);
+        else state=Hdr10::NrSceneState::UnavailableHooks;
+    }
+    const bool sceneHdr=packet!=nullptr;
+    static bool lastSceneHdr=false;
+    if(lastSceneHdr!=sceneHdr){lastSceneHdr=sceneHdr;frame.Reset=true;
+        LOG_INFO("NR scene HDR input {}; history reset; path {}",sceneHdr?"active":"SDR fallback/off",(int)path);}
+    const auto before=g_nr.successfulDispatches;
+    if(sceneHdr) {
+        auto hdrFrame=frame;hdrFrame.ColourIsLinearHdr=hdrFrame.ExposedSceneHdr=true;
+        hdrFrame.PrivateColorCopy=true;hdrFrame.ExposureTexture=nullptr;
+        g_compose->Dispatch(cmd,packet->work.Get(),depth,motion,packet->work.Get(),hdrFrame,queue);
+        D3D12Hooks::SetRootSignatureTracking(false);
+        NrSceneInput::Finish(*packet,cmd,arrival);
+        state=g_nr.successfulDispatches!=before?path:Hdr10::NrSceneState::WaitingNR;
+    } else g_compose->Dispatch(cmd,target,depth,motion,target,frame,queue);
+    if(requested)Hdr10::nrSceneState.store(state,std::memory_order_relaxed);
+    return sceneHdr;
+}
+
 #include "DlssNr_DeferredSr.inl"
 
 void SuspendForBridgeShutdown()
@@ -3127,6 +3180,14 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     if (g_bridgeSuspended.load()) return;
     const Config& cfg = *Config::Instance();
+    NrSceneInput::Collect(cfg.DlssNrEnabled.value_or_default() && SceneNrRequested());
+    if(!cfg.FfxivHDRNRSceneInput.value_or_default())Hdr10::nrSceneState=Hdr10::NrSceneState::Off;
+    else if(!cfg.DlssNrEnabled.value_or_default())Hdr10::nrSceneState=Hdr10::NrSceneState::NRDisabled;
+    else if(!SceneNrRequested())Hdr10::nrSceneState=Hdr10::NrSceneState::HDRInactive;
+    else if(!cfg.DlssNrRunBeforeSr.value_or_default() && !cfg.DlssNrDeferredDlss.value_or_default())Hdr10::nrSceneState=Hdr10::NrSceneState::RequiresBeforeSR;
+    else if(Hdr10::nrSceneState.load()==Hdr10::NrSceneState::Off || Hdr10::nrSceneState.load()==Hdr10::NrSceneState::HDRInactive ||
+        Hdr10::nrSceneState.load()==Hdr10::NrSceneState::NRDisabled || Hdr10::nrSceneState.load()==Hdr10::NrSceneState::RequiresBeforeSR)
+        Hdr10::nrSceneState=Hdr10::NrSceneState::WaitingNR;
     static unsigned lastPrecision=0;
     const unsigned precision=cfg.DlssNrPrecision.value_or_default();
     if(lastPrecision!=precision)
@@ -3469,7 +3530,9 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         return;
     }
 
-    g_compose->Dispatch(cmdList, target, depth, motion, target, frame, timingQueue);
+    DispatchSceneNr(cmdList,target,depth,motion,frame,timingQueue,
+        OpenNrScene(cmdList,target,frame.RenderSubrectWidth,frame.RenderSubrectHeight),Hdr10::NrSceneState::Ordinary);
+
 }
 
 int ConsumePresentationGuideDelay()

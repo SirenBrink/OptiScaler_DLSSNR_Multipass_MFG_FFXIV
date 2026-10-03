@@ -317,6 +317,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if ((Flags & DXGI_PRESENT_TEST) != 0)
         return _real->Present(SyncInterval, Flags);
 
+    struct SceneFrame { ~SceneFrame(){FfxivSceneHdr::EndFrame();} } sceneFrame;
     if (!_InitInteropObjects())
         return DXGI_ERROR_DEVICE_REMOVED;
 
@@ -1082,7 +1083,24 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     ID3D12Resource* copySource = _openedDx11BackBuffers[copySlot];
     if (_hdrOutput)
     {
-        copySource = Hdr10::Convert(_dx12Device, _copyCommandLists[copySlot], copySource, sourceBefore);
+        auto scene=FfxivSceneHdr::Open(_dx12Device,(UINT)copySource->GetDesc().Width,copySource->GetDesc().Height);
+        copySource = Hdr10::Convert(_dx12Device, _copyCommandLists[copySlot], copySource, sourceBefore,scene);
+        if(copySource && Config::Instance()->FfxivHDRMode.value_or_default()==1 && _fg && _fg->IsActive()){
+            // The original HUD-less copy was recorded on the upscaler list.
+            // This queue now waits on DX11 (and its upscaler interop completion),
+            // so both colour conversions can use the same immutable scene pair.
+            Microsoft::WRL::ComPtr<ID3D12Resource> nativeHudless;Dx12Resource hudless{};
+            const auto frame=_fg->GetIndex();
+            {auto input=_fg->GetResource(FG_ResourceType::HudlessColor,frame);
+             if(input && !input->hdrEncoded){hudless=*input.resource;nativeHudless=input->GetResource();}}
+            if(nativeHudless){
+                auto* hdrHudless=Hdr10::Convert(_dx12Device,_copyCommandLists[copySlot],nativeHudless.Get(),hudless.state,scene);
+                if(hdrHudless){hudless.resource=hdrHudless;hudless.copy=nullptr;hudless.hdrEncoded=true;
+                    hudless.cmdList=_copyCommandLists[copySlot];hudless.state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                    hudless.validity=FG_ResourceValidity::ValidNow;hudless.frameIndex=frame;
+                    _fg->SetResource(&hudless);}
+            }
+        }
         if (!copySource) { fgBackBuffer->Release(); _copyCommandLists[copySlot]->Close(); return false; }
         sourceBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     }

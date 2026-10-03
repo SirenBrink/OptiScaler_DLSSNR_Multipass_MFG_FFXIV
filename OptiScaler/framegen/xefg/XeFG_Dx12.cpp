@@ -1427,6 +1427,9 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
     }
     auto& type = inputResource->type;
 
+    const bool sceneRaw=Hdr10::Active() && Config::Instance()->FfxivHDRMode.value_or_default()==1 && type==FG_ResourceType::HudlessColor && !inputResource->hdrEncoded;
+    Dx12Resource sceneCapture;
+    if(sceneRaw){if(!inputResource->cmdList)return false;sceneCapture=*inputResource;sceneCapture.validity=FG_ResourceValidity::ValidButMakeCopy;inputResource=&sceneCapture;}
     // Use XeFG's backbuffer + HUD-less composition for OptiHDR. An SDR UI-only
     // texture cannot be alpha-blended in PQ space (and RGB10A2 loses alpha
     // precision). The native HUD is already in the converted backbuffer.
@@ -1512,6 +1515,8 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
     fResource->state = inputResource->state;
     fResource->validity = inputResource->validity;
     fResource->resource = inputResource->resource;
+    fResource->hdrEncoded=inputResource->hdrEncoded;
+    if(inputResource->hdrEncoded)fResource->copy=nullptr;
     if (type == FG_ResourceType::Depth || type == FG_ResourceType::Velocity) fResource->copy = nullptr;
     fResource->top = inputResource->top;
     fResource->left = inputResource->left;
@@ -1590,6 +1595,7 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
     else if (type == FG_ResourceType::HudlessColor)
         _noHudless[fIndex] = false;
 
+    if(sceneRaw){_noHudless[fIndex]=true;return true;} // Defer HDR colour/tag until the DX11 fence is satisfied.
     if ((type == FG_ResourceType::Depth || type == FG_ResourceType::Velocity) ||
         (fResource->validity != FG_ResourceValidity::UntilPresent &&
          fResource->validity != FG_ResourceValidity::JustTrackCmdlist))
@@ -1603,19 +1609,19 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
             static DXGI_FORMAT lastFormat[BUFFER_COUNT] = {};
             auto desc = fResource->GetResource()->GetDesc();
 
-            if (lastFormat[fIndex] != DXGI_FORMAT_UNKNOWN && lastFormat[fIndex] != desc.Format)
+            if (lastFormat[fIndex] != DXGI_FORMAT_UNKNOWN && lastFormat[fIndex] != (Hdr10::Active()?DXGI_FORMAT_R10G10B10A2_UNORM:desc.Format))
             {
                 State::Instance().fgChanged = true;
                 return false;
             }
 
-            lastFormat[fIndex] = desc.Format;
+            lastFormat[fIndex] = Hdr10::Active()?DXGI_FORMAT_R10G10B10A2_UNORM:desc.Format;
         }
 
         xefg_swapchain_d3d12_resource_data_t resourceParam = GetResourceData(type, fIndex);
         bool changedCopySourceState = false;
 
-        if (Hdr10::Active() && type == FG_ResourceType::HudlessColor)
+        if (Hdr10::Active() && !fResource->hdrEncoded && type == FG_ResourceType::HudlessColor)
         {
             if (!fResource->cmdList) fResource->cmdList = GetUICommandList(fIndex);
             if (!XeFGHdr::PrepareHudless(_device, fResource->cmdList, resourceParam))
