@@ -156,6 +156,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGExternalUIFromHudless.set_from_config(readBool("FrameGen", "ExternalUIFromHudless"));
             FGExternalUIThreshold.set_from_config(readFloat("FrameGen", "ExternalUIThreshold"));
             FGExternalUIDilation.set_from_config(readInt("FrameGen", "ExternalUIDilation"));
+            FGExternalUIPasteAfterFG.set_from_config(readBool("FrameGen", "ExternalUIPasteAfterFG"));
+            FGExternalUIPasteCleanup.set_from_config(readBool("FrameGen", "ExternalUIPasteCleanup"));
             FGSkipReset.set_from_config(readBool("FrameGen", "SkipReset"));
             FGRectLeft.set_from_config(readInt("FrameGen", "RectLeft"));
             FGRectTop.set_from_config(readInt("FrameGen", "RectTop"));
@@ -1111,6 +1113,10 @@ bool Config::SaveIni()
                      GetFloatValue(Instance()->FGExternalUIThreshold.value_for_config()).c_str());
         ini.SetValue("FrameGen", "ExternalUIDilation",
                      GetIntValue(Instance()->FGExternalUIDilation.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "ExternalUIPasteAfterFG",
+                     GetBoolValue(Instance()->FGExternalUIPasteAfterFG.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "ExternalUIPasteCleanup",
+                     GetBoolValue(Instance()->FGExternalUIPasteCleanup.value_for_config()).c_str());
         ini.SetValue("FrameGen", "SkipReset", GetBoolValue(Instance()->FGSkipReset.value_for_config()).c_str());
         ini.SetValue("FrameGen", "RectLeft", GetIntValue(Instance()->FGRectLeft.value_for_config()).c_str());
         ini.SetValue("FrameGen", "RectTop", GetIntValue(Instance()->FGRectTop.value_for_config()).c_str());

@@ -892,6 +892,9 @@ class Config
     CustomOptional<bool> FGExternalUIFromHudless { true };
     CustomOptional<float> FGExternalUIThreshold { 0.008f };
     CustomOptional<int> FGExternalUIDilation { 1 };
+    // External HUD-less: draw the newest real frame's UI over every frame-generation output (after FG)
+    CustomOptional<bool> FGExternalUIPasteAfterFG { true };
+    CustomOptional<bool> FGExternalUIPasteCleanup { true };
     CustomOptional<bool> FGSkipReset { false };
     CustomOptional<int> FGAllowedFrameAhead { 1 };
     CustomOptional<bool> FGDepthValidNow { false };

@@ -3,6 +3,7 @@
 #include <misc/FfxivLightingCapture.h>
 #include <misc/companion/Companion.h>
 #include <misc/ExternalHudless.h>
+#include <misc/UiPaste.h>
 #include <shaders/ui_extract/UE_Dx12.h>
 #include <framegen/IFGFeature_Dx12.h>
 #include "dx11_with_dx12_sc.h"
@@ -345,7 +346,12 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     // The FG queue now waits for the interop copy (which itself waited for D3D11),
     // so the shared HUD-less texture is complete for anything recorded from here on.
+    const bool hudlessThisFrame = _hudlessPending;
+    const UINT hudlessSlotThisFrame = _hudlessSlot;
     _TagExternalHudless();
+
+    // Builds the image LocalPresent pastes over every DLSS-G output frame (see misc/UiPaste.h).
+    _ProduceUiPaste(hudlessThisFrame, hudlessSlotThisFrame);
 
     const bool fgHookedPresenter =
         State::Instance().currentFGSwapchain == _fgSwapChain && !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
@@ -1350,6 +1356,8 @@ void Dx11wDx12SC::_ReleaseExternalHudless()
     _uiImages.clear();
     _uiImageStates.clear();
 
+    UiPaste::Release();
+
     ExternalHudless::Clear();
 }
 
@@ -1700,4 +1708,76 @@ void Dx11wDx12SC::_TagExternalUi(IFGFeature_Dx12* fg, int fIndex, ID3D12Graphics
         ExternalHudless::MarkUiTagged();
     else
         ExternalHudless::MarkUiRejected("Frame generator refused the UI image (see OptiScaler.log)");
+}
+
+void Dx11wDx12SC::_ProduceUiPaste(bool hudlessReady, UINT slot)
+{
+    auto& cfg = *Config::Instance();
+
+    if (!cfg.FGExternalUIPasteAfterFG.value_or_default())
+    {
+        UiPaste::Invalidate("Off in the menu");
+        return;
+    }
+
+    if (!hudlessReady)
+    {
+        UiPaste::Invalidate("No HUD-less image this frame");
+        return;
+    }
+
+    if (_hdrOutput || Hdr10::Active())
+    {
+        UiPaste::Invalidate("Off while FFXIV HDR10 output is on");
+        return;
+    }
+
+    if (FGHooks::IsDx12InteropPresentSC(_fgSwapChain) || State::Instance().currentFGSwapchain != _fgSwapChain)
+    {
+        UiPaste::Invalidate("No frame generation presenter");
+        return;
+    }
+
+    auto fg = _fg != nullptr ? _fg : State::Instance().currentFG;
+    if (fg == nullptr || !fg->IsActive() || fg->IsPaused() || fg->GetCommandQueue() == nullptr)
+    {
+        UiPaste::Invalidate("Frame generation is not active");
+        return;
+    }
+
+    if (slot >= _openedDx11BackBuffers.size() || _openedDx11BackBuffers[slot] == nullptr ||
+        slot >= _openedHudless.size() || _openedHudless[slot] == nullptr)
+    {
+        UiPaste::Invalidate("Backbuffer or HUD-less copy missing for this slot");
+        return;
+    }
+
+    ID3D12Resource* finalImage = _openedDx11BackBuffers[slot];
+    ID3D12Resource* hudless = _openedHudless[slot];
+
+    const auto finalDesc = finalImage->GetDesc();
+    const auto hudlessDesc = hudless->GetDesc();
+
+    if ((finalDesc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0 ||
+        (hudlessDesc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0)
+    {
+        UiPaste::Invalidate("Backbuffer copy is not readable as a texture");
+        return;
+    }
+
+    if (finalDesc.Width != hudlessDesc.Width || finalDesc.Height != hudlessDesc.Height)
+    {
+        UiPaste::Invalidate("Backbuffer and HUD-less sizes differ");
+        return;
+    }
+
+    UiPaste::ProduceParams params {};
+    params.threshold = cfg.FGExternalUIThreshold.value_or_default();
+    params.dilation = (uint32_t) std::max(0, cfg.FGExternalUIDilation.value_or_default());
+    params.cleanup = cfg.FGExternalUIPasteCleanup.value_or_default();
+
+    // Same queue that just waited for the interop copy, so both inputs are complete. This is
+    // submitted before FG Present executes the UI command list and DLSS-G's own work.
+    UiPaste::Produce(_dx12Device, fg->GetCommandQueue(), finalImage, ExternalHudlessTypedFormat(finalDesc.Format),
+                     hudless, ExternalHudlessTypedFormat(hudlessDesc.Format), params);
 }

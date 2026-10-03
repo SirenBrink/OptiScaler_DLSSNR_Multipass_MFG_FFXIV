@@ -10,6 +10,7 @@
 #include <hooks/D3D12_Hooks.h>
 
 #include <menu/menu_overlay_dx.h>
+#include <misc/UiPaste.h>
 
 #include <misc/FrameLimit.h>
 
@@ -370,6 +371,11 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         // Tick feature to let it know if it's frozen
         if (auto currentFeature = State::Instance().currentFeature; currentFeature != nullptr)
             currentFeature->TickFrozenCheck();
+
+        // Every DLSS-G output frame (real and generated) passes through here. Draw the newest real
+        // frame's UI over it before the overlay, so the UI never gets interpolated (misc/UiPaste.h).
+        if (!isD3D11 && cq != nullptr)
+            UiPaste::Paste(pSwapChain, cq);
 
         // Draw overlay
         MenuOverlayDx::Present(pSwapChain, SyncInterval, Flags, pPresentParameters, pDevice, hWnd, isUWP);

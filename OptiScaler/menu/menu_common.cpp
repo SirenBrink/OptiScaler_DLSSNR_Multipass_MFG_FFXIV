@@ -1,5 +1,6 @@
 #include "pch.h"
 #include <misc/ExternalHudless.h>
+#include <misc/UiPaste.h>
 #include <shaders/hdr/Hdr10.h>
 #include <framegen/dlssg/AmpereMfgLoader.h>
 #include <misc/FfxivNativeQuality.h>
@@ -3545,7 +3546,48 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                                "pastes on top of generated frames instead of interpolating them.\n"
                                "SDR only. Uses \"Show Detected UI\" logic to decide what is UI.");
 
-                if (uiFromHudless)
+                bool pasteUi = config->FGExternalUIPasteAfterFG.value_or_default();
+                if (ImGui::Checkbox("Paste UI after frame generation", &pasteUi))
+                    config->FGExternalUIPasteAfterFG = pasteUi;
+
+                ShowHelpMarker("Draws the newest real frame's UI over every frame DLSS-G outputs,\n"
+                               "after frame generation, so the UI is never interpolated and never morphs.\n"
+                               "The UI then updates at the base frame rate, and the scene behind\n"
+                               "see-through windows steps at that rate too.\n"
+                               "SDR only. Uses the UI threshold and edge grow settings below.\n"
+                               "Paused while \"Show Detected UI\" is on (use \"Tint pasted area\" instead).");
+
+                if (pasteUi)
+                {
+                    bool pasteCleanup = config->FGExternalUIPasteCleanup.value_or_default();
+                    if (ImGui::Checkbox("Clear UI that just closed", &pasteCleanup))
+                        config->FGExternalUIPasteCleanup = pasteCleanup;
+
+                    ShowHelpMarker("Where the previous real frame had UI and the newest one does not\n"
+                                   "(a window closing, a tab switching), also paste the newest real frame there.\n"
+                                   "Removes the fading ghost DLSS-G draws while the UI changes.");
+
+                    ImGui::SameLine(0.0f, 16.0f);
+
+                    bool pasteTint = UiPaste::DebugTint();
+                    if (ImGui::Checkbox("Tint pasted area", &pasteTint))
+                        UiPaste::SetDebugTint(pasteTint);
+
+                    ShowHelpMarker("Magenta: UI pasted from the newest real frame.\n"
+                                   "Cyan: area cleared after UI closed.\n"
+                                   "Only the UI should be tinted. If the whole screen is tinted, an effect\n"
+                                   "runs after the HUD-less capture point; raise the UI threshold or move the marker.\n"
+                                   "Not saved.");
+
+                    const auto pasteStatus = UiPaste::Snapshot();
+                    ImGui::Text("UI paste: %llu built, %llu frames pasted, %llu skipped",
+                                (unsigned long long) pasteStatus.produced, (unsigned long long) pasteStatus.pasted,
+                                (unsigned long long) pasteStatus.skipped);
+                    if (pasteStatus.lastMessage[0] != '\0')
+                        ImGui::TextDisabled("%s", pasteStatus.lastMessage);
+                }
+
+                if (uiFromHudless || pasteUi)
                 {
                     float uiThreshold = config->FGExternalUIThreshold.value_or_default();
                     if (ImGui::SliderFloat("UI threshold", &uiThreshold, 0.001f, 0.1f, "%.3f",
@@ -3562,7 +3604,10 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                         config->FGExternalUIDilation = uiDilation;
 
                     ShowHelpMarker("Grows the UI area by this many pixels to include soft edges and glows.");
+                }
 
+                if (uiFromHudless)
+                {
                     ImGui::Text("UI image: %llu tagged, %llu skipped", (unsigned long long) extUi.tagged,
                                 (unsigned long long) extUi.rejected);
                     if (extUi.lastMessage[0] != '\0')

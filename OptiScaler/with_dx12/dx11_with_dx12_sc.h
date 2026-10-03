@@ -93,6 +93,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     void _ReleaseExternalHudlessSlot(UINT slot);
     void _ReleaseExternalHudless();
     void _TagExternalUi(IFGFeature_Dx12* fg, int fIndex, ID3D12GraphicsCommandList* cmdList);
+    void _ProduceUiPaste(bool hudlessReady, UINT slot);
 
     IDXGISwapChain* _real = nullptr;
     IDXGISwapChain1* _real1 = nullptr;
