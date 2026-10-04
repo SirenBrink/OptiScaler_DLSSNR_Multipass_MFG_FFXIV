@@ -21,9 +21,10 @@ namespace
 // Paste images: newest-ready + previous (read by the producer) + one being written + one spare.
 constexpr UINT SlotCount = 4;
 
-// Consumer allocators/descriptors. ~3 presents per real frame at 3x, so 8 covers more than two real
-// frames of present-queue backlog. A busy entry skips one paste instead of blocking the presenter.
-constexpr UINT PasteRing = 8;
+// Consumer command storage must cover high MFG factors as well as base-frame GPU backlog.
+// 32 entries cover four base frames at 8x without allocating additional full-size UI images.
+// Never reset an allocator or overwrite descriptors while their fence is incomplete.
+constexpr UINT PasteRing = 32;
 
 // Producer descriptor table: t0 final, t1 HUD-less, t2 previous paste image, u0 output.
 constexpr UINT ProduceDescriptors = 4;
