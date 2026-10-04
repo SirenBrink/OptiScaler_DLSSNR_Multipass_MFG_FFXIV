@@ -779,6 +779,18 @@
     <ClInclude Include="misc\IdentifyGpu.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="misc\ExternalHudless.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="misc\UiPaste.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\ui_extract\UE_Common.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\ui_extract\UE_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="shaders\hud_copy\precompile\HudCopy_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1401,6 +1413,15 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="misc\IdentifyGpu.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="misc\ExternalHudless.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="misc\UiPaste.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="shaders\ui_extract\UE_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="framegen\dlssg\DLSSG_Dx12.cpp">

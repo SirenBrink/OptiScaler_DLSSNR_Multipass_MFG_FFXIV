@@ -3,6 +3,10 @@
 #include <shaders/hdr/HdrScreenshot.h>
 #include <misc/FfxivLightingCapture.h>
 #include <misc/companion/Companion.h>
+#include <misc/ExternalHudless.h>
+#include <misc/UiPaste.h>
+#include <shaders/ui_extract/UE_Dx12.h>
+#include <framegen/IFGFeature_Dx12.h>
 #include "dx11_with_dx12_sc.h"
 
 #include <with_dx12/with_dx12.h>
@@ -21,6 +25,8 @@
 #pragma intrinsic(_ReturnAddress)
 
 static int scCount = 0;
+
+static DXGI_FORMAT ExternalHudlessTypedFormat(DXGI_FORMAT format);
 
 namespace
 {
@@ -329,14 +335,37 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (!_CopyDx11BackBufferToShared(dx11Index))
         return DXGI_ERROR_DEVICE_REMOVED;
 
+    // Recorded on the D3D11 context before the interop fence below, so the same
+    // DX11 -> DX12 wait covers both the backbuffer and the HUD-less copy.
+    _CopyExternalHudlessToShared();
+
     if (!_WaitDx11ThenDx12())
         return DXGI_ERROR_DEVICE_REMOVED;
+
+    // UI-free frame generation: hand DLSS-G the HUD-less frame, the UI paste adds the UI back on
+    // every output frame (see misc/UiPaste.h). DLSS-G then has no UI of its own to interpolate.
+    _uiFreeThisFrame = _hudlessPending && _UiFreeFrameGenWanted();
 
     if (!_CopyDx11SharedToDx12FGBackBuffer(dx11Index))
         return DXGI_ERROR_DEVICE_REMOVED;
 
     if (!_WaitForInteropCopyOnPresentQueue())
         return DXGI_ERROR_DEVICE_REMOVED;
+
+    // The FG queue now waits for the interop copy (which itself waited for D3D11),
+    // so the shared HUD-less texture is complete for anything recorded from here on.
+    const bool hudlessThisFrame = _hudlessPending;
+    const UINT hudlessSlotThisFrame = _hudlessSlot;
+    _TagExternalHudless();
+
+    // Builds the image LocalPresent pastes over every DLSS-G output frame (see misc/UiPaste.h).
+    _ProduceUiPaste(hudlessThisFrame, hudlessSlotThisFrame);
+    // Failed/invalidated producers must not leave a scene-only base frame without its UI.
+    if (_uiFreeThisFrame && !_UiPasteReady()) {
+        _uiFreeThisFrame=false;
+        if (!_CopyDx11SharedToDx12FGBackBuffer(dx11Index) || !_WaitForInteropCopyOnPresentQueue())
+            return DXGI_ERROR_DEVICE_REMOVED;
+    }
 
     const bool fgHookedPresenter =
         State::Instance().currentFGSwapchain == _fgSwapChain && !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
@@ -883,7 +912,8 @@ bool Dx11wDx12SC::_RequestSharedBackBuffer(UINT index)
         sourceTexture->GetDesc(&desc);
         desc.Usage = D3D11_USAGE_DEFAULT;
         desc.CPUAccessFlags = 0;
-        if (_hdrOutput) desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+        // Readable as a texture: HDR10 conversion and the external-HUD-less UI extraction sample it.
+        desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
         desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
 
         result = _dx11Device->CreateTexture2D(&desc, nullptr, &_sharedDx11BackBufferCopies[_currentFakeIndex]);
@@ -1081,6 +1111,29 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
 
     auto sourceBefore = _openedDx11BackBufferStates[copySlot];
     ID3D12Resource* copySource = _openedDx11BackBuffers[copySlot];
+    bool hudlessSource = false;
+
+    if (_uiFreeThisFrame && !_hdrOutput)
+    {
+        ID3D12Resource* hudless = _hudlessSlot == copySlot && copySlot < _openedHudless.size()
+                                      ? _openedHudless[copySlot]
+                                      : nullptr;
+        const auto fgDesc = fgBackBuffer->GetDesc();
+        if (hudless != nullptr)
+        {
+            const auto hudlessDesc = hudless->GetDesc();
+            if (hudlessDesc.Width == fgDesc.Width && hudlessDesc.Height == fgDesc.Height &&
+                ExternalHudlessTypedFormat(hudlessDesc.Format) == ExternalHudlessTypedFormat(fgDesc.Format))
+            {
+                copySource = hudless;
+                sourceBefore = D3D12_RESOURCE_STATE_COMMON; // shared HUD-less copies rest in COMMON
+                hudlessSource = true;
+            }
+        }
+
+        if (!hudlessSource)
+            _uiFreeThisFrame = false; // fall back to the normal frame (UI baked in) for this frame
+    }
     if (_hdrOutput)
     {
         auto scene=FfxivSceneHdr::Open(_dx12Device,(UINT)copySource->GetDesc().Width,copySource->GetDesc().Height);
@@ -1122,7 +1175,8 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     TransitionResource(_copyCommandLists[copySlot], copySource, D3D12_RESOURCE_STATE_COPY_SOURCE,
                        sourceBefore);
 
-    _openedDx11BackBufferStates[copySlot] = D3D12_RESOURCE_STATE_COMMON;
+    if (!hudlessSource)
+        _openedDx11BackBufferStates[copySlot] = D3D12_RESOURCE_STATE_COMMON;
 
     fgBackBuffer->Release();
 
@@ -1230,6 +1284,8 @@ void Dx11wDx12SC::_ReleaseInteropBackBuffers()
 {
     _interopInitialized = false;
 
+    _ReleaseExternalHudless();
+
     for (auto& resource : _openedDx11BackBuffers)
         SafeRelease(resource);
 
@@ -1298,3 +1354,553 @@ UINT Dx11wDx12SC::_GetDx11BackBufferIndexForPresent() const
 }
 
 void Dx11wDx12SC::_AdvanceFakeBackBufferIndex() { _currentFakeIndex = (_currentFakeIndex + 1) % _bufferCount; }
+
+// ---------------------------------------------------------------------------------------------
+// External HUD-less (ReShade add-on)
+// ---------------------------------------------------------------------------------------------
+
+static DXGI_FORMAT ExternalHudlessTypedFormat(DXGI_FORMAT format)
+{
+    switch (format)
+    {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+        return DXGI_FORMAT_R10G10B10A2_UNORM;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+        return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    default:
+        return format;
+    }
+}
+
+void Dx11wDx12SC::_ReleaseExternalHudlessSlot(UINT slot)
+{
+    if (slot < _openedHudless.size())
+        SafeRelease(_openedHudless[slot]);
+
+    if (slot < _sharedHudlessCopies.size())
+        SafeRelease(_sharedHudlessCopies[slot]);
+
+    if (slot < _sharedHudlessHandles.size())
+        SafeCloseHandle(_sharedHudlessHandles[slot]);
+}
+
+void Dx11wDx12SC::_ReleaseExternalHudless()
+{
+    // The HUD-less copies are read on the FG queue (not the interop copy queue), so drain
+    // that queue before releasing them. Only happens on resize/teardown.
+    bool anyOpened = false;
+    for (auto resource : _openedHudless)
+        anyOpened |= resource != nullptr;
+
+    auto fg = State::Instance().currentFG;
+    auto fgQueue = fg != nullptr ? fg->GetCommandQueue() : nullptr;
+
+    bool completed = !anyOpened;
+    if (anyOpened && fgQueue != nullptr && _dx12Device != nullptr)
+    {
+        ID3D12Fence* fence = nullptr;
+        if (SUCCEEDED(_dx12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))) && fence != nullptr)
+        {
+            HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+            if (event != nullptr && SUCCEEDED(fgQueue->Signal(fence, 1)) &&
+                SUCCEEDED(fence->SetEventOnCompletion(1, event)))
+            {
+                completed = WaitForSingleObject(event, 2000) == WAIT_OBJECT_0 &&
+                    fence->GetCompletedValue() != UINT64_MAX && fence->GetCompletedValue() >= 1;
+            }
+
+            if (event != nullptr)
+                CloseHandle(event);
+
+            fence->Release();
+        }
+    }
+
+    if (!completed) {
+        // Keep raw owning references for process lifetime when completion cannot be proved.
+        // Clear the wrapper slots so resize cannot overwrite/release those abandoned resources.
+        LOG_WARN("External HUD-less cleanup: retaining unresolved GPU ownership for process lifetime");
+        _openedHudless.clear(); _sharedHudlessCopies.clear(); _sharedHudlessHandles.clear();
+        _uiImages.clear(); _uiImageStates.clear(); _hudlessPending=false;
+        (void)_uiExtract.release(); // Its descriptors/PSO may be referenced by the unresolved recording too.
+        UiPaste::Release(); ExternalHudless::Clear(); return;
+    }
+
+    for (UINT i = 0; i < (UINT) _sharedHudlessCopies.size(); ++i)
+        _ReleaseExternalHudlessSlot(i);
+
+    _openedHudless.clear();
+    _sharedHudlessCopies.clear();
+    _sharedHudlessHandles.clear();
+    _hudlessPending = false;
+
+    for (auto& image : _uiImages)
+        SafeRelease(image);
+
+    _uiImages.clear();
+    _uiImageStates.clear();
+
+    UiPaste::Release();
+
+    ExternalHudless::Clear();
+}
+
+void Dx11wDx12SC::_CopyExternalHudlessToShared()
+{
+    _hudlessPending = false;
+
+    if (!ExternalHudless::Active()) { ExternalHudless::Clear(); return; }
+    ID3D11Texture2D* source = ExternalHudless::Take();
+    if (source == nullptr)
+        return;
+
+    auto fg = State::Instance().currentFG;
+    if (fg == nullptr || !fg->IsActive() || fg->IsPaused() || !Config::Instance()->FGEnabled.value_or_default())
+    {
+        source->Release();
+        ExternalHudless::MarkRejected("Frame generation is not active");
+        return;
+    }
+
+    const UINT slot = _currentFakeIndex;
+    if (_dx11Context == nullptr || _dx12Device == nullptr || slot >= _sharedDx11BackBufferCopies.size() ||
+        _sharedDx11BackBufferCopies[slot] == nullptr)
+    {
+        source->Release();
+        ExternalHudless::MarkRejected("Interop backbuffer is not ready");
+        return;
+    }
+
+    D3D11_TEXTURE2D_DESC backBufferDesc {};
+    _sharedDx11BackBufferCopies[slot]->GetDesc(&backBufferDesc);
+
+    D3D11_TEXTURE2D_DESC sourceDesc {};
+    source->GetDesc(&sourceDesc);
+
+    ExternalHudless::NoteFormats(sourceDesc.Width, sourceDesc.Height, (uint32_t) sourceDesc.Format,
+                                 (uint32_t) backBufferDesc.Format);
+
+    if (sourceDesc.Width != backBufferDesc.Width || sourceDesc.Height != backBufferDesc.Height)
+    {
+        source->Release();
+        auto message = std::format("Size {}x{} does not match the backbuffer {}x{}", sourceDesc.Width,
+                                   sourceDesc.Height, backBufferDesc.Width, backBufferDesc.Height);
+        ExternalHudless::MarkRejected(message.c_str());
+        return;
+    }
+
+    if (sourceDesc.SampleDesc.Count != 1 || sourceDesc.ArraySize != 1)
+    {
+        source->Release();
+        ExternalHudless::MarkRejected("Multisampled or array textures are not supported");
+        return;
+    }
+
+    // A HUD-less image must be the display-ready frame minus UI. A different format (typically
+    // R16G16B16A16_FLOAT) means it was captured from the HDR scene buffer earlier in the frame.
+    if (ExternalHudlessTypedFormat(sourceDesc.Format) != ExternalHudlessTypedFormat(backBufferDesc.Format))
+    {
+        source->Release();
+        auto message = std::format("Format {} does not match the backbuffer format {} (marker is in a Toggler "
+                                   "group that runs too early)",
+                                   (UINT) sourceDesc.Format, (UINT) backBufferDesc.Format);
+        ExternalHudless::MarkRejected(message.c_str());
+        return;
+    }
+
+    if (_sharedHudlessCopies.size() < _bufferCount)
+    {
+        _sharedHudlessCopies.resize(_bufferCount, nullptr);
+        _openedHudless.resize(_bufferCount, nullptr);
+        _sharedHudlessHandles.resize(_bufferCount, nullptr);
+    }
+
+    if (slot >= _sharedHudlessCopies.size())
+    {
+        source->Release();
+        ExternalHudless::MarkRejected("Backbuffer slot out of range");
+        return;
+    }
+
+    const DXGI_FORMAT sharedFormat = ExternalHudlessTypedFormat(sourceDesc.Format);
+
+    // Recreate the slot if the incoming texture changed shape or format (resolution change, preset swap).
+    if (_sharedHudlessCopies[slot] != nullptr)
+    {
+        D3D11_TEXTURE2D_DESC sharedDesc {};
+        _sharedHudlessCopies[slot]->GetDesc(&sharedDesc);
+
+        if (sharedDesc.Width != sourceDesc.Width || sharedDesc.Height != sourceDesc.Height ||
+            sharedDesc.Format != sharedFormat)
+        {
+            LOG_INFO("External HUD-less slot {} changed, recreating", slot);
+            _ReleaseExternalHudlessSlot(slot);
+        }
+    }
+
+    if (_sharedHudlessCopies[slot] == nullptr)
+    {
+        D3D11_TEXTURE2D_DESC desc {};
+        desc.Width = sourceDesc.Width;
+        desc.Height = sourceDesc.Height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = sharedFormat;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE; // HDR10 conversion and Streamline read it as an SRV
+        desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+
+        auto result = _dx11Device->CreateTexture2D(&desc, nullptr, &_sharedHudlessCopies[slot]);
+        if (FAILED(result) || _sharedHudlessCopies[slot] == nullptr)
+        {
+            LOG_ERROR("CreateTexture2D external hudless slot {} failed: {:X}", slot, (UINT) result);
+            source->Release();
+            ExternalHudless::MarkRejected("Could not create shared HUD-less texture");
+            return;
+        }
+
+        IDXGIResource1* dxgiResource = nullptr;
+        result = _sharedHudlessCopies[slot]->QueryInterface(IID_PPV_ARGS(&dxgiResource));
+        if (SUCCEEDED(result) && dxgiResource != nullptr)
+        {
+            result = dxgiResource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ, nullptr,
+                                                      &_sharedHudlessHandles[slot]);
+            dxgiResource->Release();
+        }
+
+        if (SUCCEEDED(result) && _sharedHudlessHandles[slot] != nullptr)
+            result = _dx12Device->OpenSharedHandle(_sharedHudlessHandles[slot], IID_PPV_ARGS(&_openedHudless[slot]));
+
+        if (FAILED(result) || _openedHudless[slot] == nullptr)
+        {
+            LOG_ERROR("Sharing external hudless slot {} with D3D12 failed: {:X}", slot, (UINT) result);
+            _ReleaseExternalHudlessSlot(slot);
+            source->Release();
+            ExternalHudless::MarkRejected("Could not share HUD-less texture with D3D12");
+            return;
+        }
+
+        _openedHudless[slot]->SetName(std::format(L"External HUD-less [{}]", slot).c_str());
+        LOG_INFO("External HUD-less slot {} created: {}x{} format {}", slot, desc.Width, desc.Height,
+                 (UINT) desc.Format);
+    }
+
+    // Same type group (typeless -> typed) is a legal CopyResource.
+    _dx11Context->CopyResource(_sharedHudlessCopies[slot], source);
+    source->Release();
+
+    _hudlessPending = true;
+    _hudlessSlot = slot;
+}
+
+void Dx11wDx12SC::_TagExternalHudless()
+{
+    if (!_hudlessPending)
+        return;
+
+    _hudlessPending = false;
+
+    auto fg = State::Instance().currentFG;
+    if (fg == nullptr || !fg->IsActive() || fg->IsPaused())
+    {
+        ExternalHudless::MarkRejected("Frame generation became inactive before Present");
+        return;
+    }
+
+    if (_hudlessSlot >= _openedHudless.size() || _openedHudless[_hudlessSlot] == nullptr)
+    {
+        ExternalHudless::MarkRejected("Shared HUD-less slot missing");
+        return;
+    }
+
+    // Tag it on the frame that is about to be dispatched, i.e. the frame whose backbuffer was
+    // just copied above. FG Present executes this UI command list on the FG queue before Dispatch.
+    const int fIndex = fg->GetIndexWillBeDispatched();
+    auto cmdList = fg->GetUICommandList(fIndex);
+    if (cmdList == nullptr)
+    {
+        ExternalHudless::MarkRejected("Frame generator has no command list for this frame");
+        return;
+    }
+
+    auto desc = _openedHudless[_hudlessSlot]->GetDesc();
+
+    Dx12Resource resource {};
+    resource.type = FG_ResourceType::HudlessColor;
+    resource.resource = _openedHudless[_hudlessSlot];
+    resource.cmdList = cmdList;
+    resource.state = D3D12_RESOURCE_STATE_COMMON;
+    resource.validity = FG_ResourceValidity::ValidNow;
+    resource.width = desc.Width;
+    resource.height = desc.Height;
+    resource.frameIndex = fIndex;
+
+    if (fg->SetResource(&resource))
+    {
+        ExternalHudless::MarkTagged();
+        if (_uiFreeThisFrame)
+            ExternalHudless::MarkUiRejected("Not needed: frame generation gets the HUD-less frame (UI-free frame generation)");
+        else
+            _TagExternalUi(fg, fIndex, cmdList);
+    }
+    else if (Config::Instance()->FGDisableHudless.value_or_default())
+        ExternalHudless::MarkRejected("\"Disable HUDless\" is checked in the OptiScaler menu");
+    else
+        ExternalHudless::MarkRejected("Frame generator refused the HUD-less texture (see OptiScaler.log)");
+}
+
+void Dx11wDx12SC::_TagExternalUi(IFGFeature_Dx12* fg, int fIndex, ID3D12GraphicsCommandList* cmdList)
+{
+    auto& cfg = *Config::Instance();
+
+    if (!cfg.FGExternalUIFromHudless.value_or_default())
+        return;
+
+    if (_hdrOutput || Hdr10::Active())
+    {
+        ExternalHudless::MarkUiRejected("Off while FFXIV HDR10 output is on (DLSS-G refuses a UI image in HDR here)");
+        return;
+    }
+
+    if (cfg.FGDisableUI.value_or_default())
+    {
+        ExternalHudless::MarkUiRejected("\"DisableUI\" is true in OptiScaler.ini");
+        return;
+    }
+
+    const UINT slot = _hudlessSlot;
+    if (slot >= _openedDx11BackBuffers.size() || _openedDx11BackBuffers[slot] == nullptr ||
+        slot >= _openedHudless.size() || _openedHudless[slot] == nullptr)
+    {
+        ExternalHudless::MarkUiRejected("Backbuffer or HUD-less copy missing for this slot");
+        return;
+    }
+
+    ID3D12Resource* finalImage = _openedDx11BackBuffers[slot];
+    ID3D12Resource* hudless = _openedHudless[slot];
+
+    const auto finalDesc = finalImage->GetDesc();
+    const auto hudlessDesc = hudless->GetDesc();
+
+    if ((finalDesc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0 ||
+        (hudlessDesc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0)
+    {
+        ExternalHudless::MarkUiRejected("Backbuffer copy is not readable as a texture");
+        return;
+    }
+
+    if (finalDesc.Width != hudlessDesc.Width || finalDesc.Height != hudlessDesc.Height)
+    {
+        ExternalHudless::MarkUiRejected("Backbuffer and HUD-less sizes differ");
+        return;
+    }
+
+    if (_uiExtract == nullptr)
+        _uiExtract = std::make_unique<UE_Dx12>("UI extract", _dx12Device);
+
+    if (!_uiExtract->IsInit())
+    {
+        ExternalHudless::MarkUiRejected("UI extraction shader failed to initialise (see OptiScaler.log)");
+        return;
+    }
+
+    if (_uiImages.size() < _bufferCount)
+    {
+        _uiImages.resize(_bufferCount, nullptr);
+        _uiImageStates.resize(_bufferCount, D3D12_RESOURCE_STATE_COMMON);
+    }
+
+    if (slot >= _uiImages.size())
+    {
+        ExternalHudless::MarkUiRejected("Backbuffer slot out of range");
+        return;
+    }
+
+    auto& uiImage = _uiImages[slot];
+
+    if (uiImage != nullptr)
+    {
+        const auto uiDesc = uiImage->GetDesc();
+        if (uiDesc.Width != finalDesc.Width || uiDesc.Height != finalDesc.Height)
+            SafeRelease(uiImage);
+    }
+
+    if (uiImage == nullptr)
+    {
+        D3D12_HEAP_PROPERTIES heap = {};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        D3D12_RESOURCE_DESC desc = {};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = finalDesc.Width;
+        desc.Height = finalDesc.Height;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+        auto result = _dx12Device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                           IID_PPV_ARGS(&uiImage));
+        if (FAILED(result) || uiImage == nullptr)
+        {
+            LOG_ERROR("CreateCommittedResource for external UI image slot {} failed: {:X}", slot, (UINT) result);
+            ExternalHudless::MarkUiRejected("Could not create the UI image");
+            return;
+        }
+
+        uiImage->SetName(std::format(L"External UI [{}]", slot).c_str());
+        _uiImageStates[slot] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        LOG_INFO("External UI image slot {} created: {}x{}", slot, desc.Width, desc.Height);
+    }
+
+    // Both inputs rest in COMMON between uses (interop copy queue / Streamline tag copy).
+    TransitionResource(cmdList, finalImage, D3D12_RESOURCE_STATE_COMMON,
+                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    TransitionResource(cmdList, hudless, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    TransitionResource(cmdList, uiImage, _uiImageStates[slot], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    const bool dispatched = _uiExtract->Dispatch(
+        cmdList, finalImage, ExternalHudlessTypedFormat(finalDesc.Format), hudless,
+        ExternalHudlessTypedFormat(hudlessDesc.Format), uiImage, cfg.FGExternalUIThreshold.value_or_default(),
+        (uint32_t) std::max(0, cfg.FGExternalUIDilation.value_or_default()));
+
+    TransitionResource(cmdList, uiImage, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    _uiImageStates[slot] = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+    TransitionResource(cmdList, hudless, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+    TransitionResource(cmdList, finalImage, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                       D3D12_RESOURCE_STATE_COMMON);
+
+    if (!dispatched)
+    {
+        ExternalHudless::MarkUiRejected("UI extraction dispatch failed");
+        return;
+    }
+
+    Dx12Resource resource {};
+    resource.type = FG_ResourceType::UIColor;
+    resource.resource = uiImage;
+    resource.cmdList = cmdList;
+    resource.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    resource.validity = FG_ResourceValidity::ValidNow;
+    resource.width = finalDesc.Width;
+    resource.height = finalDesc.Height;
+    resource.frameIndex = fIndex;
+
+    if (fg->SetResource(&resource))
+        ExternalHudless::MarkUiTagged();
+    else
+        ExternalHudless::MarkUiRejected("Frame generator refused the UI image (see OptiScaler.log)");
+}
+
+void Dx11wDx12SC::_ProduceUiPaste(bool hudlessReady, UINT slot)
+{
+    auto& cfg = *Config::Instance();
+
+    if (!ExternalHudless::Active() || !cfg.FGExternalUIPasteAfterFG.value_or_default())
+    {
+        UiPaste::Invalidate("Off in the menu");
+        return;
+    }
+
+    if (!hudlessReady)
+    {
+        UiPaste::Invalidate("No HUD-less image this frame");
+        return;
+    }
+
+    if (_hdrOutput || Hdr10::Active())
+    {
+        UiPaste::Invalidate("Off while FFXIV HDR10 output is on");
+        return;
+    }
+
+    if (FGHooks::IsDx12InteropPresentSC(_fgSwapChain) || State::Instance().currentFGSwapchain != _fgSwapChain)
+    {
+        UiPaste::Invalidate("No frame generation presenter");
+        return;
+    }
+
+    auto fg = _fg != nullptr ? _fg : State::Instance().currentFG;
+    if (fg == nullptr || !fg->IsActive() || fg->IsPaused() || fg->GetCommandQueue() == nullptr)
+    {
+        UiPaste::Invalidate("Frame generation is not active");
+        return;
+    }
+
+    if (slot >= _openedDx11BackBuffers.size() || _openedDx11BackBuffers[slot] == nullptr ||
+        slot >= _openedHudless.size() || _openedHudless[slot] == nullptr)
+    {
+        UiPaste::Invalidate("Backbuffer or HUD-less copy missing for this slot");
+        return;
+    }
+
+    ID3D12Resource* finalImage = _openedDx11BackBuffers[slot];
+    ID3D12Resource* hudless = _openedHudless[slot];
+
+    const auto finalDesc = finalImage->GetDesc();
+    const auto hudlessDesc = hudless->GetDesc();
+
+    if ((finalDesc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0 ||
+        (hudlessDesc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) != 0)
+    {
+        UiPaste::Invalidate("Backbuffer copy is not readable as a texture");
+        return;
+    }
+
+    if (finalDesc.Width != hudlessDesc.Width || finalDesc.Height != hudlessDesc.Height)
+    {
+        UiPaste::Invalidate("Backbuffer and HUD-less sizes differ");
+        return;
+    }
+
+    UiPaste::ProduceParams params {};
+    params.threshold = cfg.FGExternalUIThreshold.value_or_default();
+    params.dilation = (uint32_t) std::max(0, cfg.FGExternalUIDilation.value_or_default());
+    params.cleanup = cfg.FGExternalUIPasteCleanup.value_or_default() && !_uiFreeThisFrame;
+
+    // Same queue that just waited for the interop copy, so both inputs are complete. This is
+    // submitted before FG Present executes the UI command list and DLSS-G's own work.
+    UiPaste::Produce(_dx12Device, fg->GetCommandQueue(), finalImage, ExternalHudlessTypedFormat(finalDesc.Format),
+                     hudless, ExternalHudlessTypedFormat(hudlessDesc.Format), params);
+}
+
+bool Dx11wDx12SC::_UiFreeFrameGenWanted()
+{
+    auto& cfg = *Config::Instance();
+    auto& state = State::Instance();
+
+    if (!ExternalHudless::Active() || !cfg.FGExternalUIPasteAfterFG.value_or_default() || !cfg.FGExternalUIFreeFrameGen.value_or_default())
+        return false;
+
+    // Same gates as UiPaste::Paste, so the UI is never removed from a frame nobody pastes it back onto.
+    if (state.activeFgOutput != FGOutput::DLSSG || state.fgHudlessCompare || state.isShuttingDown)
+        return false;
+
+    if (_hdrOutput || Hdr10::Active())
+        return false;
+
+    if (FGHooks::IsDx12InteropPresentSC(_fgSwapChain) || state.currentFGSwapchain != _fgSwapChain)
+        return false;
+
+    auto fg = _fg != nullptr ? _fg : state.currentFG;
+    return fg != nullptr && fg->IsActive() && !fg->IsPaused() &&
+        _UiPasteReady();
+}
+
+bool Dx11wDx12SC::_UiPasteReady() {
+    if(_hudlessSlot>=_openedHudless.size() || !_openedHudless[_hudlessSlot])return false;
+    const auto desc=_openedHudless[_hudlessSlot]->GetDesc();
+    return UiPaste::Ready(_dx12Device, (UINT)desc.Width, desc.Height);
+}

@@ -153,6 +153,14 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGUIPremultipliedAlpha.set_from_config(readBool("FrameGen", "UIPremultipliedAlpha"));
             FGDisableHudless.set_from_config(readBool("FrameGen", "DisableHudless"));
             FGDisableUI.set_from_config(readBool("FrameGen", "DisableUI"));
+            FGExternalHudless.set_from_config(readBool("FrameGen", "ExternalHudless"));
+            FGExternalUIFromHudless.set_from_config(readBool("FrameGen", "ExternalUIFromHudless"));
+            FGExternalUIThreshold.set_from_config(readFloat("FrameGen", "ExternalUIThreshold"));
+            FGExternalUIDilation.set_from_config(readInt("FrameGen", "ExternalUIDilation"));
+            FGExternalUIPasteAfterFG.set_from_config(readBool("FrameGen", "ExternalUIPasteAfterFG"));
+            FGExternalUIPasteCleanup.set_from_config(readBool("FrameGen", "ExternalUIPasteCleanup"));
+            FGExternalUIPasteSteadyTiming.set_from_config(readBool("FrameGen", "ExternalUIPasteSteadyTiming"));
+            FGExternalUIFreeFrameGen.set_from_config(readBool("FrameGen", "ExternalUIFreeFrameGen"));
             FGSkipReset.set_from_config(readBool("FrameGen", "SkipReset"));
             FGRectLeft.set_from_config(readInt("FrameGen", "RectLeft"));
             FGRectTop.set_from_config(readInt("FrameGen", "RectTop"));
@@ -270,6 +278,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGDLSSGFramerateTargetDMFG.set_from_config(readFloat("DLSSG", "FramerateTargetDMFG"));
             FGDLSSGOverrideForceDMFG.set_from_config(readBool("DLSSG", "OverrideForceDMFG"));
             FGDLSSGForceDMFG.set_from_config(readBool("DLSSG", "ForceDMFG"));
+            FGDLSSGUIRecomposition.set_from_config(readBool("DLSSG", "UIRecomposition"));
         }
 
         // FSR FG Inputs
@@ -1116,6 +1125,21 @@ bool Config::SaveIni()
         ini.SetValue("FrameGen", "DisableHudless",
                      GetBoolValue(Instance()->FGDisableHudless.value_for_config()).c_str());
         ini.SetValue("FrameGen", "DisableUI", GetBoolValue(Instance()->FGDisableUI.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "ExternalHudless", GetBoolValue(Instance()->FGExternalHudless.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "ExternalUIFromHudless",
+                     GetBoolValue(Instance()->FGExternalUIFromHudless.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "ExternalUIThreshold",
+                     GetFloatValue(Instance()->FGExternalUIThreshold.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "ExternalUIDilation",
+                     GetIntValue(Instance()->FGExternalUIDilation.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "ExternalUIPasteAfterFG",
+                     GetBoolValue(Instance()->FGExternalUIPasteAfterFG.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "ExternalUIPasteCleanup",
+                     GetBoolValue(Instance()->FGExternalUIPasteCleanup.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "ExternalUIPasteSteadyTiming",
+                     GetBoolValue(Instance()->FGExternalUIPasteSteadyTiming.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "ExternalUIFreeFrameGen",
+                     GetBoolValue(Instance()->FGExternalUIFreeFrameGen.value_for_config()).c_str());
         ini.SetValue("FrameGen", "SkipReset", GetBoolValue(Instance()->FGSkipReset.value_for_config()).c_str());
         ini.SetValue("FrameGen", "RectLeft", GetIntValue(Instance()->FGRectLeft.value_for_config()).c_str());
         ini.SetValue("FrameGen", "RectTop", GetIntValue(Instance()->FGRectTop.value_for_config()).c_str());
@@ -1201,6 +1225,8 @@ bool Config::SaveIni()
         ini.SetValue("DLSSG", "OverrideForceDMFG",
                      GetBoolValue(Instance()->FGDLSSGOverrideForceDMFG.value_for_config()).c_str());
         ini.SetValue("DLSSG", "ForceDMFG", GetBoolValue(Instance()->FGDLSSGForceDMFG.value_for_config()).c_str());
+        ini.SetValue("DLSSG", "UIRecomposition",
+                     GetBoolValue(Instance()->FGDLSSGUIRecomposition.value_for_config()).c_str());
     }
 
     // OptiFG

@@ -1,4 +1,6 @@
 #include "pch.h"
+#include <misc/ExternalHudless.h>
+#include <misc/UiPaste.h>
 #include <shaders/hdr/Hdr10.h>
 #include "menu_hdr_colors.h"
 #include <shaders/hdr/HdrScreenshot.h>
@@ -3557,6 +3559,132 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             ShowHelpMarker("Needs HUDless texture to compare with final image.\n"
                            "UI elements and ONLY UI elements should have a pink tint!");
 
+            const bool hudlessAddonLoaded=GetModuleHandleW(L"OptiScalerHudless.addon64")!=nullptr;
+            ImGui::BeginDisabled(!hudlessAddonLoaded || Hdr10::Active());
+            bool externalHudless=config->FGExternalHudless.value_or_default();
+            if(ImGui::Checkbox("ReShade REST HUD isolation (experimental)",&externalHudless))config->FGExternalHudless=externalHudless;
+            ImGui::EndDisabled();
+            if(!hudlessAddonLoaded)ImGui::TextDisabled("Requires OptiScalerHudless.addon64 and the REST marker technique.");
+            else if(Hdr10::Active())ImGui::TextDisabled("REST HUD isolation currently supports SDR only; saved settings are retained.");
+            ShowHelpMarker("Optional addon compatibility path. Save Settings to retain your choice.\nFade transitions and world nameplates at low real FPS still need testing.\nNo HUD interpolation or higher native UI update rate is provided.");
+            if (const auto extHudless = ExternalHudless::Snapshot(); extHudless.submitted > 0 && ExternalHudless::Active())
+            {
+                const auto extUi = ExternalHudless::UiSnapshot();
+
+                ImGui::Text("External HUDless (ReShade): %llu tagged, %llu rejected",
+                            (unsigned long long) extHudless.tagged, (unsigned long long) extHudless.rejected);
+                if (extHudless.lastMessage[0] != '\0')
+                    ImGui::TextDisabled("%s", extHudless.lastMessage);
+
+                bool uiRecomposition = config->FGDLSSGUIRecomposition.has_value()
+                                           ? config->FGDLSSGUIRecomposition.value()
+                                           : true; // auto: on while this add-on feeds frames
+                if (ImGui::Checkbox("DLSS-G UI recomposition", &uiRecomposition))
+                    config->FGDLSSGUIRecomposition = uiRecomposition;
+
+                ShowHelpMarker("Tells DLSS-G to process the HUDless image and the UI image separately\n"
+                               "instead of only using them as hints. Without it the UI is still interpolated.\n"
+                               "DLSS-G reads this when it starts: Save Settings and restart the game after changing it.\n"
+                               "A DLSS-G preset forced by the NVIDIA App or driver can still disable it.");
+
+                bool uiFromHudless = config->FGExternalUIFromHudless.value_or_default();
+                if (ImGui::Checkbox("Build UI image from HUDless", &uiFromHudless))
+                    config->FGExternalUIFromHudless = uiFromHudless;
+
+                ShowHelpMarker("Pixels that differ between the final frame and the HUDless frame are UI.\n"
+                               "They are given to frame generation as a separate UI image, which it\n"
+                               "pastes on top of generated frames instead of interpolating them.\n"
+                               "SDR only. Uses \"Show Detected UI\" logic to decide what is UI.");
+
+                bool pasteUi = config->FGExternalUIPasteAfterFG.value_or_default();
+                if (ImGui::Checkbox("Paste UI after frame generation", &pasteUi))
+                    config->FGExternalUIPasteAfterFG = pasteUi;
+
+                ShowHelpMarker("Draws the newest real frame's UI over every frame DLSS-G outputs,\n"
+                               "after frame generation, so the UI is never interpolated and never morphs.\n"
+                               "The UI then updates at the base frame rate, and the scene behind\n"
+                               "see-through windows steps at that rate too.\n"
+                               "SDR only. Uses the UI threshold and edge grow settings below.\n"
+                               "Paused while \"Show Detected UI\" is on (use \"Tint pasted area\" instead).");
+
+                if (pasteUi)
+                {
+                    bool uiFreeFg = config->FGExternalUIFreeFrameGen.value_or_default();
+                    if (ImGui::Checkbox("UI-free frame generation", &uiFreeFg))
+                        config->FGExternalUIFreeFrameGen = uiFreeFg;
+
+                    ShowHelpMarker("Gives DLSS-G the HUD-less frame, so it generates frames with no UI at all,\n"
+                                   "and the paste adds the UI to every frame. Removes the doubled/ghosted UI\n"
+                                   "next to the pasted UI. The UI image and DLSS-G UI recomposition are\n"
+                                   "not used while this is on.");
+
+                    ImGui::BeginDisabled(uiFreeFg);
+                    bool pasteCleanup = config->FGExternalUIPasteCleanup.value_or_default();
+                    if (ImGui::Checkbox("Clear UI that just closed", &pasteCleanup))
+                        config->FGExternalUIPasteCleanup = pasteCleanup;
+
+                    ShowHelpMarker("Where the previous real frame had UI and the newest one does not\n"
+                                   "(a window closing, a tab switching), also paste the newest real frame there.\n"
+                                   "Removes the fading ghost DLSS-G draws while the UI changes.");
+                    ImGui::EndDisabled();
+
+                    bool pasteSteady = config->FGExternalUIPasteSteadyTiming.value_or_default();
+                    if (ImGui::Checkbox("Steady UI timing", &pasteSteady))
+                        config->FGExternalUIPasteSteadyTiming = pasteSteady;
+
+                    ShowHelpMarker("Always paste the UI from one real frame behind the newest one, so it\n"
+                                   "changes at an even pace. Makes nameplates and other UI that follows\n"
+                                   "characters step evenly instead of jittering.\n"
+                                   "Adds about one base frame of UI delay (~22 ms at 45 fps).");
+
+                    ImGui::SameLine(0.0f, 16.0f);
+
+                    bool pasteTint = UiPaste::DebugTint();
+                    if (ImGui::Checkbox("Tint pasted area", &pasteTint))
+                        UiPaste::SetDebugTint(pasteTint);
+
+                    ShowHelpMarker("Magenta: UI pasted from the newest real frame.\n"
+                                   "Cyan: area cleared after UI closed.\n"
+                                   "Only the UI should be tinted. If the whole screen is tinted, an effect\n"
+                                   "runs after the HUD-less capture point; raise the UI threshold or move the marker.\n"
+                                   "Not saved.");
+
+                    const auto pasteStatus = UiPaste::Snapshot();
+                    ImGui::Text("UI paste: %llu built, %llu frames pasted, %llu skipped",
+                                (unsigned long long) pasteStatus.produced, (unsigned long long) pasteStatus.pasted,
+                                (unsigned long long) pasteStatus.skipped);
+                    if (pasteStatus.lastMessage[0] != '\0')
+                        ImGui::TextDisabled("%s", pasteStatus.lastMessage);
+                }
+
+                if (uiFromHudless || pasteUi)
+                {
+                    float uiThreshold = config->FGExternalUIThreshold.value_or_default();
+                    if (ImGui::SliderFloat("UI threshold", &uiThreshold, 0.001f, 0.1f, "%.3f",
+                                           ImGuiSliderFlags_Logarithmic))
+                    {
+                        config->FGExternalUIThreshold = uiThreshold;
+                    }
+
+                    ShowHelpMarker("How different a pixel must be to count as UI.\n"
+                                   "Lower catches faint UI edges; higher ignores noise.");
+
+                    int uiDilation = config->FGExternalUIDilation.value_or_default();
+                    if (ImGui::SliderInt("UI edge grow (px)", &uiDilation, 0, 4))
+                        config->FGExternalUIDilation = uiDilation;
+
+                    ShowHelpMarker("Grows the UI area by this many pixels to include soft edges and glows.");
+                }
+
+                if (uiFromHudless)
+                {
+                    ImGui::Text("UI image: %llu tagged, %llu skipped", (unsigned long long) extUi.tagged,
+                                (unsigned long long) extUi.rejected);
+                    if (extUi.lastMessage[0] != '\0')
+                        ImGui::TextDisabled("%s", extUi.lastMessage);
+                }
+            }
+
             const auto isUsingUIAny = fgOutput->IsUsingUIAny();
 
             ImGui::BeginDisabled(!isUsingUIAny);
@@ -3636,6 +3764,18 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                         ShowHelpMarker("For when the game sends HUDless, but you want to disable it");
 
                         ImGui::EndDisabled();
+
+                        if (const auto extHudless = ExternalHudless::Snapshot(); extHudless.submitted > 0)
+                        {
+                            ImGui::Text("External HUDless (ReShade): %llu tagged, %llu rejected",
+                                        (unsigned long long) extHudless.tagged,
+                                        (unsigned long long) extHudless.rejected);
+                            ShowHelpMarker("HUD-less frames captured by the OptiScaler HUDless ReShade add-on.\n"
+                                           "Use \"Disable HUDless\" to compare with and without it.");
+
+                            if (extHudless.lastMessage[0] != '\0')
+                                ImGui::TextDisabled("%s", extHudless.lastMessage);
+                        }
 
                         bool depthValidNow = config->FGDepthValidNow.value_or_default();
                         if (ImGui::Checkbox("Depth as ValidNow", &depthValidNow))

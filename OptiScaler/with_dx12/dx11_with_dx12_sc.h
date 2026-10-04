@@ -8,6 +8,9 @@
 #include "d3d12.h"
 
 #include <vector>
+#include <memory>
+
+class UE_Dx12;
 
 class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : public IDXGISwapChain4
 {
@@ -84,6 +87,16 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     void _AdvanceFakeBackBufferIndex();
     bool _WaitForInteropCopyOnPresentQueue();
 
+    // External HUD-less (ReShade add-on) support
+    void _CopyExternalHudlessToShared();
+    void _TagExternalHudless();
+    void _ReleaseExternalHudlessSlot(UINT slot);
+    void _ReleaseExternalHudless();
+    void _TagExternalUi(IFGFeature_Dx12* fg, int fIndex, ID3D12GraphicsCommandList* cmdList);
+    void _ProduceUiPaste(bool hudlessReady, UINT slot);
+    bool _UiFreeFrameGenWanted();
+    bool _UiPasteReady();
+
     IDXGISwapChain* _real = nullptr;
     IDXGISwapChain1* _real1 = nullptr;
     IDXGISwapChain2* _real2 = nullptr;
@@ -127,6 +140,20 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     std::vector<ID3D12Resource*> _openedDx11BackBuffers;
     std::vector<HANDLE> _sharedBackBufferHandles;
     std::vector<D3D12_RESOURCE_STATES> _openedDx11BackBufferStates;
+
+    // One shared HUD-less copy per backbuffer slot, mirroring the backbuffer interop ring so a
+    // copy for the next frame never overwrites one the FG queue may still be reading.
+    std::vector<ID3D11Texture2D*> _sharedHudlessCopies;
+    std::vector<ID3D12Resource*> _openedHudless;
+    std::vector<HANDLE> _sharedHudlessHandles;
+    bool _hudlessPending = false;
+    UINT _hudlessSlot = 0;
+    bool _uiFreeThisFrame = false; // FG backbuffer got the HUD-less copy this frame
+
+    // UI colour+alpha image derived from (final, HUD-less), one per backbuffer slot.
+    std::vector<ID3D12Resource*> _uiImages;
+    std::vector<D3D12_RESOURCE_STATES> _uiImageStates;
+    std::unique_ptr<UE_Dx12> _uiExtract;
 
     UINT _bufferCount = 0;
     UINT _currentFakeIndex = 0;

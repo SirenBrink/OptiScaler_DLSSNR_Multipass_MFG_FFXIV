@@ -890,6 +890,16 @@ class Config
     CustomOptional<bool> FGUIPremultipliedAlpha { true };
     CustomOptional<bool> FGDisableHudless { false };
     CustomOptional<bool> FGDisableUI { false };
+    // External HUD-less (ReShade add-on): also derive a UI colour+alpha image from final vs HUD-less
+    CustomOptional<bool> FGExternalHudless { false }; // Explicit addon compatibility opt-in
+    CustomOptional<bool> FGExternalUIFromHudless { true };
+    CustomOptional<float> FGExternalUIThreshold { 0.008f };
+    CustomOptional<int> FGExternalUIDilation { 1 };
+    // External HUD-less: draw the newest real frame's UI over every frame-generation output (after FG)
+    CustomOptional<bool> FGExternalUIPasteAfterFG { true };
+    CustomOptional<bool> FGExternalUIPasteCleanup { true };
+    CustomOptional<bool> FGExternalUIPasteSteadyTiming { false };
+    CustomOptional<bool> FGExternalUIFreeFrameGen { true };
     CustomOptional<bool> FGSkipReset { false };
     CustomOptional<int> FGAllowedFrameAhead { 1 };
     CustomOptional<bool> FGDepthValidNow { false };
@@ -1020,6 +1030,8 @@ class Config
                                            // but someone just uses real DLSSG
     CustomOptional<bool> FGDLSSGOverrideForceDMFG { false };   // Overrides game's DLSSG mode to Dynamic
     CustomOptional<bool> FGDLSSGForceDMFG { false };           // Overrides Opti's DLSSG mode to Dynamic
+    // DLSSGOptions::enableUserInterfaceRecomposition. auto = on while the external HUD-less add-on is in use
+    CustomOptional<bool> FGDLSSGUIRecomposition { false };
     CustomOptional<float> FGDLSSGFramerateTargetDMFG { 0.0f }; // 0.0 means auto-detects the display refresh rate
 
     // As per
