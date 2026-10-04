@@ -14,7 +14,7 @@ nameplate positions or update game UI independently of the game.
 
 ## Requirements and setup
 
-- SDR output, the DX11/DX12 bridge, and OptiFG DLSS-G for post-FG UI paste.
+- SDR or OptiHDR output, the DX11/DX12 bridge, and OptiFG DLSS-G for post-FG UI paste.
 - ReShade with addon support, REST (ReShade Effect Shader Toggler) with its FFXIV configuration, `OptiScalerHudless.addon64`, and the supplied
   `OptiScaler_Hudless.fx` marker.
 - Place the marker last among the effects in the REST group that runs directly
@@ -22,8 +22,8 @@ nameplate positions or update game UI independently of the game.
 - Enable **ReShade REST HUD isolation (experimental)** in OptiFG's detected-UI
   controls and save settings. Its master key is `[FrameGen] ExternalHudless`.
   The master defaults to false. The other addon controls remain inactive without
-  both explicit opt-in and the loaded addon. Runtime HDR output disables this
-  path while retaining the user's saved preferences.
+  both explicit opt-in and the loaded addon. OptiHDR requires UI-free FG mode; HDR pixels are supplied by the same production
+  converter used for the scene, while mask detection and ReShade effects stay SDR.
 
 The author-provided addon binary and FX remain optional files, not dependencies
 of ordinary OptiScaler operation. They are not installed or loaded by OptiScaler.
@@ -45,12 +45,21 @@ Known visual limitations remain: black/white fades can change most pixels and
 be mistaken for UI, and nameplates can look displaced at low real FPS because
 the held UI and generated scene represent different times. Optional steady
 timing adds roughly one real frame of UI latency. This initial integration does
-not claim to fix those issues or support HDR capture/paste.
+not claim to fix those issues. HDR paste uses 10-bit PQ storage for colour and a discrete alpha
+mask, with the existing 10-bit HDR output retained for DLSS-G compatibility.
 
 ## Validation
 
 `tests/run_external_hudless.ps1` checks the addon status ABI and all activation
 combinations, then runs the production extraction and producer shaders on WARP
 for threshold, dilation, cleanup and unchanged-scene behavior. The Release
-build and existing HDR converter tests pass. Live REST placement, fades,
-teleports, Companion overlays and low real FPS still need gameplay acceptance.
+build and existing HDR converter tests pass. HDR tests also verify that mask
+detection is independent of the converted HDR colour. Live REST placement, fades,
+Local SDR and HDR gameplay tests confirmed working capture/paste and resolved
+high-factor command-pool starvation, with zero queue-busy skips in the HDR run.
+Brief capture interruptions recovered normally. Wider testing of fades, teleports,
+Companion overlays and low real FPS remains necessary.
+
+The supplied addon source and standalone marker are retained under
+`optional/reshade-hudless`. The addon is built separately against ReShade's
+addon SDK (API 20); the main OptiScaler build does not install or compile it.

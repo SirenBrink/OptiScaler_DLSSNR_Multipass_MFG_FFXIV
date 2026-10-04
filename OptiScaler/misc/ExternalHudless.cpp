@@ -27,7 +27,7 @@ bool ExternalHudless::Active()
 {
     if (!Config::Instance()->FGExternalHudless.value_or_default()) return false;
     return Eligible(true, GetModuleHandleW(L"OptiScalerHudless.addon64") != nullptr,
-        Hdr10::Active(), State::Instance().isShuttingDown);
+        Hdr10::Active() && !Config::Instance()->FGExternalUIFreeFrameGen.value_or_default(), State::Instance().isShuttingDown);
 }
 
 void ExternalHudless::Submit(ID3D11Texture2D* texture)

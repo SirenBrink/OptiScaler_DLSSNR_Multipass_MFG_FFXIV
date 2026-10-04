@@ -1113,7 +1113,7 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     ID3D12Resource* copySource = _openedDx11BackBuffers[copySlot];
     bool hudlessSource = false;
 
-    if (_uiFreeThisFrame && !_hdrOutput)
+    if (_uiFreeThisFrame)
     {
         ID3D12Resource* hudless = _hudlessSlot == copySlot && copySlot < _openedHudless.size()
                                       ? _openedHudless[copySlot]
@@ -1123,7 +1123,7 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
         {
             const auto hudlessDesc = hudless->GetDesc();
             if (hudlessDesc.Width == fgDesc.Width && hudlessDesc.Height == fgDesc.Height &&
-                ExternalHudlessTypedFormat(hudlessDesc.Format) == ExternalHudlessTypedFormat(fgDesc.Format))
+                (_hdrOutput || ExternalHudlessTypedFormat(hudlessDesc.Format) == ExternalHudlessTypedFormat(fgDesc.Format)))
             {
                 copySource = hudless;
                 sourceBefore = D3D12_RESOURCE_STATE_COMMON; // shared HUD-less copies rest in COMMON
@@ -1622,6 +1622,11 @@ void Dx11wDx12SC::_TagExternalHudless()
 
     // Tag it on the frame that is about to be dispatched, i.e. the frame whose backbuffer was
     // just copied above. FG Present executes this UI command list on the FG queue before Dispatch.
+    if (_hdrOutput) {
+        // The base frame was already converted to PQ. Never tag an SDR REST capture as HDR.
+        if (_uiFreeThisFrame) ExternalHudless::MarkTagged();
+        return;
+    }
     const int fIndex = fg->GetIndexWillBeDispatched();
     auto cmdList = fg->GetUICommandList(fIndex);
     if (cmdList == nullptr)
@@ -1820,11 +1825,6 @@ void Dx11wDx12SC::_ProduceUiPaste(bool hudlessReady, UINT slot)
         return;
     }
 
-    if (_hdrOutput || Hdr10::Active())
-    {
-        UiPaste::Invalidate("Off while FFXIV HDR10 output is on");
-        return;
-    }
 
     if (FGHooks::IsDx12InteropPresentSC(_fgSwapChain) || State::Instance().currentFGSwapchain != _fgSwapChain)
     {
@@ -1866,6 +1866,7 @@ void Dx11wDx12SC::_ProduceUiPaste(bool hudlessReady, UINT slot)
     }
 
     UiPaste::ProduceParams params {};
+    params.hdr = _hdrOutput;
     params.threshold = cfg.FGExternalUIThreshold.value_or_default();
     params.dilation = (uint32_t) std::max(0, cfg.FGExternalUIDilation.value_or_default());
     params.cleanup = cfg.FGExternalUIPasteCleanup.value_or_default() && !_uiFreeThisFrame;
@@ -1888,8 +1889,6 @@ bool Dx11wDx12SC::_UiFreeFrameGenWanted()
     if (state.activeFgOutput != FGOutput::DLSSG || state.fgHudlessCompare || state.isShuttingDown)
         return false;
 
-    if (_hdrOutput || Hdr10::Active())
-        return false;
 
     if (FGHooks::IsDx12InteropPresentSC(_fgSwapChain) || state.currentFGSwapchain != _fgSwapChain)
         return false;

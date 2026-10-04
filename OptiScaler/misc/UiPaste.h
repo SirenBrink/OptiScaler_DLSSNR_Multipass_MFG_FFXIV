@@ -36,6 +36,7 @@ struct ProduceParams
 {
     float threshold = 0.008f; // how different final and HUD-less must be to count as UI
     uint32_t dilation = 1;    // grow the UI area by this many pixels (max 4)
+    bool hdr = false;        // SDR mask, PQ pixels from the production OptiHDR converter
     bool cleanup = true;      // also paste where the previous frame had UI but this one does not
 };
 

@@ -3560,12 +3560,12 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                            "UI elements and ONLY UI elements should have a pink tint!");
 
             const bool hudlessAddonLoaded=GetModuleHandleW(L"OptiScalerHudless.addon64")!=nullptr;
-            ImGui::BeginDisabled(!hudlessAddonLoaded || Hdr10::Active());
+            ImGui::BeginDisabled(!hudlessAddonLoaded);
             bool externalHudless=config->FGExternalHudless.value_or_default();
             if(ImGui::Checkbox("ReShade REST HUD isolation (experimental)",&externalHudless))config->FGExternalHudless=externalHudless;
             ImGui::EndDisabled();
             if(!hudlessAddonLoaded)ImGui::TextDisabled("Requires OptiScalerHudless.addon64 and the REST marker technique.");
-            else if(Hdr10::Active())ImGui::TextDisabled("REST HUD isolation currently supports SDR only; saved settings are retained.");
+            else if(Hdr10::Active())ImGui::TextDisabled("HDR HUD isolation requires UI-free frame generation; ReShade effects remain SDR.");
             ShowHelpMarker("Optional addon compatibility path. Save Settings to retain your choice.\nFade transitions and world nameplates at low real FPS still need testing.\nNo HUD interpolation or higher native UI update rate is provided.");
             if (const auto extHudless = ExternalHudless::Snapshot(); extHudless.submitted > 0 && ExternalHudless::Active())
             {

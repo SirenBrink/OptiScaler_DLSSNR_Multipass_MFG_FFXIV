@@ -5,6 +5,8 @@
 #include <Config.h>
 #include <Util.h>
 #include "ExternalHudless.h"
+#include <shaders/hdr/Hdr10.h>
+#include <misc/FfxivSceneHdr.h>
 
 #include <shaders/Shader_Common.h>
 #include <d3dx/d3dx12.h>
@@ -27,7 +29,7 @@ constexpr UINT SlotCount = 4;
 constexpr UINT PasteRing = 32;
 
 // Producer descriptor table: t0 final, t1 HUD-less, t2 previous paste image, u0 output.
-constexpr UINT ProduceDescriptors = 4;
+constexpr UINT ProduceDescriptors = 5;
 
 constexpr D3D12_RESOURCE_STATES ImageRestState = static_cast<D3D12_RESOURCE_STATES>(
     static_cast<int>(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) |
@@ -45,11 +47,13 @@ cbuffer Params : register(b0)
     uint Height;
     uint HasPrevious;
     uint Cleanup;
+    uint UseHDR;
 };
 
 Texture2D<float4> FinalTexture : register(t0);
 Texture2D<float4> HudlessTexture : register(t1);
 Texture2D<float4> PreviousPaste : register(t2);
+Texture2D<float4> HdrFinalTexture : register(t3);
 RWTexture2D<float4> PasteTexture : register(u0);
 
 float PixelDifference(int2 p)
@@ -83,7 +87,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         }
     }
 
-    float3 finalColor = FinalTexture.Load(int3(p, 0)).rgb;
+    float3 finalColor = UseHDR != 0 ? HdrFinalTexture.Load(int3(p, 0)).rgb : FinalTexture.Load(int3(p, 0)).rgb;
 
     if (isUi)
         PasteTexture[id.xy] = float4(finalColor, 1.0);
@@ -130,6 +134,7 @@ struct ProduceConstants
     uint32_t height;
     uint32_t hasPrevious;
     uint32_t cleanup;
+    uint32_t useHDR;
 };
 
 enum class SlotState
@@ -415,7 +420,7 @@ bool EnsureProducerLocked(ID3D12Device* device)
         return true;
 
     CD3DX12_DESCRIPTOR_RANGE ranges[2];
-    ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0);
+    ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);
     ranges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);
 
     CD3DX12_ROOT_PARAMETER params[2];
@@ -685,7 +690,7 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
     LogSummaryLocked();
 
     const auto finalDesc = finalImage->GetDesc();
-    const auto imageFormat = ImageFormatFor(finalFormat);
+    const auto imageFormat = params.hdr ? DXGI_FORMAT_R10G10B10A2_UNORM : ImageFormatFor(finalFormat);
 
     if (finalDesc.Width != g_width || finalDesc.Height != g_height || imageFormat != g_imageFormat)
     {
@@ -784,6 +789,17 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
         return;
     }
 
+    Hdr10::Reset(g_produceList);
+    ID3D12Resource* hdrFinal = nullptr;
+    if (params.hdr) {
+        auto scene = FfxivSceneHdr::Open(device, (UINT)g_width, g_height);
+        hdrFinal = Hdr10::Convert(device, g_produceList, finalImage, D3D12_RESOURCE_STATE_COMMON, scene);
+        if (!hdrFinal) {
+            g_produceList->Close(); Hdr10::Reset(g_produceList);
+            SetMessageLocked("HDR HUD conversion unavailable");
+            return;
+        }
+    }
     CD3DX12_CPU_DESCRIPTOR_HANDLE cpu(slot.heap->GetCPUDescriptorHandleForHeapStart());
     CreateSrv(finalImage, finalFormat, cpu);
     cpu.Offset(1, g_csuIncrement);
@@ -795,6 +811,8 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
         CreateSrv(finalImage, finalFormat, cpu); // placeholder, HasPrevious = 0
     cpu.Offset(1, g_csuIncrement);
 
+    CreateSrv(hdrFinal ? hdrFinal : finalImage, hdrFinal ? DXGI_FORMAT_R10G10B10A2_UNORM : finalFormat, cpu);
+    cpu.Offset(1, g_csuIncrement);
     D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
     uavDesc.Format = g_imageFormat;
     uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
@@ -807,6 +825,7 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
     constants.height = g_height;
     constants.hasPrevious = previous >= 0 ? 1 : 0;
     constants.cleanup = params.cleanup ? 1 : 0;
+    constants.useHDR = params.hdr ? 1 : 0;
 
     auto list = g_produceList;
 
@@ -836,7 +855,7 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
     }
 
     ID3D12CommandList* lists[] = { list };
-    queue->ExecuteCommandLists(1, lists);
+    Hdr10::ExecuteCommands(queue, 1, lists);
 
     const auto value = ++g_produceValue;
     hr = queue->Signal(g_produceFence, value);

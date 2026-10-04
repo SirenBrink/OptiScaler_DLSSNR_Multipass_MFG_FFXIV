@@ -28,19 +28,20 @@ int wmain(int argc,wchar_t** argv){
     std::vector<float> scene(20,.2f),final=scene,previous(20,0),zeros(20,0);
     for(int i=0;i<5;++i)scene[i*4+3]=final[i*4+3]=1;
     final[8]=.8f;previous[3]=1;
-    auto a=make(final),b=make(scene),p=make(previous),out=make(zeros);
-    struct K{float threshold;unsigned radius,width,height,hasPrevious,cleanup,pad[2];};
+    auto hdrPixels=final; for (auto& v : hdrPixels) v *= .5f;
+    auto a=make(final),b=make(scene),p=make(previous),out=make(zeros),hdrImage=make(hdrPixels);
+    struct K{float threshold;unsigned radius,width,height,hasPrevious,cleanup,useHDR,pad;};
     ComPtr<ID3D11Buffer> cb;D3D11_BUFFER_DESC bd{};bd.ByteWidth=32;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
     check(d->CreateBuffer(&bd,nullptr,&cb));
     for(int shader=1;shader<=2;++shader){
         ComPtr<ID3DBlob> code,error;check(D3DCompileFromFile(argv[shader],nullptr,D3D_COMPILE_STANDARD_FILE_INCLUDE,"CSMain","cs_5_0",0,0,&code,&error));
         ComPtr<ID3D11ComputeShader> cs;check(d->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&cs));
-        for(unsigned radius=0;radius<=1;++radius)for(unsigned cleanup=0;cleanup<=1;++cleanup){
-            K k{.01f,radius,5,1,1,cleanup,{0,0}};c->UpdateSubresource(cb.Get(),0,nullptr,&k,0,0);
-            ID3D11ShaderResourceView* srv[]={a.s.Get(),b.s.Get(),p.s.Get()};auto* uav=out.u.Get();auto* buffer=cb.Get();
-            c->CSSetShader(cs.Get(),nullptr,0);c->CSSetConstantBuffers(0,1,&buffer);c->CSSetShaderResources(0,3,srv);c->CSSetUnorderedAccessViews(0,1,&uav,nullptr);c->Dispatch(1,1,1);
-            ID3D11ShaderResourceView* none[3]={};ID3D11UnorderedAccessView* no=nullptr;
-            c->CSSetShaderResources(0,3,none);c->CSSetUnorderedAccessViews(0,1,&no,nullptr);
+        for(unsigned radius=0;radius<=1;++radius)for(unsigned cleanup=0;cleanup<=1;++cleanup)for(unsigned hdr=0;hdr<=(shader==2?1u:0u);++hdr){
+            K k{.01f,radius,5,1,1,cleanup,hdr,0};c->UpdateSubresource(cb.Get(),0,nullptr,&k,0,0);
+            ID3D11ShaderResourceView* srv[]={a.s.Get(),b.s.Get(),p.s.Get(),hdrImage.s.Get()};auto* uav=out.u.Get();auto* buffer=cb.Get();
+            c->CSSetShader(cs.Get(),nullptr,0);c->CSSetConstantBuffers(0,1,&buffer);c->CSSetShaderResources(0,4,srv);c->CSSetUnorderedAccessViews(0,1,&uav,nullptr);c->Dispatch(1,1,1);
+            ID3D11ShaderResourceView* none[4]={};ID3D11UnorderedAccessView* no=nullptr;
+            c->CSSetShaderResources(0,4,none);c->CSSetUnorderedAccessViews(0,1,&no,nullptr);
             D3D11_TEXTURE2D_DESC td{};out.t->GetDesc(&td);td.BindFlags=0;td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
             ComPtr<ID3D11Texture2D> read;check(d->CreateTexture2D(&td,nullptr,&read));c->CopyResource(read.Get(),out.t.Get());
             D3D11_MAPPED_SUBRESOURCE map{};check(c->Map(read.Get(),0,D3D11_MAP_READ,0,&map));auto* values=(float*)map.pData;
@@ -48,10 +49,10 @@ int wmain(int argc,wchar_t** argv){
                 const bool ui=i==2 || (radius==1 && (i==1 || i==3));
                 const float alpha=ui?1.f:(shader==2 && cleanup && i==0?.5f:0.f);
                 assert(values[i*4+3]==alpha);
-                assert(values[i*4]==(alpha?final[i*4]:0.f));
+                assert(values[i*4]==(alpha?(hdr?hdrPixels[i*4]:final[i*4]):0.f));
             }
             c->Unmap(read.Get(),0);
         }
     }
-    puts("PASS: addon eligibility/ABI and production UI shaders on WARP: threshold, dilation, cleanup and untouched scene");
+    puts("PASS: addon eligibility/ABI and production UI shaders on WARP: threshold, dilation, cleanup, SDR mask/HDR colour separation and untouched scene");
 }
