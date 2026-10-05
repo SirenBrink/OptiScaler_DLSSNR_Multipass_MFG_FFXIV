@@ -148,6 +148,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     std::vector<HANDLE> _sharedHudlessHandles;
     bool _hudlessPending = false;
     UINT _hudlessSlot = 0;
+    std::unique_ptr<class ExternalHudlessNormalize> _hudlessNormalize;
     bool _uiFreeThisFrame = false; // FG backbuffer got the HUD-less copy this frame
 
     // UI colour+alpha image derived from (final, HUD-less), one per backbuffer slot.

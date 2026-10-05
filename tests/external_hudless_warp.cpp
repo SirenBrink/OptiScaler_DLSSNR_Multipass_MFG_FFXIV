@@ -8,6 +8,7 @@
 #include <vector>
 #include <cstring>
 #include "../OptiScaler/misc/ExternalHudless.h"
+#include "../OptiScaler/misc/ExternalHudlessNormalize.h"
 using Microsoft::WRL::ComPtr;
 void check(HRESULT hr){assert(SUCCEEDED(hr));}
 int wmain(int argc,wchar_t** argv){
@@ -17,6 +18,31 @@ int wmain(int argc,wchar_t** argv){
         assert(ExternalHudless::Eligible(bits&1,bits&2,bits&4,bits&8)==(bits==3));
     ComPtr<ID3D11Device> d;ComPtr<ID3D11DeviceContext> c;
     check(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&d,nullptr,&c));
+    assert(!ExternalHudlessNeedsNormalization(DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R8G8B8A8_UNORM));
+    assert(!ExternalHudlessNeedsNormalization(DXGI_FORMAT_B8G8R8A8_UNORM,DXGI_FORMAT_B8G8R8A8_UNORM));
+    for(auto format : {DXGI_FORMAT_B8G8R8A8_UNORM,DXGI_FORMAT_B8G8R8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_TYPELESS}) {
+        const unsigned char bgra[8]={17,51,221,123,245,19,7,255};
+        D3D11_TEXTURE2D_DESC td{};td.Width=2;td.Height=1;td.MipLevels=td.ArraySize=1;
+        td.Format=format;td.SampleDesc.Count=1;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA data{bgra,8,0};ComPtr<ID3D11Texture2D> input,output,read;
+        check(d->CreateTexture2D(&td,&data,&input));
+        td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
+        check(d->CreateTexture2D(&td,nullptr,&output));
+        const bool isBGRA=format==DXGI_FORMAT_B8G8R8A8_UNORM || format==DXGI_FORMAT_B8G8R8A8_TYPELESS;
+        const bool normalize=ExternalHudlessNeedsNormalization(isBGRA?DXGI_FORMAT_B8G8R8A8_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R8G8B8A8_UNORM);
+        if(normalize) {ExternalHudlessNormalize normalizer;assert(normalizer.Copy(d.Get(),c.Get(),input.Get(),output.Get()));}
+        else c->CopyResource(output.Get(),input.Get());
+        ComPtr<ID3D11ComputeShader> restored;ComPtr<ID3D11ShaderResourceView> restoredSrv;
+        ComPtr<ID3D11UnorderedAccessView> restoredUav;
+        c->CSGetShader(&restored,nullptr,nullptr);c->CSGetShaderResources(0,1,&restoredSrv);
+        c->CSGetUnorderedAccessViews(0,1,&restoredUav);assert(!restored && !restoredSrv && !restoredUav);
+        td.BindFlags=0;td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        check(d->CreateTexture2D(&td,nullptr,&read));c->CopyResource(read.Get(),output.Get());
+        D3D11_MAPPED_SUBRESOURCE map{};check(c->Map(read.Get(),0,D3D11_MAP_READ,0,&map));
+        const unsigned char rgba[8]={221,51,17,123,7,19,245,255};assert(!memcmp(map.pData,normalize?rgba:bgra,8));
+        c->Unmap(read.Get(),0);
+    }
+    puts("PASS: production typed/typeless BGRA to RGBA normalization and matching-format direct copies preserve colour, alpha and DX11 state");
     struct Tex{ComPtr<ID3D11Texture2D> t;ComPtr<ID3D11ShaderResourceView> s;ComPtr<ID3D11UnorderedAccessView> u;};
     auto make=[&](const std::vector<float>& pixels){
         Tex t;D3D11_TEXTURE2D_DESC td{};td.Width=5;td.Height=1;td.MipLevels=td.ArraySize=1;

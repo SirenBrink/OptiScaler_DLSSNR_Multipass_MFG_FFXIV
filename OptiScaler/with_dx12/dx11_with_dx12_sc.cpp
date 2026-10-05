@@ -4,6 +4,7 @@
 #include <misc/FfxivLightingCapture.h>
 #include <misc/companion/Companion.h>
 #include <misc/ExternalHudless.h>
+#include <misc/ExternalHudlessNormalize.h>
 #include <misc/UiPaste.h>
 #include <shaders/ui_extract/UE_Dx12.h>
 #include <framegen/IFGFeature_Dx12.h>
@@ -1504,7 +1505,9 @@ void Dx11wDx12SC::_CopyExternalHudlessToShared()
 
     // A HUD-less image must be the display-ready frame minus UI. A different format (typically
     // R16G16B16A16_FLOAT) means it was captured from the HDR scene buffer earlier in the frame.
-    if (ExternalHudlessTypedFormat(sourceDesc.Format) != ExternalHudlessTypedFormat(backBufferDesc.Format))
+    const bool normalize = ExternalHudlessNeedsNormalization(ExternalHudlessTypedFormat(sourceDesc.Format),
+                                                             ExternalHudlessTypedFormat(backBufferDesc.Format));
+    if (!normalize && ExternalHudlessTypedFormat(sourceDesc.Format) != ExternalHudlessTypedFormat(backBufferDesc.Format))
     {
         source->Release();
         auto message = std::format("Format {} does not match the backbuffer format {} (marker is in a Toggler "
@@ -1528,7 +1531,7 @@ void Dx11wDx12SC::_CopyExternalHudlessToShared()
         return;
     }
 
-    const DXGI_FORMAT sharedFormat = ExternalHudlessTypedFormat(sourceDesc.Format);
+    const DXGI_FORMAT sharedFormat = normalize ? DXGI_FORMAT_R8G8B8A8_UNORM : ExternalHudlessTypedFormat(sourceDesc.Format);
 
     // Recreate the slot if the incoming texture changed shape or format (resolution change, preset swap).
     if (_sharedHudlessCopies[slot] != nullptr)
@@ -1537,7 +1540,8 @@ void Dx11wDx12SC::_CopyExternalHudlessToShared()
         _sharedHudlessCopies[slot]->GetDesc(&sharedDesc);
 
         if (sharedDesc.Width != sourceDesc.Width || sharedDesc.Height != sourceDesc.Height ||
-            sharedDesc.Format != sharedFormat)
+            sharedDesc.Format != sharedFormat ||
+            bool(sharedDesc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != (sharedFormat == DXGI_FORMAT_R8G8B8A8_UNORM))
         {
             LOG_INFO("External HUD-less slot {} changed, recreating", slot);
             _ReleaseExternalHudlessSlot(slot);
@@ -1554,7 +1558,7 @@ void Dx11wDx12SC::_CopyExternalHudlessToShared()
         desc.Format = sharedFormat;
         desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE; // HDR10 conversion and Streamline read it as an SRV
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | (sharedFormat == DXGI_FORMAT_R8G8B8A8_UNORM ? D3D11_BIND_UNORDERED_ACCESS : 0); // normalized output is directly shared
         desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
 
         auto result = _dx11Device->CreateTexture2D(&desc, nullptr, &_sharedHudlessCopies[slot]);
@@ -1593,7 +1597,12 @@ void Dx11wDx12SC::_CopyExternalHudlessToShared()
     }
 
     // Same type group (typeless -> typed) is a legal CopyResource.
-    _dx11Context->CopyResource(_sharedHudlessCopies[slot], source);
+    if (normalize) {
+        if (!_hudlessNormalize) _hudlessNormalize = std::make_unique<ExternalHudlessNormalize>();
+        if (!_hudlessNormalize->Copy(_dx11Device, _dx11Context, source, _sharedHudlessCopies[slot])) {
+            source->Release(); ExternalHudless::MarkRejected("BGRA to RGBA normalization failed"); return;
+        }
+    } else _dx11Context->CopyResource(_sharedHudlessCopies[slot], source);
     source->Release();
 
     _hudlessPending = true;

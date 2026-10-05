@@ -779,6 +779,9 @@
     <ClInclude Include="misc\IdentifyGpu.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="misc\ExternalHudlessNormalize.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="misc\ExternalHudless.h">
       <Filter>Header Files</Filter>
     </ClInclude>

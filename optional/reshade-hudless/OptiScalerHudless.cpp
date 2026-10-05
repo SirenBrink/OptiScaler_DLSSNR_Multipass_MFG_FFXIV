@@ -260,6 +260,7 @@ void OnDestroyEffectRuntime(effect_runtime*)
 
 void OnPresent(command_queue*, swapchain*, const rect*, const rect*, uint32_t, const rect*)
 {
+    FindOptiScaler(); // API discovery is independent of marker placement or capture validity.
     g.inPresent = true;
     g.presents++;
 }
@@ -352,14 +353,16 @@ void OnRenderTechnique(effect_runtime* runtime, effect_technique technique, comm
     {
         g.bbFormat = static_cast<uint32_t>(swapDesc.BufferDesc.Format);
 
-        if (TypedFormat(sourceDesc.Format) != TypedFormat(swapDesc.BufferDesc.Format))
+        const bool convertible = TypedFormat(sourceDesc.Format) == DXGI_FORMAT_B8G8R8A8_UNORM &&
+                                 TypedFormat(swapDesc.BufferDesc.Format) == DXGI_FORMAT_R8G8B8A8_UNORM;
+        if (!convertible && TypedFormat(sourceDesc.Format) != TypedFormat(swapDesc.BufferDesc.Format))
         {
             source->Release();
             g.formatMismatches++;
             char message[256];
             snprintf(message, sizeof(message),
-                     "Marker ran on a format %u target but the screen is format %u. It is in a Toggler group "
-                     "that runs too early in the frame; keep it only in the group right before the UI.",
+                     "Capture format %u differs from screen format %u "
+                     "and this format pairing is unsupported; verify the capture target and marker placement.",
                      g.srcFormat, g.bbFormat);
             SetIssue(message);
             return;

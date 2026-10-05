@@ -63,3 +63,14 @@ Companion overlays and low real FPS remains necessary.
 The supplied addon source and standalone marker are retained under
 `optional/reshade-hudless`. The addon is built separately against ReShade's
 addon SDK (API 20); the main OptiScaler build does not install or compile it.
+
+## Capture format compatibility
+
+The matching addon and DLL accept full-size BGRA SDR captures for an RGBA
+backbuffer. The DLL normalizes channel order into the existing shared texture,
+without changing gamma, brightness, alpha, or allocating an extra full-size image.
+Same-format captures retain their direct-copy path. Unsupported format pairs,
+multisampled textures, and incorrectly sized captures still fail closed. This does
+not establish that a capture includes every scene effect; marker placement remains
+important. API discovery runs independently of capture validation. With FG off,
+native UI stays in place and capture use resumes when the frame generator is active.
