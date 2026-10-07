@@ -3087,6 +3087,10 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         if(ImGui::Checkbox("Preserve HDR highlights through ReShade (experimental)",&reshadeHighlights))config->FfxivHDRReShadeHighlights=reshadeHighlights;
         resetHdr("FfxivHDRReShadeHighlights",config->FfxivHDRReShadeHighlights);
         ShowHelpMarker("Uses captured scene highlight brightness with the final SDR effect colours.\nRelaxes colour-difference rejection only where both images are bright, and preserves post-effect colour ratios.\nSDR ReShade input is unchanged. Overlapping bright HUD elements may also brighten. Detail clipped by a preset cannot be recovered.\nApplies immediately; save settings to keep your choice.");
+        bool dlssSceneInput=config->FfxivHDRDLSSSceneInput.value_or_default();
+        if(ImGui::Checkbox("Use scene HDR input for DLSS (experimental, restart)",&dlssSceneInput))config->FfxivHDRDLSSSceneInput=dlssSceneInput;
+        resetHdr("FfxivHDRDLSSSceneInput",config->FfxivHDRDLSSSceneInput);
+        ShowHelpMarker("Feeds linear FP16 scene highlights through DLSS w/Dx12, then restores SDR for ReShade.\nChanges take effect when the DLSS feature is recreated; restart for a consistent comparison.\nMissing same-frame captures use linear SDR. Existing SDR expansion and NR input controls remain independent.");
         bool nrSceneInput=config->FfxivHDRNRSceneInput.value_or_default();
         if(ImGui::Checkbox("Use scene HDR input for NR (experimental)",&nrSceneInput))config->FfxivHDRNRSceneInput=nrSceneInput;
         resetHdr("FfxivHDRNRSceneInput",config->FfxivHDRNRSceneInput);

@@ -6,6 +6,7 @@
 #include <dlssnr/DlssNr.h>
 
 #include <Config.h>
+#include <shaders/hdr/DlssSceneInput.h>
 
 #include <proxies/DXGI_Proxy.h>
 #include <proxies/D3D12_Proxy.h>
@@ -285,7 +286,7 @@ bool IFeature_Dx11wDx12::ProcessDx11Textures(const NVSDK_NGX_Parameter* InParame
         return false;
     }
 
-    result = Dx12CommandList[frame]->Reset(Dx12CommandAllocator[frame], nullptr);
+    result = Hdr10::ResetCommands(Dx12CommandList[frame], Dx12CommandAllocator[frame]);
     if (result != S_OK)
     {
         LOG_ERROR("CommandList Reset error: {:X}", (UINT) result);
@@ -351,19 +352,23 @@ bool IFeature_Dx11wDx12::Init(ID3D11Device* InDevice, ID3D11DeviceContext* InCon
     if (prep != S_OK)
         LOG_WARN("Init: allocator reset before feature creation failed: {:X}", (UINT) prep);
 
-    prep = Dx12CommandList[0]->Reset(Dx12CommandAllocator[0], nullptr);
+    prep = Hdr10::ResetCommands(Dx12CommandList[0], Dx12CommandAllocator[0]);
 
     if (prep != S_OK)
         LOG_WARN("Init: command list reset before feature creation failed: {:X}", (UINT) prep);
 
-    const bool initialised = dx12Feature->Init(_dx11on12Device, Dx12CommandList[0], InParameters);
+    bool initialised=false;
+    {
+        DlssSceneInput::BridgeInitScope hdrBridgeScope;
+        initialised=dx12Feature->Init(_dx11on12Device, Dx12CommandList[0], InParameters);
+    }
 
     SetInit(initialised);
 
     if (Dx12CommandList[0]->Close() == S_OK && Dx12CommandQueue != nullptr)
     {
         ID3D12CommandList* lists[] = { Dx12CommandList[0] };
-        Dx12CommandQueue->ExecuteCommandLists(1, lists);
+        Hdr10::ExecuteCommands(Dx12CommandQueue, 1, lists);
 
         // Recorded against allocator 0, so allocator 0 must not be reset until this has retired. That
         // is what Dx12CommandAllocatorFenceValue is for, and ProcessDx11Textures already honours it.
@@ -584,7 +589,11 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
         DlssNr::EvaluateBeforeUpscale(cmdList, InParameters, Dx12CommandQueue, _frameCount,
                                       upscaler == Upscaler::DLSSD, nrGuideSourceWidth,
                                       nrGuideSourceHeight);
+        DlssSceneInput::bridgeColour=upscalerColor;
+        DlssSceneInput::bridgeOutput=dx11Out.Dx12Resource;
+        DlssSceneInput::bridgeColourState=upscalerColor==dx11Color.Dx12Resource?D3D12_RESOURCE_STATE_COMMON:D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters, Dx12CommandQueue);
+        DlssSceneInput::bridgeColour=nullptr;DlssSceneInput::bridgeOutput=nullptr;
 
         // DLSS 5 Neural Rendering rides the bridge: at this moment the block carries the D3D12 copies
         // of every input, the list is still recording, and the model's edit lands on the D3D12 output
@@ -646,7 +655,7 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
     if (dx12EvalResult)
     {
         ID3D12CommandList* ppCommandLists[] = { cmdList };
-        Dx12CommandQueue->ExecuteCommandLists(1, ppCommandLists);
+        Hdr10::ExecuteCommands(Dx12CommandQueue, 1, ppCommandLists);
         commandListExecuted = true;
 
         const auto fenceValue = ++Dx12FenceValue;

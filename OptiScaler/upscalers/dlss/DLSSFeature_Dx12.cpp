@@ -2,6 +2,9 @@
 #include "DLSSFeature_Dx12.h"
 #include <dxgi1_4.h>
 #include <Config.h>
+#include <misc/FfxivSceneHdr.h>
+#include <misc/NgxResourceBinding.h>
+#include <shaders/hdr/DlssSceneInput.h>
 
 bool DLSSFeatureDx12::InitInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
 {
@@ -42,6 +45,13 @@ bool DLSSFeatureDx12::InitDLSS(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
     if (NVNGXProxy::D3D12_CreateFeature() != nullptr)
     {
         ProcessInitParams(InParameters);
+        auto& cfg=*Config::Instance();
+        _sceneHdrInput=DlssSceneInput::bridgeInitialising && cfg.FfxivHDR.value_or_default() && cfg.FfxivHDRMode.value_or_default()==1 && cfg.FfxivHDRDLSSSceneInput.value_or_default();
+        unsigned int originalFlags=0;InParameters->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,&originalFlags);
+        if(_sceneHdrInput){unsigned int flags=originalFlags;
+            InParameters->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,flags|NVSDK_NGX_DLSS_Feature_Flags_IsHDR|NVSDK_NGX_DLSS_Feature_Flags_AutoExposure);
+            LOG_INFO("DLSS scene HDR input enabled: linear FP16 reconstruction, SDR output for ReShade");}
+
 
         _p_dlssHandle = &_dlssHandle;
 
@@ -53,6 +63,7 @@ bool DLSSFeatureDx12::InitDLSS(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
                                                          &_p_dlssHandle);
         }
 
+        if(_sceneHdrInput)InParameters->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags,originalFlags);
         if (nvResult != NVSDK_NGX_Result_Success)
         {
             LOG_ERROR("_CreateFeature result: {0:X}", (unsigned int) nvResult);
@@ -89,7 +100,41 @@ bool DLSSFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
     {
         ProcessEvaluateParams(InParameters);
 
+        NgxResourceBinding::Binding colourBinding(InParameters, NVSDK_NGX_Parameter_Color);
+        NgxResourceBinding::Binding outputBinding(InParameters, NVSDK_NGX_Parameter_Output);
+        NgxResourceBinding::Binding exposureBinding(InParameters, NVSDK_NGX_Parameter_ExposureTexture);
+        auto* colour = colourBinding.original;
+        auto* output = outputBinding.original;
+        unsigned int reset=0;
+        std::shared_ptr<DlssSceneInput::Packet> hdrPacket;
+        if(_sceneHdrInput){
+            InParameters->Get(NVSDK_NGX_Parameter_Reset,&reset);
+            auto scene=FfxivSceneHdr::Open(Device,RenderWidth(),RenderHeight(),false);
+            const char* failure="unknown";
+            hdrPacket=DlssSceneInput::Prepare(Device,InCommandList,colour,output,RenderWidth(),RenderHeight(),std::move(scene),&failure);
+            if(!hdrPacket){
+                LOG_ERROR("DLSS scene HDR preparation failed: {}; render {}x{}. Recreating ordinary DLSS for this session.",failure,RenderWidth(),RenderHeight());
+                for(auto* resource:{colour,output})if(resource){auto desc=resource->GetDesc();LOG_ERROR("DLSS scene HDR resource: {}x{}, format {}, flags {}, mips {}, samples {}, array {}",desc.Width,desc.Height,(UINT)desc.Format,(UINT)desc.Flags,desc.MipLevels,desc.SampleDesc.Count,desc.DepthOrArraySize);}
+                Config::Instance()->FfxivHDRDLSSSceneInput.set_volatile_value(false);
+                State::Instance().changeBackend[Handle()->Id]=true;
+                return false;
+            }
+            const int available=hdrPacket->scene.hdr?1:0;
+            if(available!=_sceneHdrAvailable){InParameters->Set(NVSDK_NGX_Parameter_Reset,1u);_sceneHdrAvailable=available;LOG_INFO("DLSS scene HDR: {}",available?"native HDR highlights entering DLSS":"linear SDR fallback (no same-frame scene)");}
+            colourBinding.Set(hdrPacket->input.Get());
+            outputBinding.Set(hdrPacket->output.Get());
+            exposureBinding.Set(nullptr);
+        }
         nvResult = NVNGXProxy::D3D12_EvaluateFeature()(InCommandList, _p_dlssHandle, InParameters, NULL);
+        if(hdrPacket){
+            colourBinding.Restore();
+            outputBinding.Restore();
+            exposureBinding.Restore();
+            InParameters->Set(NVSDK_NGX_Parameter_Reset,reset);
+            const bool success=nvResult==NVSDK_NGX_Result_Success;
+            DlssSceneInput::Finish(hdrPacket,InCommandList,success);
+            if(success)FfxivSceneHdr::PublishReconstructed(DlssSceneInput::Image(hdrPacket));
+        }
 
         if (nvResult != NVSDK_NGX_Result_Success)
         {

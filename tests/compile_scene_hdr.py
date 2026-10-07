@@ -25,5 +25,8 @@ for name in ['Tonemap_0x85E777EF', 'PostTonemapPreLUT_0xF8F57F0A',
 data = compile_shader(root / 'Hdr10.hlsl', 'cs_5_0', 'CSMain', root / 'Hdr10.cso')
 (root / 'Hdr10_Shader.h').write_text('#pragma once\n' + array('Hdr10_cso', data), encoding='utf-8')
 
+data = compile_shader(root / "DlssSceneInput.hlsl", "cs_5_0", "CSMain", root / "DlssSceneInput.cso")
+(root / "DlssSceneInput_Shader.h").write_text("#pragma once\n" + array("DlssSceneInput_cso", data), encoding="utf-8")
+
 data = compile_shader(root / "NrSceneInput.hlsl", "cs_5_0", "CSMain", root / "NrSceneInput.cso")
 (root / "NrSceneInput_Shader.h").write_text("#pragma once\n" + array("NrSceneInput_cso", data), encoding="utf-8")

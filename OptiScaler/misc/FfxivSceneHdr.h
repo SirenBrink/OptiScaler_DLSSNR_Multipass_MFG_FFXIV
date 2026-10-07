@@ -14,7 +14,8 @@
 #include <shaders/hdr/renodx/SceneShaders.h>
 
 // RenoDX FFXIV shaders run in an independent FP16 branch. This deliberately
-// leaves native SDR, NGX/NR inputs and ReShade's SDR effects unchanged.
+// leaves native SDR and ReShade's SDR effects unchanged. DLSS/NR may opt into
+// private HDR inputs without changing the game's colour textures.
 namespace FfxivSceneHdr {
 using Microsoft::WRL::ComPtr;
 inline constexpr GUID shaderTag{0xe3e16e11,0x412b,0x458b,{0x9d,0x2c,0x3a,0x81,0xb5,0x29,0xaa,0x01}};
@@ -45,6 +46,7 @@ struct Data {
     struct Alias { ComPtr<ID3D11Resource> native;std::shared_ptr<Slot> image; };
     std::unordered_map<ID3D11Resource*,Alias> aliases;
     std::shared_ptr<Slot> latest;
+    Hdr10::SceneInput reconstructed;
     uint64_t captures=0;
     uint64_t requests=0,available=0,missing=0,aspectMismatch=0,importFailed=0;
     std::array<bool,5> observed{};
@@ -171,9 +173,12 @@ inline void Copy(ID3D11Resource* dest,ID3D11Resource* source,bool full) {
     if(!Requested())return;auto& s=State();std::lock_guard lock(s.mutex);
     auto it=s.aliases.find(source);if(full && it!=s.aliases.end())s.aliases[dest]={dest,it->second.image};else s.aliases.erase(dest);
 }
+inline void PublishReconstructed(Hdr10::SceneInput image){auto& s=State();std::lock_guard lock(s.mutex);s.reconstructed=std::move(image);}
 inline Hdr10::SceneInput Open(ID3D12Device* d,UINT width,UINT height,bool presentation=true) {
     Hdr10::SceneInput result;if(!Requested() || !d || !width || !height)return result;
-    auto& s=State();std::lock_guard lock(s.mutex);auto p=s.latest;
+    auto& s=State();std::lock_guard lock(s.mutex);
+    if(presentation && s.reconstructed.hdr && s.reconstructed.hdr->GetDesc().Width==width && s.reconstructed.hdr->GetDesc().Height==height){ComPtr<ID3D12Device> owner;s.reconstructed.hdr->GetDevice(IID_PPV_ARGS(&owner));if(owner.Get()==d)return s.reconstructed;}
+    auto p=s.latest;
     auto report=[&](UINT outcome){
         if(!presentation)return;
         ++s.requests;
@@ -206,5 +211,5 @@ inline void CollectLocked(Data& s,bool keepWarm,ULONGLONG now) {
         return !keepWarm || now-p->lastUse>=2000;
     });
 }
-inline void EndFrame(){auto& s=State();std::lock_guard lock(s.mutex);s.aliases.clear();s.latest.reset();CollectLocked(s,Requested(),GetTickCount64());}
+inline void EndFrame(){auto& s=State();std::lock_guard lock(s.mutex);s.aliases.clear();s.latest.reset();s.reconstructed={};CollectLocked(s,Requested(),GetTickCount64());}
 }

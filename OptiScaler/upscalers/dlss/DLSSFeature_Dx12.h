@@ -8,6 +8,8 @@ class DLSSFeatureDx12 : public DLSSFeature, public IFeature_Dx12
 {
   private:
   protected:
+    bool _sceneHdrInput=false;
+    int _sceneHdrAvailable=-1;
     bool InitDLSS(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters);
 
   public:

@@ -6,6 +6,7 @@
 #include "IFeature_Dx12.h"
 #include "State.h"
 #include <dlssnr/amd/AmdBridge.h>
+#include <misc/NgxResourceBinding.h>
 #include <resource_tracking/ResTrack_dx12.h>
 
 void IFeature_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
@@ -89,13 +90,12 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     if (!OutputScaler->IsInit())
         useOutputScaling = false;
 
-    ID3D12Resource* paramOutput = nullptr;
-    ID3D12Resource* paramMotion = nullptr;
-    ID3D12Resource* paramDepth = nullptr;
-
-    InParameters->Get(NVSDK_NGX_Parameter_Output, &paramOutput);
-    InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, &paramMotion);
-    InParameters->Get(NVSDK_NGX_Parameter_Depth, &paramDepth);
+    NgxResourceBinding::Binding outputBinding(InParameters, NVSDK_NGX_Parameter_Output);
+    NgxResourceBinding::Binding motionBinding(InParameters, NVSDK_NGX_Parameter_MotionVectors);
+    NgxResourceBinding::Binding depthBinding(InParameters, NVSDK_NGX_Parameter_Depth);
+    auto* paramOutput = outputBinding.original;
+    auto* paramMotion = motionBinding.original;
+    auto* paramDepth = depthBinding.original;
 
     // Order is important as that's the order of shader dispatch
     std::vector<ShaderPass> pipeline;
@@ -239,23 +239,20 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     }
 
     // Upscaler will write to the first active shader, or just output
-    InParameters->Set(NVSDK_NGX_Parameter_Output, currentTarget);
+    outputBinding.Set(currentTarget);
     struct RestoreOutput
     {
-        NVSDK_NGX_Parameter* params;
-        ID3D12Resource* output;
-        ~RestoreOutput() { params->Set(NVSDK_NGX_Parameter_Output, output); }
-    } restoreOutput { InParameters, paramOutput };
+        decltype(outputBinding)& binding;
+        ~RestoreOutput() { binding.Restore(); }
+    } restoreOutput { outputBinding };
 
-    ID3D12Resource* originalColor = nullptr;
-    InParameters->Get(NVSDK_NGX_Parameter_Color, &originalColor);
+    NgxResourceBinding::Binding colorBinding(InParameters, NVSDK_NGX_Parameter_Color);
     struct RestoreColor
     {
-        NVSDK_NGX_Parameter* parameters;
-        ID3D12Resource* original;
+        decltype(colorBinding)& binding;
         bool changed = false;
-        ~RestoreColor() { if (changed) parameters->Set(NVSDK_NGX_Parameter_Color, original); }
-    } restoreColor { InParameters, originalColor };
+        ~RestoreColor() { if (changed) binding.Restore(); }
+    } restoreColor { colorBinding };
     if (Config::Instance()->DlssNrEnabled.value_or_default() &&
         Config::Instance()->DlssNrRunBeforeSr.value_or_default() && upscaler != Upscaler::DLSSD &&
         DlssNr::AmdBridge::CanUse(Device) && ResTrack_Dx12::HookLateNrQueue(Device))
@@ -266,7 +263,7 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
             if (Config::Instance()->DlssNrApplyModel.value_or_default())
             {
             restoreColor.changed = true;
-            InParameters->Set(NVSDK_NGX_Parameter_Color, edited);
+            colorBinding.Set(edited);
             }
         }
     }
@@ -311,7 +308,7 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
         }
     }
 
-    InParameters->Set(NVSDK_NGX_Parameter_Output, paramOutput);
+    outputBinding.Restore();
 
     return evalResult;
 }
