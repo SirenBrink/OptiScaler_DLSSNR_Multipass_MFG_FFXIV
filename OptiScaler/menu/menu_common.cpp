@@ -3664,14 +3664,16 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                 if (uiFromHudless || pasteUi)
                 {
                     float uiThreshold = config->FGExternalUIThreshold.value_or_default();
-                    if (ImGui::SliderFloat("UI threshold", &uiThreshold, 0.001f, 0.1f, "%.3f",
+                    if (ImGui::SliderFloat("UI threshold", &uiThreshold, 0.001f, 1.0f, "%.3f",
                                            ImGuiSliderFlags_Logarithmic))
                     {
                         config->FGExternalUIThreshold = uiThreshold;
                     }
 
                     ShowHelpMarker("How different a pixel must be to count as UI.\n"
-                                   "Lower catches faint UI edges; higher ignores noise.");
+                                   "Lower catches faint UI edges; higher ignores noise and post-capture effects.\n"
+                                   "Range: 0.001 to 1.000. High values may miss translucent UI.\n"
+                                   "Ctrl-click the value to enter an exact threshold.");
 
                     int uiDilation = config->FGExternalUIDilation.value_or_default();
                     if (ImGui::SliderInt("UI edge grow (px)", &uiDilation, 0, 4))

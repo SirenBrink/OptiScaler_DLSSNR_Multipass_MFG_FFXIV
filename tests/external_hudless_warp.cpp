@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <vector>
 #include <cstring>
+#include <utility>
 #include "../OptiScaler/misc/ExternalHudless.h"
 #include "../OptiScaler/misc/ExternalHudlessNormalize.h"
 using Microsoft::WRL::ComPtr;
@@ -81,4 +82,31 @@ int wmain(int argc,wchar_t** argv){
         }
     }
     puts("PASS: addon eligibility/ABI and production UI shaders on WARP: threshold, dilation, cleanup, SDR mask/HDR colour separation and untouched scene");
+
+    // Test full ultrawide and non-thread-aligned sizes. Neither path may crop,
+    // wrap rows, stretch the mask, or silently cap thresholds at 0.100.
+    for(const auto size : {std::pair<unsigned,unsigned>{5120,2160},{5119,2158}}){
+        const auto width=size.first,height=size.second;
+        std::vector<unsigned char> sceneWide(size_t(width)*height*4,51),finalWide=sceneWide;
+        for(size_t i=0;i<sceneWide.size();i+=4)sceneWide[i+3]=finalWide[i+3]=255;
+        const std::pair<unsigned,unsigned> marks[]={{0,0},{width-1,height-1},{width-1,0},{0,height-1},{width/2,height/2}};
+        for(int i=0;i<5;++i){const auto index=(size_t(marks[i].second)*width+marks[i].first)*4;finalWide[index]=i<4?204:89;}
+        auto texture=[&](const std::vector<unsigned char>* pixels){Tex t;D3D11_TEXTURE2D_DESC td{};td.Width=width;td.Height=height;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;D3D11_SUBRESOURCE_DATA data{pixels?pixels->data():nullptr,width*4,0};check(d->CreateTexture2D(&td,pixels?&data:nullptr,&t.t));check(d->CreateShaderResourceView(t.t.Get(),nullptr,&t.s));check(d->CreateUnorderedAccessView(t.t.Get(),nullptr,&t.u));return t;};
+        auto native=texture(&sceneWide),finalTex=texture(&finalWide),result=texture(nullptr);
+        D3D11_TEXTURE2D_DESC td{};result.t->GetDesc(&td);td.BindFlags=0;td.Usage=D3D11_USAGE_STAGING;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> read;check(d->CreateTexture2D(&td,nullptr,&read));
+        for(int shader=1;shader<=2;++shader){
+            ComPtr<ID3DBlob> code,error;check(D3DCompileFromFile(argv[shader],nullptr,D3D_COMPILE_STANDARD_FILE_INCLUDE,"CSMain","cs_5_0",0,0,&code,&error));ComPtr<ID3D11ComputeShader> cs;check(d->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&cs));
+            for(float threshold : {.125f,.25f,.5f,.75f,1.f}){
+                K k{threshold,0,width,height,0,0,0,0};c->UpdateSubresource(cb.Get(),0,nullptr,&k,0,0);
+                ID3D11ShaderResourceView* srvs[]={finalTex.s.Get(),native.s.Get(),nullptr,nullptr};auto* uav=result.u.Get();auto* buffer=cb.Get();c->CSSetShader(cs.Get(),nullptr,0);c->CSSetConstantBuffers(0,1,&buffer);c->CSSetShaderResources(0,4,srvs);c->CSSetUnorderedAccessViews(0,1,&uav,nullptr);c->Dispatch((width+15)/16,(height+15)/16,1);
+                ID3D11ShaderResourceView* none[4]={};ID3D11UnorderedAccessView* no=nullptr;c->CSSetShaderResources(0,4,none);c->CSSetUnorderedAccessViews(0,1,&no,nullptr);c->CopyResource(read.Get(),result.t.Get());D3D11_MAPPED_SUBRESOURCE map{};check(c->Map(read.Get(),0,D3D11_MAP_READ,0,&map));
+                unsigned detected=0;for(unsigned y=0;y<height;++y){auto* row=(unsigned char*)map.pData+size_t(y)*map.RowPitch;for(unsigned x=0;x<width;++x)detected+=row[x*4+3]==255;}
+                assert(detected==(threshold<.15f?5u:threshold<.6f?4u:0u));
+                for(int i=0;i<5;++i){auto* pixel=(unsigned char*)map.pData+size_t(marks[i].second)*map.RowPitch+marks[i].first*4;const bool expected=threshold<(i<4?153.f/255:38.f/255);assert(pixel[3]==(expected?255:0));if(expected)assert(pixel[0]==(i<4?204:89));}
+                c->Unmap(read.Get(),0);
+            }
+        }
+        printf("PASS: %ux%u full-frame extraction and paste masks, corner/centre alignment, thresholds 0.125 through 1.000, no scene false positives\n",width,height);
+    }
+
 }
