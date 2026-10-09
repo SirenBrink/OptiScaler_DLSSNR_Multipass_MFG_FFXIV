@@ -106,7 +106,10 @@ template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&&
         struct HdrGuard { HdrGuard(){inside=true;} ~HdrGuard(){inside=false;} } guard;
         UINT id=0,bytes=sizeof(id);ComPtr<ID3D11PixelShader> ps;c->PSGetShader(&ps,nullptr,nullptr);if(ps)ps->GetPrivateData(tag,&bytes,&id);
         if(id==6 || !wanted)FfxivLightingScan::Tick(c,wanted);
-        FfxivLightingScan::Before(c,id);original();FfxivLightingScan::After(c,id);
+        FfxivLightingScan::Before(c,id);
+        UINT hdrStage=0,hdrBytes=sizeof(hdrStage);if(ps)ps->GetPrivateData(FfxivSceneHdr::shaderTag,&hdrBytes,&hdrStage);
+        if(hdrStage==6)FfxivHdrPreview::BeforeDraw(c,original);
+        original();FfxivLightingScan::After(c,id);
         FfxivSceneHdr::AfterDraw(c,original);return;
     }
     if ((!wanted && !FfxivLightingScan::enabled.load()) || c!=context || inside)

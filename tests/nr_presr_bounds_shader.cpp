@@ -20,7 +20,7 @@ bool same(Pixel a,Pixel b) { return std::abs(a.r-b.r)<1e-5f && std::abs(a.g-b.g)
 int wmain(int argc,wchar_t** argv) try {
     expect(argc==2,"Expected HLSL path");
     ComPtr<ID3DBlob> code,errors;
-    auto result=D3DCompileFromFile(argv[1],nullptr,nullptr,"CSMain","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&errors);
+    auto result=D3DCompileFromFile(argv[1],nullptr,D3D_COMPILE_STANDARD_FILE_INCLUDE,"CSMain","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&errors);
     if(errors) std::fprintf(stderr,"%s",(char*)errors->GetBufferPointer()); check(result);
     ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> ctx;
     check(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&ctx));

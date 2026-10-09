@@ -39,7 +39,19 @@ cbuffer Params : register(b0)
     float gReferencePreExposure;
     float gPassFeedback;
     uint gSpatialResidual;
+    float gSpatialWorkWidth, gSpatialWorkHeight, gSpatialPadding;
+    float4 gBandCenter;
+    float4 gSideNeg;
+    float4 gSidePos;
+    float4 gSideWorkNeg;
+    float4 gSideWorkPos;
+    float4 gSideEdgeSlope;
+    float4 gWorkScale;
 };
+
+#define gNativeWorkSize float4(gWidth, gHeight, gSpatialWorkWidth, gSpatialWorkHeight)
+#include "../../hdr/HdrCompatibility.hlsli"
+#include "dlssnr_spatial_warp.hlsli"
 
 // Bringing an impossible colour back into a possible one.
 //
@@ -509,6 +521,11 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     {
         float3 difference = SanitizeFinite3(gModel.Load(int3(id.xy, 0)).rgb -
                                             gSource.Load(int3(id.xy, 0)).rgb, 0.0);
+        if(gSpatialPadding==1) {
+            float3 original=HdrCompatLinear(SanitizeFinite3(gSource.Load(int3(id.xy,0)).rgb,0));
+            float3 edited=HdrCompatLinear(SanitizeFinite3(gModel.Load(int3(id.xy,0)).rgb,0));
+            difference=log2(clamp((edited+1e-4)/(original+1e-4),.25,4));
+        }
         float3 d = difference / max(gExposurePreMul, 1e-4);
         gTarget[id.xy] = float4(0.5 + 0.5 * d / (1.0 + abs(d)), 1.0);
         return;
@@ -548,7 +565,13 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             float confidence = valid ? saturate(1.0 - rejection) : 0.0;
             edit *= confidence;
         }
-        gTarget[id.xy] = float4(max(SanitizeFinite3(base.rgb + edit, base.rgb), 0.0), base.a);
+        if(gSpatialPadding==1) {
+            // Apply a relative NR edit to the reconstructed HDR world, then
+            // derive its SDR compatibility image. Do not add a native SDR
+            // delta to the different post-SR shoulder curve.
+            float3 hdr=HdrCompatExpand(base.rgb,60000);
+            gTarget[id.xy]=float4(HdrCompatCompress(hdr*exp2(clamp(edit,-2,2))),base.a);
+        } else gTarget[id.xy] = float4(max(SanitizeFinite3(base.rgb + edit, base.rgb), 0.0), base.a);
         return;
     }
     // Bound only the reconstructed edit, never the clean raster. Current NR
@@ -874,8 +897,12 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     // Sampled rather than loaded: when the model ran at a reduced resolution these are smaller than the
     // frame, and its edit is enlarged here while the frame underneath stays untouched.
-    float4 proxySample = gSource.SampleLevel(gLinear, cmpUv, 0);
-    float4 modelSample = gModel.SampleLevel(gLinear, cmpUv, 0);
+    // Adapt Mattjaas's fused spatial resolve principle: native uniform output
+    // needs no intermediate unpack rasters. Reduced/zoomed paths retain their
+    // two-stage filter, because fusing those would change their footprint.
+    float2 modelUv = gSpatialResidual == 2 ? PwPack(cmpUv * gNativeWorkSize.xy) / gNativeWorkSize.zw : cmpUv;
+    float4 proxySample = gSource.SampleLevel(gLinear, modelUv, 0);
+    float4 modelSample = gModel.SampleLevel(gLinear, modelUv, 0);
 
     // Nothing was encoded on the way in, so nothing is decoded here either.
     float3 proxy = gPassthrough != 0 ? proxySample.rgb : SrgbToLinear(proxySample.rgb);

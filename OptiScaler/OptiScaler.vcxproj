@@ -26,6 +26,15 @@
       <Platform>x64</Platform>
     </ProjectConfiguration>
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="shaders\hdr\HdrScreenshotIcc.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="shaders\dlssnr\precompile\DlssNr_GuideMatch_Shader.h" />
+    <ClInclude Include="dlssnr\DlssNr_GpuSubmission.h" />
+    <ClInclude Include="dlssnr\DlssNr_DescriptorSlots.h" />
+    <ClInclude Include="low_latency\input\ConcurrentInputSelection.h" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
@@ -393,6 +402,8 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="misc\ExternalHudless.h" />
     <ClInclude Include="misc\ExternalHudlessNormalize.h" />
     <ClInclude Include="misc\UiPaste.h" />
+    <ClInclude Include="misc\FfxivHdrPreview.h" />
+    <ClInclude Include="shaders\hdr\HdrCompatibility.hlsli" />
     <ClInclude Include="shaders\ui_extract\UE_Common.h" />
     <ClInclude Include="shaders\ui_extract\UE_Dx12.h" />
     <ClInclude Include="inputs\FSR2_Dx11.h" />

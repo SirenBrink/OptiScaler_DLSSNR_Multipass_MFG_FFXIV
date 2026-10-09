@@ -1,3 +1,4 @@
+#include <array>
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <vector>
@@ -135,5 +136,74 @@ int main()try{
  c->CSSetUnorderedAccessViews(0,1,uav.GetAddressOf(),nullptr);c->Dispatch(33,1,1);
  c->CSSetUnorderedAccessViews(0,1,&nullU,nullptr);c->CopyResource(read.Get(),dst.Get());
  check(c->Map(read.Get(),0,D3D11_MAP_READ,0,&mapped));expect(((unsigned*)mapped.pData)[0]==baseline);c->Unmap(read.Get(),0);
+ // HDR treatment for changed native UI must not alter captured world energy.
+ for(int channel=0;channel<3;channel++){
+  pixels[channel]=1;referencePixels[channel]=.1f;scenePixels[channel]=4;
+  pixels[4+channel]=.9f;referencePixels[4+channel]=.9f;scenePixels[4+channel]=2;
+ }
+ c->UpdateSubresource(src.Get(),0,nullptr,pixels.data(),260*16,0);
+ c->UpdateSubresource(scene.Get(),0,nullptr,scenePixels.data(),260*16,0);
+ c->UpdateSubresource(reference.Get(),0,nullptr,referencePixels.data(),260*16,0);
+ k.reshadeHighlights=0;k.peak=1100;unsigned world=0;double uiWhite=0;
+ for(float expansion:{0.f,1.f}){
+  k.expand=expansion;c->UpdateSubresource(cb.Get(),0,nullptr,&k,0,0);c->CSSetUnorderedAccessViews(0,1,uav.GetAddressOf(),nullptr);c->Dispatch(33,1,1);
+  c->CSSetUnorderedAccessViews(0,1,&nullU,nullptr);c->CopyResource(read.Get(),dst.Get());check(c->Map(read.Get(),0,D3D11_MAP_READ,0,&mapped));cropped=(unsigned*)mapped.pData;
+  if(expansion==0){world=cropped[1];uiWhite=decode(cropped[0]&1023);expect(fabs(uiWhite-203)<3);}
+  else {expect(cropped[1]==world);expect(decode(cropped[0]&1023)>uiWhite*2);expect(decode(cropped[0]&1023)<1100);}
+  expect(fabs(decode(cropped[64]&1023)-203*pow((.25+.055)/1.055,2.4))<.4);
+  c->Unmap(read.Get(),0);
+ }
+ puts("PASS: native UI receives adjustable HDR highlights, captured world stays identical, UI shadows stay stable");
+ // The compatibility reference uses sRGB, not the native gamma-2.2 encoding.
+ // A dark identity pixel must not acquire invented scene energy from mixing them.
+ const float linearBlack=.04f/12.92f;
+ for(int channel=0;channel<3;channel++){pixels[channel]=.04f;referencePixels[channel]=.04f;scenePixels[channel]=pow(linearBlack,1.f/2.2f);}
+ c->UpdateSubresource(src.Get(),0,nullptr,pixels.data(),260*16,0);c->UpdateSubresource(scene.Get(),0,nullptr,scenePixels.data(),260*16,0);c->UpdateSubresource(reference.Get(),0,nullptr,referencePixels.data(),260*16,0);
+ k.expand=0;k.pad[0]=1;c->UpdateSubresource(cb.Get(),0,nullptr,&k,0,0);c->CSSetUnorderedAccessViews(0,1,uav.GetAddressOf(),nullptr);c->Dispatch(33,1,1);c->CSSetUnorderedAccessViews(0,1,&nullU,nullptr);c->CopyResource(read.Get(),dst.Get());check(c->Map(read.Get(),0,D3D11_MAP_READ,0,&mapped));
+ expect(fabs(decode(((unsigned*)mapped.pData)[0]&1023)-203*linearBlack)<.05);c->Unmap(read.Get(),0);
+ puts("PASS: reconstructed sRGB reference preserves dark identity pixels without invented HDR energy");
+ // Opaque preview coverage overrides both colour matching and highlight opt-in.
+ std::vector<float> maskPixels(260*4,0);for(int x=0;x<260;++x)maskPixels[x*4]=maskPixels[x*4+3]=x==0?0.f:1.f;
+ data.pSysMem=maskPixels.data();ComPtr<ID3D11Texture2D>mask;check(d->CreateTexture2D(&t,&data,&mask));
+ ComPtr<ID3D11ShaderResourceView>maskView;check(d->CreateShaderResourceView(mask.Get(),nullptr,&maskView));c->CSSetShaderResources(3,1,maskView.GetAddressOf());
+ for(int x=0;x<260;++x)for(int channel=0;channel<3;++channel){pixels[x*4+channel]=.85f;referencePixels[x*4+channel]=.85f;scenePixels[x*4+channel]=3.f;}
+ c->UpdateSubresource(src.Get(),0,nullptr,pixels.data(),260*16,0);c->UpdateSubresource(reference.Get(),0,nullptr,referencePixels.data(),260*16,0);
+ k.pad[1]=1;k.pad[0]=0;k.expand=.6f;unsigned opaque=0;
+ for(unsigned highlights:{0u,1u})for(float sceneValue:{2.f,5.f}) {
+  for(int x=0;x<260;++x)for(int channel=0;channel<3;++channel)scenePixels[x*4+channel]=sceneValue;
+  c->UpdateSubresource(scene.Get(),0,nullptr,scenePixels.data(),260*16,0);k.reshadeHighlights=highlights;c->UpdateSubresource(cb.Get(),0,nullptr,&k,0,0);
+  c->CSSetUnorderedAccessViews(0,1,uav.GetAddressOf(),nullptr);c->Dispatch(33,1,1);c->CSSetUnorderedAccessViews(0,1,&nullU,nullptr);c->CopyResource(read.Get(),dst.Get());
+  check(c->Map(read.Get(),0,D3D11_MAP_READ,0,&mapped));auto* result=(unsigned*)mapped.pData;
+  if(!opaque)opaque=result[0];else expect(result[0]==opaque);
+  expect(result[1]!=result[0]);c->Unmap(read.Get(),0);
+ }
+ puts("PASS: opaque preview ignores world highlights even with matching colours and ReShade preservation, world HDR remains active");
+ // Tiny real alpha transmission must not magnify unbounded background energy
+ // into a near-opaque foreground. Keep a blue foreground over a red background.
+ for(int x=0;x<260;++x) {
+  pixels[x*4]=.12f;pixels[x*4+1]=.12f;pixels[x*4+2]=.8f;
+  referencePixels[x*4]=.1f;referencePixels[x*4+1]=.1f;referencePixels[x*4+2]=.8f;
+  maskPixels[x*4]=maskPixels[x*4+3]=x==0?0.f:(x==1?1.f/255:1.f);
+ }
+ c->UpdateSubresource(src.Get(),0,nullptr,pixels.data(),260*16,0);
+ c->UpdateSubresource(reference.Get(),0,nullptr,referencePixels.data(),260*16,0);
+ c->UpdateSubresource(mask.Get(),0,nullptr,maskPixels.data(),260*16,0);
+ k.expand=0;k.reshadeHighlights=0;k.pad[0]=0;
+ double opaqueR=0,opaqueG=0,opaqueB=0;
+ for(float value:{1.f,100.f,10000.f}) {
+  for(int x=0;x<260;++x){scenePixels[x*4]=value;scenePixels[x*4+1]=.1f;scenePixels[x*4+2]=.8f;}
+  c->UpdateSubresource(scene.Get(),0,nullptr,scenePixels.data(),260*16,0);
+  c->UpdateSubresource(cb.Get(),0,nullptr,&k,0,0);c->CSSetUnorderedAccessViews(0,1,uav.GetAddressOf(),nullptr);c->Dispatch(33,1,1);
+  c->CSSetUnorderedAccessViews(0,1,&nullU,nullptr);c->CopyResource(read.Get(),dst.Get());check(c->Map(read.Get(),0,D3D11_MAP_READ,0,&mapped));
+  auto* result=(unsigned*)mapped.pData;
+  auto rgb=[](unsigned p){double r=decode(p&1023),g=decode((p>>10)&1023),b=decode((p>>20)&1023);return std::array<double,3>{1.660491*r-.587641*g-.072850*b,-.124550*r+1.132900*g-.008349*b,-.018151*r-.100579*g+1.118730*b};};
+  auto a=rgb(result[0]),partial=rgb(result[1]);
+  if(value==1){opaqueR=a[0];opaqueG=a[1];opaqueB=a[2];}
+  expect(fabs(a[0]-opaqueR)<.1 && fabs(a[1]-opaqueG)<.1 && fabs(a[2]-opaqueB)<.1);
+  expect(partial[0]>=a[0]-.5 && partial[0]-a[0]<k.peak/255+1);
+  expect(fabs(partial[1]-a[1])<1 && fabs(partial[2]-a[2])<2);
+  c->Unmap(read.Get(),0);
+ }
+ puts("PASS: almost opaque preview bounds background HDR by native transmittance; no foreground colour gain from extreme world highlights");
  return 0;
 }catch(const std::exception&e){puts(e.what());return 1;}

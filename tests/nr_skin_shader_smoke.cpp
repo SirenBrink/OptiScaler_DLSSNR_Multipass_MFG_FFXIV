@@ -22,7 +22,7 @@ int wmain(int argc, wchar_t** argv) try {
     static_assert(offsetof(DlssNrConstants, SkinProtection) == 92);
     static_assert(offsetof(DlssNrConstants, EnvironmentColour) == 112);
     ComPtr<ID3DBlob> code, errors;
-    HRESULT compiled = D3DCompileFromFile(argv[1], nullptr, nullptr, "CSMain", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+    HRESULT compiled = D3DCompileFromFile(argv[1], nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "CSMain", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
     if (errors) std::fprintf(stderr, "%s", (char*)errors->GetBufferPointer());
     check(compiled);
     ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> ctx;
@@ -211,5 +211,22 @@ int wmain(int argc, wchar_t** argv) try {
     expect(result[0].r==0 && result[0].g==0 && result[1].r==0 && result[1].g==0,
            "Private reset-only motion guide was not zero");
     std::puts("PASS: two-frame hold cadence, cut/gap invalidation, current-raster composition, zero guide");
+    // Native NR edits and post-SR compatibility images use different curves.
+    // Transfer relative linear-light edits, not absolute native SDR deltas.
+    auto linear=[](float x){return x<=.04045f?x/12.92f:std::pow((x+.055f)/1.055f,2.4f);};
+    auto encode=[](float x){return x<=.0031308f?12.92f*x:1.055f*std::pow(x,1.f/2.4f)-.055f;};
+    auto compatibility=[&](Pixel p){float high=std::max(p.r,std::max(p.g,p.b));if(high>.75f){float e=high-.75f;float scale=(.75f+.25f*e/(.25f+e))/high;p.r*=scale;p.g*=scale;p.b*=scale;}p.r=encode(p.r);p.g=encode(p.g);p.b=encode(p.b);return p;};
+    std::array<Pixel,2> native{{{.65f,.45f,.25f,.25f},{0,0,0,.75f}}}, nr=native;
+    const float ratio=1.15f;nr[0].r=encode(linear(native[0].r)*ratio);nr[0].g=encode(linear(native[0].g)*ratio);nr[0].b=encode(linear(native[0].b)*ratio);
+    ctx->UpdateSubresource(original.Get(),0,nullptr,native.data(),sizeof(native),0);ctx->UpdateSubresource(model.Get(),0,nullptr,nr.data(),sizeof(nr),0);
+    settings.Mode=DlssNrMode_EncodeResidual;settings.SpatialWorkSize[2]=1;settings.ExposurePreMul=1;auto hdrCarrier=run();
+    ctx->UpdateSubresource(model.Get(),0,nullptr,hdrCarrier.data(),sizeof(hdrCarrier),0);
+    std::array<Pixel,2> hdrClean{{{2.f,.6f,.15f,.25f},{0,0,0,.75f}}}, compat{{compatibility(hdrClean[0]),compatibility(hdrClean[1])}};
+    ctx->UpdateSubresource(original.Get(),0,nullptr,compat.data(),sizeof(compat),0);settings.Mode=DlssNrMode_ApplyResidual;result=run();
+    auto expected=hdrClean[0];expected.r*=ratio;expected.g*=ratio;expected.b*=ratio;expected=compatibility(expected);
+    expect(std::abs(result[0].r-expected.r)<.0004f && std::abs(result[0].g-expected.g)<.0004f && std::abs(result[0].b-expected.b)<.0004f && result[0].a==expected.a,"HDR relative carrier changed NR brightness or colour");
+    expect(same(result[1],compat[1]),"HDR relative carrier lifted black");
+    ctx->UpdateSubresource(model.Get(),0,nullptr,neutral.data(),sizeof(neutral),0);result=run();expect(same(result[0],compat[0]) && same(result[1],compat[1]),"HDR neutral carrier changed brightness");
+    std::puts("PASS: PreSR HDR relative carrier preserves intended linear edit across the SDR shoulder, black, alpha and neutral identity");
     return 0;
 } catch (const std::exception& e) { std::fprintf(stderr,"FAIL: %s\n",e.what()); return 1; }

@@ -41,5 +41,8 @@ struct SceneInput {
     std::shared_ptr<void> owner;
     std::array<float,4> rect{0,0,1,1}; // Normalised offset/size of the rendered viewport.
     std::function<void(std::function<bool()>)> retire;
+    bool referenceSrgb=false; // Native captures use gamma 2.2; DLSS compatibility output uses sRGB.
+    Microsoft::WRL::ComPtr<ID3D12Resource> previewMask; // Native UI preview transmittance, in output coordinates.
+    bool referenceHdrShoulder=false; // SDR reference was derived with the HDR compatibility shoulder.
 };
 }

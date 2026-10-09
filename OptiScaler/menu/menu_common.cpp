@@ -3126,10 +3126,9 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         screenshotShortcut.Render(config->FfxivHDRScreenshotKey, "Reset");
         ImGui::TextWrapped("Optional: one key, Escape cancels, Backspace unbinds. Save Settings to keep your choice.");
         ImGui::TextWrapped("%s", Hdr10::Screenshot::Status().c_str());
-        ImGui::BeginDisabled(hdrMode==1);
         if(ImGui::SliderFloat("Highlight expansion",&expansion,0,1,"%.2f"))config->FfxivHDRExpansion=expansion;
         resetHdr("FfxivHDRExpansion", config->FfxivHDRExpansion);
-        ImGui::EndDisabled();
+        ShowHelpMarker("In SDR expansion mode, controls highlight expansion for the complete image.\nIn scene HDR mode, maps SDR-authored UI and changed effect pixels into HDR; captured world highlights retain their own scene brightness.\nApplies immediately. No additional DLSS evaluation is needed.");
         float contrast=config->FfxivHDRContrast.value_or_default();
         if(ImGui::SliderFloat("Contrast",&contrast,0.5f,1.5f,"%.2fx"))config->FfxivHDRContrast=contrast;
         resetHdr("FfxivHDRContrast", config->FfxivHDRContrast);

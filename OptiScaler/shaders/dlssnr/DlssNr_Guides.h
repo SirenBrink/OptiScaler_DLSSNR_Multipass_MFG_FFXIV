@@ -11,6 +11,13 @@ struct GuideRegion
 };
 struct GuideRegions { GuideRegion depth, motion; };
 
+// Adapted from jlrouzies-fr 75e2cd5c: use the texture read by the model,
+// rather than the colour working size when guides have not been resized.
+inline float ModelMotionScale(unsigned textureExtent, unsigned referenceExtent)
+{
+    return referenceExtent ? float(textureExtent) / float(referenceExtent) : 1.0f;
+}
+
 inline GuideExtent GuideRenderExtent(GuideExtent reportedRender, GuideExtent syntheticSource)
 {
     return syntheticSource.width != 0 && syntheticSource.height != 0 ? syntheticSource : reportedRender;

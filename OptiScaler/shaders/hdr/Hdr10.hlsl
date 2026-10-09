@@ -2,8 +2,9 @@
 Texture2D<float4> Source : register(t0);
 Texture2D<float4> Scene : register(t1);
 Texture2D<float4> Reference : register(t2);
+Texture2D<float4> PreviewMask : register(t3);
 RWTexture2D<float4> Target : register(u0);
-cbuffer Settings : register(b0) { uint Width; uint Height; float PaperWhite; float Peak; float Expansion; float Contrast; float Saturation; float Vibrance; uint SceneMode; uint ReShadeHighlights; uint2 Padding; float4 SceneRect; };
+cbuffer Settings : register(b0) { uint Width; uint Height; float PaperWhite; float Peak; float Expansion; float Contrast; float Saturation; float Vibrance; uint SceneMode; uint ReShadeHighlights; uint ReferenceSrgb; uint HasPreviewMask; float4 SceneRect; };
 float3 Linear(float3 x) { return float3(x.x <= .04045 ? x.x/12.92 : pow((x.x+.055)/1.055,2.4), x.y <= .04045 ? x.y/12.92 : pow((x.y+.055)/1.055,2.4), x.z <= .04045 ? x.z/12.92 : pow((x.z+.055)/1.055,2.4)); }
 float3 PQ(float3 nits) {
     float3 p = pow(max(nits,0)/10000.0, 2610.0/16384.0);
@@ -16,6 +17,14 @@ float3 Guide(Texture2D<float4> tex,float2 uv) {
  int2 limit=int2(round((SceneRect.xy+SceneRect.zw)*float2(w,h)))-1;
  return lerp(lerp(tex.Load(int3(clamp(q,lower,limit),0)).rgb,tex.Load(int3(clamp(q+int2(1,0),lower,limit),0)).rgb,f.x),
              lerp(tex.Load(int3(clamp(q+int2(0,1),lower,limit),0)).rgb,tex.Load(int3(clamp(q+1,lower,limit),0)).rgb,f.x),f.y);
+}
+float3 MapScenePeak(float3 value) {
+    float high=max(value.r,max(value.g,value.b));
+    if(high>PaperWhite) {
+        float mapped=PaperWhite+renodx::tonemap::Reinhard(high-PaperWhite,Peak-PaperWhite);
+        value*=mapped/high;
+    }
+    return value;
 }
 [numthreads(8,8,1)] void CSMain(uint3 id:SV_DispatchThreadID) {
     if(id.x>=Width || id.y>=Height) return;
@@ -34,7 +43,7 @@ float3 Guide(Texture2D<float4> tex,float2 uv) {
     // grey rather than only above 74% sRGB. The latter left most game lighting
     // entirely inside the SDR range. Smooth onset avoids a visible knee.
     float h=saturate((y-.18)/.82); h=h*h*(3-2*h);
-    float gain=PaperWhite+(Peak-PaperWhite)*Expansion*h;
+    float gain=PaperWhite+(SceneMode?0:(Peak-PaperWhite)*Expansion*h);
     rgb*=gain;
     if(SceneMode) {
         float2 uv=(float2(id.xy)+.5)/float2(Width,Height);
@@ -42,7 +51,7 @@ float3 Guide(Texture2D<float4> tex,float2 uv) {
         // RenoDX FFXIV keeps extended gamma-encoded values until its final pass.
         // Values >1 come from the exposed scene, never an inverse SDR curve.
         float3 sceneLinear=pow(max(sceneEncoded,0),2.2);
-        float3 neutral=pow(saturate(referenceEncoded),2.2);
+        float3 neutral=ReferenceSrgb?Linear(saturate(referenceEncoded)):pow(saturate(referenceEncoded),2.2);
         float3 scale=sceneLinear/max(neutral,1e-4);
         // Suppress HDR residual on changed overlays; the real SDR/UI draw is kept.
         // Arbitrary spatial ReShade effects require a dedicated HDR-aware path.
@@ -61,14 +70,25 @@ float3 Guide(Texture2D<float4> tex,float2 uv) {
             float neutralPeak=max(neutral.r,max(neutral.g,neutral.b));
             scale=max(scenePeak/max(neutralPeak,1e-4),1).xxx;
         }
-        scale=lerp(1,max(scale,1),coverage);
-        float3 extended=rgb*scale;
-        float high=max(extended.r,max(extended.g,extended.b));
-        // Neutral range is unchanged. Forward-compress only the preserved scene
-        // highlight excess; the display peak is an asymptote, not a hard clip.
-        if(high>PaperWhite) {
-            float mapped=PaperWhite+renodx::tonemap::Reinhard(high-PaperWhite,Peak-PaperWhite);
-            extended*=mapped/high;
+        float transmittance=HasPreviewMask?saturate(PreviewMask.Load(int3(id.xy,0)).r):1;
+        // Native UI receives its own HDR curve, never the background's gain.
+        float3 ui=rgb*(1+(Peak/PaperWhite-1)*Expansion*h);
+        float3 extended;
+        if(transmittance>0 && transmittance<1) {
+            // The native SDR composite already includes the background's SDR
+            // contribution. Add only that background's extra HDR energy, not
+            // a multiplicative gain on the character/foreground colour.
+            // Map the background BEFORE alpha weighting: otherwise arbitrarily
+            // bright scene values can saturate even an almost opaque preview.
+            float3 background=neutral*PaperWhite;
+            float3 backgroundHdr=MapScenePeak(background*max(scale,1));
+            float3 backgroundSdr=MapScenePeak(background);
+            extended=MapScenePeak(ui)+max(backgroundHdr-backgroundSdr,0)*coverage*transmittance;
+            float high=max(extended.r,max(extended.g,extended.b));
+            if(high>Peak)extended*=Peak/high;
+        } else {
+            // Preserve existing world pixels and fully opaque previews exactly.
+            extended=MapScenePeak(lerp(ui,rgb*max(scale,1),coverage*transmittance));
         }
         rgb=extended;
     }

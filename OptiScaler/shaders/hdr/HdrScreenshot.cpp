@@ -35,6 +35,12 @@ void Request()
 {
     if (Hdr10::Active() && !S().busy.load()) S().requested = GetTickCount64();
 }
+bool PendingHDR()
+{
+    const auto requested=S().requested.load();
+    return requested && GetTickCount64()-requested<=1000 && !S().busy.load() &&
+        Config::Instance()->FfxivHDRScreenshotFormat.value_or_default()==1;
+}
 std::shared_ptr<Job> Prepare(HWND window, ID3D12Device* device, ID3D12GraphicsCommandList* commands,
     ID3D12Resource* hdrSource, ID3D12Resource* sdrSource, D3D12_RESOURCE_STATES sdrState)
 {

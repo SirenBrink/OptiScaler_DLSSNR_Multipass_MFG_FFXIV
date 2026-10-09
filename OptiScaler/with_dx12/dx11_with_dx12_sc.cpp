@@ -982,6 +982,8 @@ bool Dx11wDx12SC::_CopyDx11BackBufferToShared(UINT index)
     LOG_DEBUG("Copying DX11 backbuffer {} sourceTexture: {:X} to shadow copy {:X}", index, (size_t) sourceTexture,
               (size_t) _sharedDx11BackBufferCopies[_currentFakeIndex]);
 
+    if (_hdrOutput && State::Instance().gameExe == "ffxiv_dx11.exe")
+        FfxivHdrPreview::SealFrame();
     _dx11Context->CopyResource(_sharedDx11BackBufferCopies[_currentFakeIndex], sourceTexture);
     // Bake the diagnostic marks beside the native HUD, once per source frame, before
     // the interop fence and HDR/FG. A late overlay on each generated Present can pair
@@ -1167,9 +1169,18 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, copySource);
     // SDR captures preserve the pre-HDR ReShade image; HDR captures use the
     // converted frame. Opti's menu and external Companion window are later.
+    // REST can make the FG presentation source HUD-less. A screenshot must
+    // instead convert the complete native SDR frame, including its actual UI.
+    ID3D12Resource* screenshotSource=copySource;
+    if(_hdrOutput && hudlessSource && Hdr10::Screenshot::PendingHDR()){
+        auto scene=FfxivSceneHdr::Open(_dx12Device,(UINT)_openedDx11BackBuffers[copySlot]->GetDesc().Width,_openedDx11BackBuffers[copySlot]->GetDesc().Height);
+        auto* complete=Hdr10::Convert(_dx12Device,_copyCommandLists[copySlot],_openedDx11BackBuffers[copySlot],_openedDx11BackBufferStates[copySlot],std::move(scene));
+        if(complete){screenshotSource=complete;TransitionResource(_copyCommandLists[copySlot],complete,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE);}
+    }
     auto hdrCapture = _hdrOutput ? Hdr10::Screenshot::Prepare(_handle, _dx12Device,
-        _copyCommandLists[copySlot], copySource, _openedDx11BackBuffers[copySlot],
+        _copyCommandLists[copySlot], screenshotSource, _openedDx11BackBuffers[copySlot],
         _openedDx11BackBufferStates[copySlot]) : nullptr;
+    if(screenshotSource!=copySource)TransitionResource(_copyCommandLists[copySlot],screenshotSource,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     TransitionResource(_copyCommandLists[copySlot], fgBackBuffer, D3D12_RESOURCE_STATE_COPY_DEST,
                        D3D12_RESOURCE_STATE_PRESENT);

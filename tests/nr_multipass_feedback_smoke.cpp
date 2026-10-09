@@ -52,7 +52,7 @@ static Pixel dampedReference(Pixel P, Pixel T, float feedback) {
 int wmain(int argc, wchar_t** argv) try {
     if (argc != 2) throw std::runtime_error("Pass the dlssnr.hlsl path");
     ComPtr<ID3DBlob> code, errors;
-    HRESULT compiled = D3DCompileFromFile(argv[1], nullptr, nullptr, "CSMain", "cs_5_0",
+    HRESULT compiled = D3DCompileFromFile(argv[1], nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "CSMain", "cs_5_0",
                                           D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
     if (errors) std::fprintf(stderr, "%s", (char*)errors->GetBufferPointer());
     check(compiled);

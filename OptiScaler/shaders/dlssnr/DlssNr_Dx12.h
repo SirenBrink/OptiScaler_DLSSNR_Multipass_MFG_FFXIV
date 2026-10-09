@@ -19,6 +19,7 @@
 
 #include "DlssNr_Common.h"
 #include "DlssNr_Spatial.h"
+#include <dlssnr/DlssNr_DescriptorSlots.h>
 
 #include <d3d12.h>
 #include <d3dx/d3dx12.h>
@@ -28,7 +29,7 @@
 // Three dispatches are recorded per frame and several frames can be in flight at once, more so with
 // frame generation. Each dispatch needs descriptors and constants the GPU is not still reading, so
 // there has to be enough for three passes times the deepest pipeline we might sit behind.
-// Descriptor and constant slots, consumed one per dispatch and reused round-robin with no fence.
+// Descriptor and constant slots, leased per recording until reset/destruction and GPU completion.
 //
 // Includes optional interpass feedback (up to 29 dispatches) and spatial pack/guide/unpack.
 // 384 slots cover eight frames even with the maximum multipass dispatch count.
@@ -47,7 +48,8 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // encode and downsample would run with the resolve's parameters.
     ID3D12Resource* _constantBuffers[DLSSNR_NUM_OF_HEAPS] = {};
 
-    uint32_t _heapIndex = 0;
+    DlssNr::DescriptorSlots<DLSSNR_NUM_OF_HEAPS> _descriptorSlots;
+    ID3D12PipelineState* _guideMatchPipeline = nullptr;
     ID3D12PipelineState* _spatialPipeline = nullptr;
     ID3D12PipelineState* _spatialGuidesPipeline = nullptr;
     bool DispatchSpatial(ID3D12GraphicsCommandList* cmd, const DlssNr::Spatial::Constants& constants,
@@ -66,6 +68,9 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
   public:
     DlssNr_Dx12(std::string InName, ID3D12Device* InDevice);
     ~DlssNr_Dx12();
+    DlssNr::GpuSubmission BeginGpuSubmission(UINT count, ID3D12CommandList* const* lists) { return _descriptorSlots.BeginSubmission(count, lists); }
+    void QuarantineGpuSubmission(UINT count, ID3D12CommandList* const* lists) { _descriptorSlots.QuarantineSubmission(count, lists); }
+    void ResetGpuRecording(ID3D12CommandList* commands) { _descriptorSlots.ResetRecording(commands); }
 
     // The pass. Resources in, and nothing read from anywhere the caller cannot see.
     //

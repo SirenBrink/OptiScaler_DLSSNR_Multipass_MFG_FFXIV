@@ -26,6 +26,9 @@ struct HalfRate
     bool suppressionReadable = false;
     unsigned writeIndex = 0;
     float historyScale[2] {1,1};
+    // Retain each reconstructed HDR packet alongside the exact clean raster.
+    // Ownership prevents the DLSS adapter from recycling a delayed frame.
+    Hdr10::SceneInput hdrHistory[3];
     unsigned long long lastEpoch = 0, createEpoch = 0, anchorId = 0;
     unsigned long long nrAnchors = 0, skippedNr = 0;
     ResidualFgCamera camera;
@@ -36,7 +39,7 @@ struct HalfRate
         for (auto* r : { motion, previousMotion, anchorMotion, interpolated, suppression,
                          suppressionTexture, zeroUpload, history[0], history[1] }) if (r) r->Release();
     }
-    void Reset() { havePrevious = false; previousWasAnchor = false; split.schedule.Reset(); }
+    void Reset() { havePrevious = false; previousWasAnchor = false; split.schedule.Reset(); for(auto& image:hdrHistory)image={}; }
 };
 struct Generation
 {
@@ -64,6 +67,7 @@ struct Generation
     bool halfRequested = false, approximateCamera = false;
     bool splitWork = false;
     bool sceneHdrInput = false;
+    bool hdrCarrier = false;
     std::string halfStatus;
     bool sampleAndHold = false;
     DlssNrResidualHold hold;
@@ -567,6 +571,12 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
     // Capture CURRENT anchor scene only. Skipped frames never borrow a later HDR image.
     auto scene=privateJob?Hdr10::SceneInput{}:OpenNrScene(cmd,color,g.w,g.h);
     const bool sceneAvailable=scene.hdr && scene.reference && inDesc.Format==DXGI_FORMAT_R16G16B16A16_FLOAT;
+    const bool hdrCarrier=!privateJob && cfg.FfxivHDRDLSSSceneInput.value_or_default() &&
+        FfxivSceneHdr::Requested() && bool(FfxivSceneHdr::Open(g.device,g.w,g.h,false).hdr);
+    if(g.hdrCarrier!=hdrCarrier) {
+        g.hdrCarrier=hdrCarrier;g.reset=true;g.hold.Reset();if(g.half)g.half->Reset();g.privateHistoryResetPending=true;
+        LOG_INFO("PreSR HDR relative carrier {}; private residual history reset",hdrCarrier?"enabled":"disabled");
+    }
     if(g.sceneHdrInput!=sceneAvailable) {
         g.sceneHdrInput=sceneAvailable;g.reset=true;g.hold.Reset();if(g.half)g.half->Reset();
         g.privateHistoryResetPending=true;
@@ -738,6 +748,7 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
         Barrier(cmd, color, arrival, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         DlssNrConstants encode {}; encode.Mode = DlssNrMode_EncodeResidual;
         encode.Width = g.w; encode.Height = g.h; encode.ExposurePreMul = frame.PreExposure;
+        encode.SpatialWorkSize[2]=g.hdrCarrier?1.f:0.f;
         const bool ok = g.codec->DispatchPass(cmd, encode, color, g.edited, nullptr, nullptr, nullptr, g.residualInput, nullptr);
         Barrier(cmd, color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, arrival);
         Barrier(cmd, g.residualInput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -954,10 +965,21 @@ void After(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, unsigned
     cmd->CopyResource(cleanTarget, pair.output);
     Barrier(cmd, cleanTarget, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     ID3D12Resource* base = cleanTarget;
+    Hdr10::SceneInput displayHdr;
+    if (cfg.FfxivHDRDLSSSceneInput.value_or_default() && FfxivSceneHdr::Requested())
+        displayHdr = FfxivSceneHdr::Open(g.device, g.outW, g.outH, true);
+    if (half)
+    {
+        auto& h = *g.half;
+        h.hdrHistory[split ? h.split.schedule.write : h.writeIndex] = displayHdr;
+        if (split) displayHdr = h.hdrHistory[h.split.schedule.Output()];
+        else if (h.havePrevious) displayHdr = h.hdrHistory[1-h.writeIndex];
+    }
     ID3D12Resource* residual = g.residualOutput;
     ID3D12Resource* suppression = nullptr;
     DlssNrConstants apply {}; apply.Mode = DlssNrMode_ApplyResidual;
     apply.Width = g.outW; apply.Height = g.outH; apply.ExposurePreMul = pair.scale;
+    apply.SpatialWorkSize[2]=g.hdrCarrier?1.f:0.f;
     if (half)
     {
         auto& h = *g.half;
@@ -1003,9 +1025,12 @@ void After(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, unsigned
         apply.ResidualRejection = 1;
     }
     bool ok = true;
-    if (half && split && !g.half->split.schedule.HasEdit())
+    const bool carrierMismatch=g.hdrCarrier && !displayHdr.referenceHdrShoulder;
+    if(carrierMismatch){g.reset=true;g.hold.Reset();g.privateHistoryResetPending=true;}
+    if (carrierMismatch || (half && split && !g.half->split.schedule.HasEdit()))
     {
-        // First A has no evaluated residual. Never sample its uninitialized UAV.
+        // First A has no evaluated residual. A missing HDR reference also cannot
+        // receive a carrier encoded in another domain. Keep the clean raster.
         Barrier(cmd, base, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
         Barrier(cmd, g.composed, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
         cmd->CopyResource(g.composed, base);
@@ -1020,6 +1045,8 @@ void After(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, unsigned
         cmd->CopyResource(pair.output, g.composed);
         Barrier(cmd, pair.output, D3D12_RESOURCE_STATE_COPY_DEST, arrival);
         Barrier(cmd, g.composed, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (DlssSceneInput::Reconcile(displayHdr, cmd, pair.output, arrival))
+            FfxivSceneHdr::PublishReconstructed(std::move(displayHdr));
         presentationGuideDelay = half ? (split ? int(g.half->split.schedule.captured) : (g.half->havePrevious ? 1 : 0)) : -1;
         Say(g.sampleAndHold ? "running: sample-and-hold (motion unavailable); each NR residual applied to 2 current frames; no residual FG or SR delay" :
             half ? (split ? "running: SPLIT work; NR on A, private SR/FG on B; scene delayed 2 frames; APPROXIMATE camera guides" :

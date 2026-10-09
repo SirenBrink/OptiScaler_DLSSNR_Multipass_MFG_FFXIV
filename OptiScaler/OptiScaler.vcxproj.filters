@@ -1,6 +1,9 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <ClInclude Include="shaders\hdr\HdrScreenshotIcc.h" />
+  </ItemGroup>
+  <ItemGroup>
     <Filter Include="Header Files">
       <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
       <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
@@ -27,6 +30,10 @@
     <Filter Include="Other">
       <UniqueIdentifier>{3ee7ea7b-4d96-4a1f-aa88-8dd4c5d506ee}</UniqueIdentifier>
     </Filter>
+    <ClInclude Include="shaders\dlssnr\precompile\DlssNr_GuideMatch_Shader.h" />
+    <ClInclude Include="dlssnr\DlssNr_GpuSubmission.h" />
+    <ClInclude Include="dlssnr\DlssNr_DescriptorSlots.h" />
+    <ClInclude Include="low_latency\input\ConcurrentInputSelection.h" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Config.h">
@@ -786,6 +793,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="misc\UiPaste.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="misc\FfxivHdrPreview.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\hdr\HdrCompatibility.hlsli">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="shaders\ui_extract\UE_Common.h">

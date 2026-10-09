@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d12.h>
+#include "DlssNr_GpuSubmission.h"
 #include <string>
 
 #include <shaders/dlssnr/DlssNr_Common.h>
@@ -20,6 +21,7 @@ class Config;
 
 namespace DlssNr
 {
+GpuSubmission BeginGpuSubmission(UINT count, ID3D12CommandList* const* lists);
 void NotifyGpuSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists);
 void NotifyGpuReset(ID3D12CommandList* commands);
 

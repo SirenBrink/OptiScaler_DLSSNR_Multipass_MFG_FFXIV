@@ -33,6 +33,7 @@
 #include <misc/FfxivLightingScan.h>
 #include <misc/FfxivSceneHdr.h>
 #include <shaders/hdr/NrSceneInput.h>
+#include <shaders/hdr/DlssSceneInput.h>
 #include <Util.h>
 
 #include <proxies/NVNGX_Proxy.h>
@@ -45,6 +46,7 @@
 #include <algorithm>
 #include <cstring>
 #include "precompile/DlssNr_Shader.h"
+#include "precompile/DlssNr_GuideMatch_Shader.h"
 #include "precompile/DlssNr_Spatial_Shader.h"
 #include "precompile/DlssNr_Spatial_Guides_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
@@ -369,6 +371,8 @@ struct NrState
     // Cloned unconditionally when running at present, and only for typeless formats otherwise.
     ID3D12Resource* depthClone = nullptr;
     ID3D12Resource* motionClone = nullptr;
+    ID3D12Resource* depthSmall = nullptr;
+    ID3D12Resource* motionSmall = nullptr;
 
     // The constant-depth probe's surface. Separate from depthClone on purpose: it is defined by
     // never having been written, and sharing a surface with a mode that writes would destroy that.
@@ -417,6 +421,7 @@ NrState& g_nr = *new NrState; // Retain unresolved GPU ownership at process tear
 DlssNr::GpuLifetime& g_nrLifetime = *new DlssNr::GpuLifetime;
 // GPU-owning helpers follow g_nr's process lifetime. Explicit Shutdown still
 // releases safe ownership; DLL/CRT teardown must not invoke driver callbacks.
+std::set<DlssNr_Dx12*>& g_nrCodecs = *new std::set<DlssNr_Dx12*>;
 std::unique_ptr<DlssNr_Dx12>& g_compose = *new std::unique_ptr<DlssNr_Dx12>;
 
 // What the pass costs on the GPU, for the breakdown in the overlay.
@@ -1449,6 +1454,8 @@ void ReportSkipOnce(const char* reason)
 DlssNr_Dx12::DlssNr_Dx12(std::string InName, ID3D12Device* InDevice)
     : Shader_Dx12(InName, InDevice)
 {
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    g_nrCodecs.insert(this);
     if (InDevice == nullptr)
     {
         LOG_ERROR("InDevice is nullptr!");
@@ -1512,8 +1519,15 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
     if (!_init || InCmdList == nullptr || _device == nullptr || InSource == nullptr || OutTarget == nullptr)
         return false;
 
-    const uint32_t slot = _heapIndex;
-    _heapIndex = (_heapIndex + 1) % DLSSNR_NUM_OF_HEAPS;
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    const auto acquired = _descriptorSlots.Acquire(InCmdList);
+    if (!acquired)
+    {
+        ReportSkipOnce("descriptor slots are still owned by GPU recordings; retaining the clean frame");
+        return false;
+    }
+    const uint32_t slot = *acquired;
+    g_nrLifetime.Record(InCmdList);
 
     FrameDescriptorHeap& currentHeap = _frameHeaps[slot];
 
@@ -1579,6 +1593,18 @@ bool DlssNr_Dx12::DispatchSpatial(ID3D12GraphicsCommandList* cmd, const DlssNr::
 
 DlssNr_Dx12::~DlssNr_Dx12()
 {
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    g_nrCodecs.erase(this);
+    // Base/member destructors release their references. Keep an independent
+    // reference for recordings which can still be executed or replayed.
+    auto retained = std::make_shared<std::vector<Microsoft::WRL::ComPtr<IUnknown>>>();
+    const auto retain = [&](IUnknown* object) { if (object) retained->emplace_back(object); };
+    retain(_guideMatchPipeline);
+    retain(_rootSignature); retain(_pipelineState); retain(_spatialPipeline); retain(_spatialGuidesPipeline);
+    for (auto& heap : _frameHeaps) retain(heap.GetHeapCSU());
+    for (auto* buffer : _constantBuffers) retain(buffer);
+    _descriptorSlots.Retire([retained] {});
+    if (_guideMatchPipeline) _guideMatchPipeline->Release();
     if (_spatialPipeline) _spatialPipeline->Release();
     if (_spatialGuidesPipeline) _spatialGuidesPipeline->Release();
     for (auto& buffer : _constantBuffers)
@@ -1816,12 +1842,30 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     spatialLayout.ordinaryW = ordinaryWidth; spatialLayout.ordinaryH = ordinaryHeight;
     g_modelDimensions.store((uint64_t(workWidth) << 32) | workHeight, std::memory_order_relaxed);
     const bool reduced = workWidth != width || workHeight != height;
+    const bool fusedSpatial = spatial && ordinaryWidth == width && ordinaryHeight == height &&
+        cfg.DlssNrCompare.value_or_default() != 1 && desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+    if (fusedSpatial) g_nr.spatialStatus = "active (fused native resolve)";
+    static int lastSpatialResolve = -1;
+    const int spatialResolve = spatial ? (fusedSpatial ? 2 : 1) : 0;
+    if (lastSpatialResolve != spatialResolve)
+    {
+        lastSpatialResolve = spatialResolve;
+        LOG_INFO("DLSS-NR spatial resolve: {}", spatialResolve == 2 ? "fused native (two rasters and unpack bypassed)" :
+                 spatialResolve == 1 ? "legacy filtered unpack" : "disabled");
+    }
     const unsigned int configuredPasses =
         std::clamp(cfg.DlssNrPasses.value_or_default(),
                    1u, cfg.DlssNrUnlockPasses.value_or_default() ? DlssNr::MaxPassCount
                                                                : DlssNr::DefaultMaxPassCount);
     const bool proxyBackend = cfg.DlssNrUseProxy.value_or_default();
     const unsigned int requestedPasses = proxyBackend ? 1u : configuredPasses;
+    if (!_descriptorSlots.HasCapacity(8 + 2 * requestedPasses))
+    {
+        ReportSkipOnce("GPU descriptor reservations are full; retaining the complete clean frame");
+        g_nr.reset = true;
+        device->Release();
+        return;
+    }
 
     if (proxyBackend && configuredPasses > 1)
     {
@@ -1881,6 +1925,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             ParkNrResource(g_nr.colorSmall);
             ParkNrResource(g_nr.outputNative);
             ParkNrResource(g_nr.activeColor);
+            ParkNrResource(g_nr.depthSmall);
+            ParkNrResource(g_nr.motionSmall);
             for (auto** r : { &g_nr.spatialColor, &g_nr.spatialDepth, &g_nr.spatialMotion,
                                &g_nr.spatialProxy, &g_nr.spatialAnswer }) ParkNrResource(*r);
             g_nr.passScratchFailed = false;
@@ -1939,9 +1985,17 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (!g_nr.spatialColor) g_nr.spatialColor = CreateScratch(device, desc.Format, workWidth, workHeight);
         if (!g_nr.spatialDepth) g_nr.spatialDepth = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, workWidth, workHeight);
         if (!g_nr.spatialMotion) g_nr.spatialMotion = CreateScratch(device, DXGI_FORMAT_R32G32_FLOAT, workWidth, workHeight);
-        if (!g_nr.spatialProxy) g_nr.spatialProxy = CreateScratch(device, desc.Format, ordinaryWidth, ordinaryHeight);
-        if (!g_nr.spatialAnswer) g_nr.spatialAnswer = CreateScratch(device, desc.Format, ordinaryWidth, ordinaryHeight);
-        if (!g_nr.spatialColor || !g_nr.spatialDepth || !g_nr.spatialMotion || !g_nr.spatialProxy || !g_nr.spatialAnswer)
+        if (!fusedSpatial)
+        {
+            if (!g_nr.spatialProxy) g_nr.spatialProxy = CreateScratch(device, desc.Format, ordinaryWidth, ordinaryHeight);
+            if (!g_nr.spatialAnswer) g_nr.spatialAnswer = CreateScratch(device, desc.Format, ordinaryWidth, ordinaryHeight);
+        }
+        else
+        {
+            ParkNrResource(g_nr.spatialProxy); ParkNrResource(g_nr.spatialAnswer);
+        }
+        if (!g_nr.spatialColor || !g_nr.spatialDepth || !g_nr.spatialMotion ||
+            (!fusedSpatial && (!g_nr.spatialProxy || !g_nr.spatialAnswer)))
         {
             g_nr.spatialFailed = true;
             g_nr.spatialStatus = "fallback: spatial resource allocation failed";
@@ -2561,11 +2615,60 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
         else { g_nr.spatialFailed = true; g_nr.spatialStatus = "fallback: spatial packing dispatch failed"; }
     }
-    // The vectors were scaled to full-frame pixels; the image the model reprojects is the working size.
-    // The vectors were scaled to full-frame pixels; the image the model reprojects is the
-    // working size.
-    const float mvToWorkX = width != 0 ? (float) workWidth / (float) width : 1.0f;
-    const float mvToWorkY = height != 0 ? (float) workHeight / (float) height : 1.0f;
+    // A reduced colour input needs depth and motion covering the same image at
+    // its working size. Keep offsets/active regions while point-sampling depth;
+    // averaging across silhouettes would invent geometry. Native and supersample
+    // paths keep the original guides. Spatial compression already packs its own.
+    bool matchedGuides = false;
+    if (reduced && !spatial && workWidth < width && workHeight < height)
+    {
+        if (!g_nr.depthSmall) g_nr.depthSmall = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, workWidth, workHeight);
+        if (!g_nr.motionSmall) g_nr.motionSmall = CreateScratch(device, DXGI_FORMAT_R32G32_FLOAT, workWidth, workHeight);
+        if (g_nr.depthSmall && g_nr.motionSmall)
+        {
+            DlssNrConstants resize {};
+            resize.Mode = DlssNrMode_ResizePrivateGuides;
+            resize.Width = workWidth; resize.Height = workHeight;
+            resize.GuideWidth = guideWidth; resize.GuideHeight = guideHeight;
+            resize.DebugView = depthBaseX; resize.CompareMode = depthBaseY;
+            resize.TransferStrength = float(motionWidth); resize.ColourStrength = float(motionHeight);
+            resize.CompareSwap = motionBaseX; resize.Transfer = motionBaseY;
+            if (!_guideMatchPipeline)
+                CreateComputePipeline(_device, &_guideMatchPipeline, DlssNr_GuideMatch_cso,
+                                      sizeof(DlssNr_GuideMatch_cso), nullptr);
+            if (_guideMatchPipeline && DispatchPass(cmdList, resize, depthIn, motionIn, nullptr, nullptr, nullptr,
+                             g_nr.depthSmall, g_nr.motionSmall, _guideMatchPipeline))
+            {
+                spatialReads.Read(g_nr.depthSmall); spatialReads.Read(g_nr.motionSmall);
+                depthIn = g_nr.depthSmall; motionIn = g_nr.motionSmall;
+                matchedGuides = true;
+            }
+        }
+    }
+    const auto reference = frame.MotionVectorsLowResolution ? guideRender :
+        DlssNr::GuideExtent { frame.OutputWidth, frame.OutputHeight };
+    const auto refW = reference.width ? reference.width : motionWidth;
+    const auto refH = reference.height ? reference.height : motionHeight;
+    const float mvToWorkX = DlssNr::ModelMotionScale(matchedGuides ? workWidth : motionWidth, refW);
+    const float mvToWorkY = DlssNr::ModelMotionScale(matchedGuides ? workHeight : motionHeight, refH);
+    const bool privateGuides = spatial || matchedGuides;
+    const auto modelDepthW = privateGuides ? workWidth : guideWidth;
+    const auto modelDepthH = privateGuides ? workHeight : guideHeight;
+    const auto modelMotionW = privateGuides ? workWidth : motionWidth;
+    const auto modelMotionH = privateGuides ? workHeight : motionHeight;
+    const auto modelDepthX = privateGuides ? 0u : depthBaseX;
+    const auto modelDepthY = privateGuides ? 0u : depthBaseY;
+    const auto modelMotionX = privateGuides ? 0u : motionBaseX;
+    const auto modelMotionY = privateGuides ? 0u : motionBaseY;
+    static uint64_t lastGuideSizes = 0;
+    const uint64_t guideSizes = (uint64_t(modelMotionW) << 32) | modelMotionH;
+    if (guideSizes != lastGuideSizes)
+    {
+        lastGuideSizes = guideSizes;
+        LOG_INFO("DLSS-NR model guides: {}x{}, matched {}, motion scale {:.3f}x{:.3f}, reference {}x{}",
+                 modelMotionW, modelMotionH, matchedGuides, spatial ? 1.0f : frame.MvScaleX * mvToWorkX,
+                 spatial ? 1.0f : frame.MvScaleY * mvToWorkY, refW, refH);
+    }
 
     SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
 
@@ -2578,8 +2681,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         const unsigned int proxyResult = DlssNr::Proxy::Run(
             cmdList, device, modelInput, depthIn, motionIn, g_nr.output, workWidth, workHeight,
-            guideWidth, guideHeight, motionWidth, motionHeight, depthBaseX, depthBaseY,
-            motionBaseX, motionBaseY, g_nr.guideDepthInverted, g_nr.reset,
+            modelDepthW, modelDepthH, modelMotionW, modelMotionH, modelDepthX, modelDepthY,
+            modelMotionX, modelMotionY, g_nr.guideDepthInverted, g_nr.reset,
             g_nr.guideMvScaleX * mvToWorkX, g_nr.guideMvScaleY * mvToWorkY);
 
         g_nr.reset = false;
@@ -2690,9 +2793,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             DlssNrNative::ReuseEveryForPass(pass, reuseEvery, reuseFirstPassOnly), reuseOverride);
         result = g_nr.evaluate(
             cmdList, passFeature, g_nr.capabilityParams, passInput, depthIn, motionIn, passOutput,
-            workWidth, workHeight, spatial ? workWidth : guideWidth, spatial ? workHeight : guideHeight,
-            spatial ? workWidth : motionWidth, spatial ? workHeight : motionHeight,
-            spatial ? 0 : depthBaseX, spatial ? 0 : depthBaseY, spatial ? 0 : motionBaseX, spatial ? 0 : motionBaseY, g_nr.guideDepthInverted ? 1 : 0,
+            workWidth, workHeight, modelDepthW, modelDepthH, modelMotionW, modelMotionH,
+            modelDepthX, modelDepthY, modelMotionX, modelMotionY, g_nr.guideDepthInverted ? 1 : 0,
             passReset ? 1 : 0, tuning.intensity,
             (int) PassStyle(cfg, pass), tuning.structure,
             tuning.tone, tuning.skin,
@@ -2733,7 +2835,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     ID3D12Resource* ordinaryProxy = modelInput;
     ID3D12Resource* ordinaryAnswer = finalAnswer;
-    if (spatial && spatialPacked && result == NVSDK_NGX_Result_Success && finalAnswer)
+    if (spatial && !fusedSpatial && spatialPacked && result == NVSDK_NGX_Result_Success && finalAnswer)
     {
         const auto unpack = DlssNr::Spatial::MakeConstants(spatialLayout, 102, guides, 1, 1, width, height);
         if (DispatchSpatial(cmdList, unpack, modelInput, finalAnswer, nullptr, g_nr.spatialProxy, g_nr.spatialAnswer))
@@ -2924,7 +3026,20 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         ID3D12Resource* resolveProxy = superDownOk ? g_nr.colorCopy : ordinaryProxy;
         ID3D12Resource* resolveAnswer = superDownOk ? g_nr.outputNative : ordinaryAnswer;
-        if (spatial) { resolveParams.Transfer = 1; resolveParams.SpatialResidual = 1; }
+        if (spatial)
+        {
+            resolveParams.Transfer = 1; resolveParams.SpatialResidual = fusedSpatial ? 2u : 1u;
+            if (fusedSpatial)
+            {
+                const auto warp = pw::MakeShaderConstants(spatialLayout.warp);
+                resolveParams.SpatialWorkSize[0] = warp.workWidth;
+                resolveParams.SpatialWorkSize[1] = warp.workHeight;
+                const float* fields[] = { &warp.bandCenterX, &warp.halfSpanNegX, &warp.halfSpanPosX,
+                    &warp.sideWorkNegX, &warp.sideWorkPosX, &warp.sideEdgeSlopeNegX, &warp.workScaleX };
+                for (unsigned i = 0; i < 7; ++i)
+                    std::memcpy(resolveParams.SpatialWarp + i * 4, fields[i], 4 * sizeof(float));
+            }
+        }
 
         // Pre-SR Color is not guaranteed to have UAV support. Write directly when legal; otherwise
         // resolve into hdrCopy while the original Color remains readable, then copy the result back.
@@ -3735,6 +3850,36 @@ void RequestCapture(unsigned int frames)
 
 bool CaptureInProgress() { return g_capture.isActive(); }
 
+GpuSubmission BeginGpuSubmission(UINT count, ID3D12CommandList* const* lists)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
+    try
+    {
+        std::shared_ptr<std::vector<GpuSubmission>> pending;
+        const auto capture = [&](GpuSubmission child) {
+            if (!child) return;
+            if (!pending)
+            {
+                pending = std::make_shared<std::vector<GpuSubmission>>();
+                pending->reserve(g_nrCodecs.size() + 1);
+            }
+            pending->push_back(std::move(child));
+        };
+        capture(g_nrLifetime.BeginSubmission(count, lists));
+        for (auto* codec : g_nrCodecs) capture(codec->BeginGpuSubmission(count, lists));
+        if (!pending) return {};
+        return GpuSubmission([pending](ID3D12CommandQueue* queue) {
+            for (auto& child : *pending) child.CompleteNoThrow(queue);
+        });
+    }
+    catch (...)
+    {
+        g_nrLifetime.QuarantineSubmission(count, lists);
+        for (auto* codec : g_nrCodecs) codec->QuarantineGpuSubmission(count, lists);
+        return {};
+    }
+}
+
 void NotifyGpuSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
 {
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
@@ -3745,6 +3890,7 @@ void NotifyGpuReset(ID3D12CommandList* commands)
 {
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     g_nrLifetime.ResetRecording(commands);
+    for (auto* codec : g_nrCodecs) codec->ResetGpuRecording(commands);
 }
 
 void Shutdown()
@@ -3909,6 +4055,11 @@ void Shutdown()
         g_nr.motionClone = nullptr;
     }
 
+    for (auto** resource : { &g_nr.depthSmall, &g_nr.motionSmall })
+    {
+        if (*resource) (*resource)->Release();
+        *resource = nullptr;
+    }
     g_capture.release();
     g_gpuTime.reset();
     g_ngxTime.reset();

@@ -28,6 +28,7 @@ enum DlssNrMode : uint32_t
     DlssNrMode_ComposeMotion = 9, // compose two successive fields at the displaced coordinate
     DlssNrMode_ApplyInterpolatedResidual = 10, // t4: R8_UNORM NVIDIA suppression flag
     DlssNrMode_ZeroMotion = 11, // private reset-only NR/SR guide, never passed to residual FG
+    DlssNrMode_ResizePrivateGuides = 14, // point-resample active regions; preserve source vector units
     DlssNrMode_MultipassFeedback = 13, // blend interpass edits with the preceding input
     DlssNrMode_BoundResidual = 12 // t0: private SR carrier; t1: current render-resolution carrier
 };
@@ -247,8 +248,13 @@ struct alignas(256) DlssNrConstants
     uint32_t ResidualRejection;
     float ReferencePreExposure;
     float PassFeedback;
-    uint32_t SpatialResidual;
+    uint32_t SpatialResidual; // 1 unpacked spatial residual; 2 fused native spatial resolve
+    float SpatialWorkSize[3] = {}; // model width/height; [2] selects HDR-relative carrier in modes 5/6/10
+    float SpatialWarp[28] = {}; // seven float4 fields; retains the 256-byte CB
+
 };
+
+static_assert(sizeof(DlssNrConstants) == 256);
 
 class DlssNr_Common
 {

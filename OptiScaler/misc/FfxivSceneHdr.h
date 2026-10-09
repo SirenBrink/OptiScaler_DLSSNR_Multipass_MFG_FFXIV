@@ -12,6 +12,7 @@
 #include <shaders/hdr/SceneInput.h>
 #include <shaders/hdr/Hdr10.h>
 #include <shaders/hdr/renodx/SceneShaders.h>
+#include "FfxivHdrPreview.h"
 
 // RenoDX FFXIV shaders run in an independent FP16 branch. This deliberately
 // leaves native SDR and ReShade's SDR effects unchanged. DLSS/NR may opt into
@@ -54,7 +55,9 @@ struct Data {
 };
 inline Data& State(){static auto* data=new Data;return *data;} // No COM destruction under loader lock.
 inline void Tag(ID3D11PixelShader* shader,UINT crc) {
-    if(auto stage=Stage(crc)) shader->SetPrivateData(shaderTag,sizeof(stage),&stage);
+    auto stage=Stage(crc);
+    if(FfxivHdrPreview::Tag(shader,crc))stage=6; // UI only; never a scene replay stage.
+    if(stage)shader->SetPrivateData(shaderTag,sizeof(stage),&stage);
 }
 inline void Reject(Data& s,UINT stage,UINT reason,const char* description) {
     if(stage && stage<=5 && reason<s.rejected[0].size() && !s.rejected[stage-1][reason]) {
@@ -177,7 +180,7 @@ inline void PublishReconstructed(Hdr10::SceneInput image){auto& s=State();std::l
 inline Hdr10::SceneInput Open(ID3D12Device* d,UINT width,UINT height,bool presentation=true) {
     Hdr10::SceneInput result;if(!Requested() || !d || !width || !height)return result;
     auto& s=State();std::lock_guard lock(s.mutex);
-    if(presentation && s.reconstructed.hdr && s.reconstructed.hdr->GetDesc().Width==width && s.reconstructed.hdr->GetDesc().Height==height){ComPtr<ID3D12Device> owner;s.reconstructed.hdr->GetDevice(IID_PPV_ARGS(&owner));if(owner.Get()==d)return s.reconstructed;}
+    if(presentation && s.reconstructed.hdr && s.reconstructed.hdr->GetDesc().Width==width && s.reconstructed.hdr->GetDesc().Height==height){ComPtr<ID3D12Device> owner;s.reconstructed.hdr->GetDevice(IID_PPV_ARGS(&owner));if(owner.Get()==d)return FfxivHdrPreview::Attach(s.reconstructed,d,width,height);}
     auto p=s.latest;
     auto report=[&](UINT outcome){
         if(!presentation)return;
@@ -200,7 +203,7 @@ inline Hdr10::SceneInput Open(ID3D12Device* d,UINT width,UINT height,bool presen
     p->lastUse=GetTickCount64();result.hdr=p->openedHdr;result.reference=p->openedReference;result.owner=p;
     result.rect={p->crop[0]/p->width,p->crop[1]/p->height,p->crop[2]/p->width,p->crop[3]/p->height};
     result.retire=[p](std::function<bool()> done){auto& s=State();std::lock_guard lock(s.mutex);p->dx12Recorded=true;p->done=std::move(done);p->reserved=false;};
-    report(0);return result;
+    report(0);return presentation?FfxivHdrPreview::Attach(std::move(result),d,width,height):result;
 }
 // DX11 retains resources referenced by its queued commands. DX12 consumers additionally
 // own the slot and install a completion-plus-recording-retirement probe BEFORE recording.
@@ -211,5 +214,5 @@ inline void CollectLocked(Data& s,bool keepWarm,ULONGLONG now) {
         return !keepWarm || now-p->lastUse>=2000;
     });
 }
-inline void EndFrame(){auto& s=State();std::lock_guard lock(s.mutex);s.aliases.clear();s.latest.reset();s.reconstructed={};CollectLocked(s,Requested(),GetTickCount64());}
+inline void EndFrame(){auto& s=State();std::lock_guard lock(s.mutex);s.aliases.clear();s.latest.reset();s.reconstructed={};FfxivHdrPreview::EndFrame();CollectLocked(s,Requested(),GetTickCount64());}
 }

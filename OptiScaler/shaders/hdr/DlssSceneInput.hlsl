@@ -1,4 +1,5 @@
 Texture2D<float4> Native : register(t0);
+#include "HdrCompatibility.hlsli"
 Texture2D<float4> Scene : register(t1);
 Texture2D<float4> Reference : register(t2);
 Texture2D<float4> Edited : register(t3);
@@ -16,6 +17,23 @@ float3 Guide(Texture2D<float4> tex,float2 uv) {
  // Reuse the reconstructed output in place after its SDR reference is ready.
  if(Mode==2){float4 value=Target[id.xy];Target[id.xy]=float4(pow(clamp(value.rgb,0,60000),1/2.2),value.a);return;}
  float4 s=Native.Load(int3(id.xy,0));
+ if(Mode==3){
+  // PreSR may edit an older clean frame. Carry that edit into its matching
+  // HDR reconstruction before replacing the SDR reference used to exclude UI.
+  float3 oldSDR=Reference.Load(int3(id.xy,0)).rgb;
+  float4 encoded=Target[id.xy];
+  if(any(s.rgb!=oldSDR)){
+   float3 hdrLinear=pow(max(encoded.rgb,0),2.2);
+   float oldPeak=max(hdrLinear.r,max(hdrLinear.g,hdrLinear.b));
+   // Undo the same compatibility shoulder used by SR. Multiplying an SDR
+   // delta by a luminance gain is not its inverse and changed PreSR brightness.
+   float3 answer=Padding?HdrCompatExpand(s.rgb,max(oldPeak*4,4)):Linear(saturate(s.rgb));
+   float peak=max(answer.r,max(answer.g,answer.b));
+   if(peak>60000)answer*=60000/peak;
+   encoded.rgb=pow(answer,1/2.2);
+  }
+  Target[id.xy]=float4(encoded.rgb,1);return;
+ }
  if(Mode==0){
   float3 base=Linear(saturate(s.rgb));
   if(Padding){float2 uv=(float2(id.xy)+.5)/float2(Width,Height);
@@ -25,14 +43,12 @@ float3 Guide(Texture2D<float4> tex,float2 uv) {
   }
   Target[id.xy]=float4(min(base,60000),s.a);
  }else if(Mode==1){
-  // Restore the native SDR tone curve for SDR effects. The independent HDR
-  // output keeps DLSS's reconstructed highlights, not this spatial inverse.
-  float3 restored=max(s.rgb,0);
-  if(Padding){float2 uv=(float2(id.xy)+.5)/float2(Width,Height);
-   float3 ref=Guide(Reference,uv),hdr=pow(max(Guide(Scene,uv),0),2.2);
-   restored/=max(hdr/max(pow(saturate(ref),2.2),1e-4),1);
-  }
-  Target[id.xy]=float4(saturate(Encode(restored)),s.a);
+  // Derive the compatibility image from the reconstructed pixel itself.
+  // Never divide by an unfiltered scene guide: that reintroduced aliased
+  // geometry and jitter even though DLSS had already reconstructed HDR.
+  // This is the opaque main scene, not a UI surface. NGX does not provide a
+  // compositing-alpha contract for its private SR output.
+  Target[id.xy]=float4(Padding?HdrCompatCompress(s.rgb):saturate(Encode(s.rgb)),1);
  }
 
 }

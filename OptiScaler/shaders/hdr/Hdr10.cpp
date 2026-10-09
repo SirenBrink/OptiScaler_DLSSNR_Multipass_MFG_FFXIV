@@ -46,10 +46,10 @@ bool Init(Packet& p,ID3D12Device*d,UINT w,UINT h){
  p.device=d;p.width=w;p.height=h;
  D3D12_FEATURE_DATA_FORMAT_SUPPORT support{DXGI_FORMAT_R10G10B10A2_UNORM};
  if(FAILED(d->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,&support,sizeof(support))) || !(support.Support2&D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)) return false;
- D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=4;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+ D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=5;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
  if(FAILED(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&p.heap))))return false;
  D3D12_DESCRIPTOR_RANGE ranges[2]{};
- ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,3,0,0,0}; ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,1,0,0,3};
+ ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,4,0,0,0}; ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,1,0,0,4};
  D3D12_ROOT_PARAMETER params[2]{};params[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[0].DescriptorTable={2,ranges};
  params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[1].Constants={0,0,16};
  D3D12_ROOT_SIGNATURE_DESC rd{2,params,0,nullptr,D3D12_ROOT_SIGNATURE_FLAG_NONE};ComPtr<ID3DBlob> blob,error;
@@ -99,7 +99,7 @@ ID3D12Resource* Convert(ID3D12Device*d,ID3D12GraphicsCommandList*c,ID3D12Resourc
  p.lastUse=GetTickCount64();p.source=src;p.scene=std::move(scene);
  auto cpu=p.heap->GetCPUDescriptorHandleForHeapStart();D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Format=format;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;d->CreateShaderResourceView(src,&srv,cpu);
  const auto stride=d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
- for(auto* resource:{p.scene.hdr.Get(),p.scene.reference.Get()}){
+ for(auto* resource:{p.scene.hdr.Get(),p.scene.reference.Get(),p.scene.previewMask.Get()}){
   cpu.ptr+=stride;srv.Format=resource?resource->GetDesc().Format:DXGI_FORMAT_R16G16B16A16_FLOAT;
   d->CreateShaderResourceView(resource,&srv,cpu);
  }
@@ -110,8 +110,10 @@ ID3D12Resource* Convert(ID3D12Device*d,ID3D12GraphicsCommandList*c,ID3D12Resourc
  const bool sceneRequested=cfg.FfxivHDRMode.value_or_default()==1;
  k.scene=sceneRequested && p.scene.hdr && p.scene.reference;
  k.reshadeHighlights=cfg.FfxivHDRReShadeHighlights.value_or_default()?1u:0u;
+ k.pad[0]=p.scene.referenceSrgb?1u:0u;
+ k.pad[1]=p.scene.previewMask?1u:0u;
  std::copy(p.scene.rect.begin(),p.scene.rect.end(),k.rect);
- if(sceneRequested){k.expansion=0;Message(k.scene?"Scene HDR active: RenoDX FP16 scene + SDR effects; 10-bit PQ output":"Scene HDR waiting for verified scene: paper-white SDR fallback");}
+ if(sceneRequested){if(!k.scene)k.expansion=0;Message(k.scene?"Scene HDR active: RenoDX FP16 scene + HDR-mapped UI; 10-bit PQ output":"Scene HDR waiting for verified scene: paper-white SDR fallback");}
  else Message("HDR10 active: SDR expansion; game HUD shares the same curve");
  k.contrast=std::clamp(finite(cfg.FfxivHDRContrast.value_or_default(),1.f),.5f,1.5f);
  k.saturation=std::clamp(finite(cfg.FfxivHDRSaturation.value_or_default(),1.f),0.f,2.f);
@@ -123,10 +125,12 @@ ID3D12Resource* Convert(ID3D12Device*d,ID3D12GraphicsCommandList*c,ID3D12Resourc
  }
  pool.lifetime.Record(c);p.recorded=true;p.done=pool.lifetime.ReuseProbe(c);if(p.scene.retire)p.scene.retire(p.done);
  if(k.scene){Barrier(c,p.scene.hdr.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);Barrier(c,p.scene.reference.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);}
+ if(k.scene && k.pad[1])Barrier(c,p.scene.previewMask.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
  Barrier(c,src,state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);Barrier(c,p.image.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
  ID3D12DescriptorHeap* heaps[]={p.heap.Get()};c->SetDescriptorHeaps(1,heaps);c->SetComputeRootSignature(p.root.Get());c->SetPipelineState(p.pso.Get());c->SetComputeRootDescriptorTable(0,p.heap->GetGPUDescriptorHandleForHeapStart());c->SetComputeRoot32BitConstants(1,16,&k,0);c->Dispatch((p.width+7)/8,(p.height+7)/8,1);
  Barrier(c,p.image.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);Barrier(c,src,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,state);
  if(k.scene){Barrier(c,p.scene.hdr.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);Barrier(c,p.scene.reference.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);}
+ if(k.scene && k.pad[1])Barrier(c,p.scene.previewMask.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
  return p.image.Get();
 }
 HRESULT ResetCommands(ID3D12GraphicsCommandList*c,ID3D12CommandAllocator*a){

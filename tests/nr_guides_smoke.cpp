@@ -32,6 +32,15 @@ int main()
     assert(g.motion.width == 3840 && g.motion.height == 1820);
     const auto ordinary = GuideRenderExtent({1920, 910}, {0, 0});
     assert(ordinary.width == 1920 && ordinary.height == 910);
+    // Unmatched guides at native model resolution retain the game's scale.
+    assert(ModelMotionScale(1920, 1920) == 1.0f);
+    assert(ModelMotionScale(3840, 3840) == 1.0f);
+    // A reduced matched texture uses render units for low-res vectors, output units otherwise.
+    assert(ModelMotionScale(1344, 1920) == 0.7f);
+    assert(ModelMotionScale(1344, 3840) == 0.35f);
+    // Synthetic compact colour never redefines the untouched guides' reference.
+    assert(ModelMotionScale(960, synthetic.width) == 0.25f);
+    assert(ModelMotionScale(1280, 0) == 1.0f);
     // Missing dimensions use each resource's available region; no unsigned underflow.
     g = ResolveGuideRegions({1920, 1080}, {3840, 2160}, {0, 0}, {0, 0}, false, 0, 0, 8, 4);
     assert(g.motion.width == 3832 && g.motion.height == 2156);
