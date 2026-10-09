@@ -4,7 +4,8 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $build = Join-Path ([System.IO.Path]::GetTempPath()) ('nr-lifetime-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $build | Out-Null
 Set-Content -LiteralPath (Join-Path $build 'pch.h') -Value '// Standalone production-helper build.'
-Set-Content -LiteralPath (Join-Path $build 'Util.h') -Value '#include <unknwn.h>
+Set-Content -LiteralPath (Join-Path $build 'Util.h') -Value '#pragma once
+#include <unknwn.h>
 namespace TestUtil { inline IUnknown* wrapped = nullptr; inline IUnknown* real = nullptr; }
 namespace Util { inline bool CheckForRealObject(const char*, IUnknown* object, IUnknown** real)
 { if (object != TestUtil::wrapped) return false; *real = TestUtil::real; return true; } }'

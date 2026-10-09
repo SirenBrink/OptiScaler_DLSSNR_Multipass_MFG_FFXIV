@@ -1,5 +1,6 @@
 #pragma once
 #include <d3d12.h>
+#include <dlssnr/DlssNr_GpuSubmission.h>
 #include <dxgi1_6.h>
 #include <string>
 #include "SceneInput.h"
@@ -13,6 +14,7 @@ ID3D12Resource* Convert(ID3D12Device*, ID3D12GraphicsCommandList*, ID3D12Resourc
 // Bridge-owned lists can run before general resource tracking is installed.
 HRESULT ResetCommands(ID3D12GraphicsCommandList*, ID3D12CommandAllocator*);
 void ExecuteCommands(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
+DlssNr::GpuSubmission BeginSubmission(UINT,ID3D12CommandList*const*);
 void Submitted(ID3D12CommandQueue*,UINT,ID3D12CommandList*const*);
 void Reset(ID3D12CommandList*);
 std::function<bool()> TrackCommands(ID3D12GraphicsCommandList*);

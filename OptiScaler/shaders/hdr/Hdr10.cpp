@@ -133,9 +133,10 @@ HRESULT ResetCommands(ID3D12GraphicsCommandList*c,ID3D12CommandAllocator*a){
  auto hr=c->Reset(a,nullptr);if(SUCCEEDED(hr))Reset(c);return hr;
 }
 void ExecuteCommands(ID3D12CommandQueue*q,UINT n,ID3D12CommandList*const*l){
- q->ExecuteCommandLists(n,l);Submitted(q,n,l);
+ auto pending=BeginSubmission(n,l);q->ExecuteCommandLists(n,l);pending.CompleteNoThrow(q);
 }
 std::function<bool()> TrackCommands(ID3D12GraphicsCommandList*c){auto& p=P();std::lock_guard lock(p.mutex);p.lifetime.Record(c);return p.lifetime.ReuseProbe(c);}
+DlssNr::GpuSubmission BeginSubmission(UINT n,ID3D12CommandList*const*l){try{return P().lifetime.BeginSubmission(n,l);}catch(...){P().lifetime.QuarantineSubmission(n,l);return {};}}
 void Submitted(ID3D12CommandQueue*q,UINT n,ID3D12CommandList*const*l){P().lifetime.Submitted(q,n,l);}
 void Reset(ID3D12CommandList*c){auto& pool=P();std::lock_guard lock(pool.mutex);pool.lifetime.ResetRecording(c);CollectLocked(pool,active.load());}
 }

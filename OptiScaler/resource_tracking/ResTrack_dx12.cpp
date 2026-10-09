@@ -655,10 +655,12 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
     const auto executeBatch = [&](UINT count, ID3D12CommandList* const* lists)
     {
         DlssNr::AmdBridge::Submitting(This, count, lists);
+        auto nrSubmission = DlssNr::BeginGpuSubmission(count, lists);
+        auto hdrSubmission = Hdr10::BeginSubmission(count, lists);
         o_ExecuteCommandLists(This, count, lists);
         DlssNr::AmdBridge::Submitted(This, count, lists);
-        DlssNr::NotifyGpuSubmitted(This, count, lists);
-        Hdr10::Submitted(This, count, lists);
+        nrSubmission.CompleteNoThrow(This);
+        hdrSubmission.CompleteNoThrow(This);
     };
     const auto executeWithAmdIsolation = [&]
     {

@@ -11,6 +11,7 @@
 #include <vector>
 #include <Util.h>
 #include "../OptiScaler/dlssnr/DlssNr_GpuLifetime.h"
+#include "../OptiScaler/dlssnr/DlssNr_DescriptorSlots.h"
 using Microsoft::WRL::ComPtr;
 static void check(HRESULT hr) { if (FAILED(hr)) throw std::runtime_error("D3D12 call failed"); }
 static void expect(bool yes, const char* why) { if (!yes) throw std::runtime_error(why); }
@@ -326,6 +327,49 @@ try
         expect(generationsReleased == 0, "shared recording lost a generation dependency");
         life.ResetRecording(commands.Get());
         expect(generationsReleased == 2 && life.Idle(), "shared generations did not retire");
+    }
+    {
+        DlssNr::DescriptorSlots<2> slots;
+        expect(slots.HasCapacity(2) && !slots.HasCapacity(3), "descriptor frame budget is incorrect");
+        expect(slots.Acquire(commands.Get()).has_value(), "first descriptor lease failed");
+        expect(slots.Acquire(commands.Get()).has_value(), "second descriptor lease failed");
+        expect(!slots.Acquire(commands.Get()), "live descriptor ring wrapped");
+        expect(!slots.HasCapacity(1), "frame budget allowed an incomplete NR recording");
+        bool codecReleased = false;
+        slots.Retire([&] { codecReleased = true; });
+        expect(!codecReleased, "codec released while its list remained replayable");
+        check(queue->Wait(gate.Get(), 99));
+        auto captured = slots.BeginSubmission(1, lists);
+        queue->ExecuteCommandLists(1, lists);
+        // Reset can arrive before the post-Execute notification: captured pins
+        // must preserve the original generation rather than signal a new one.
+        slots.ResetRecording(commands.Get());
+        expect(!slots.Acquire(commands.Get()), "pending submission released descriptors");
+        captured.Complete(queue.Get());
+        expect(!slots.Acquire(commands.Get()), "blocked GPU released descriptors");
+        expect(!codecReleased, "codec released before its captured GPU execution");
+        check(gate->Signal(99)); wait();
+        expect(slots.Acquire(commands.Get()).has_value(), "completed descriptor lease was not reclaimed");
+        expect(codecReleased, "completed codec recording did not retire");
+        slots.ResetRecording(commands.Get());
+    }
+    {
+        auto life = std::make_unique<DlssNr::GpuLifetime>();
+        life->Record(commands.Get());
+        auto reuse = life->ReuseProbe(commands.Get());
+        auto captured = life->BeginSubmission(1, lists);
+        life->ResetRecording(commands.Get());
+        life.reset();
+        expect(!reuse(), "destroyed owner lost pending submission");
+        queue->ExecuteCommandLists(1, lists); captured.Complete(queue.Get()); wait();
+        expect(reuse(), "retained probe did not survive owner destruction");
+    }
+    {
+        DlssNr::DescriptorSlots<1> slots;
+        expect(slots.Acquire(commands.Get()).has_value(), "abandon test acquisition failed");
+        { auto abandoned = slots.BeginSubmission(1, lists); }
+        slots.ResetRecording(commands.Get());
+        expect(!slots.Acquire(commands.Get()), "abandoned submission allowed descriptor overwrite");
     }
     std::puts("NR GPU lifetime smoke passed (including dormant and shared model generations)");
     return 0;
