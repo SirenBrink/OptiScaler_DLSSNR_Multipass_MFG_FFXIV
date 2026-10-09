@@ -24,6 +24,7 @@ void Message(std::string value) { std::lock_guard lock(S().mutex); S().message =
 struct Job : Readback {
     std::filesystem::path path;
     bool hdr = false;
+    bool iccOnly = false;
     // Established before any post-submission allocations. Failure paths keep
     // the submitted copy alive even if worker allocation itself fails.
     std::shared_ptr<Job> pendingOwnership;
@@ -47,6 +48,7 @@ std::shared_ptr<Job> Prepare(HWND window, ID3D12Device* device, ID3D12GraphicsCo
     try {
         job = std::make_shared<Job>();
         job->hdr = Config::Instance()->FfxivHDRScreenshotFormat.value_or_default() == 1;
+        job->iccOnly = job->hdr && Config::Instance()->FfxivHDRScreenshotIccOnly.value_or_default();
         ScreenshotImage::Check(job->Allocate(device, job->hdr ? hdrSource : sdrSource, job->hdr));
         SYSTEMTIME t{}; GetLocalTime(&t);
         job->path = Util::DllPath().parent_path() / L"OptiScaler" / L"Screenshots" /
@@ -77,9 +79,9 @@ DWORD WINAPI Encode(void* parameter)
         std::filesystem::create_directories(job.path.parent_path());
         const auto* pixels = static_cast<BYTE*>(data)+job.footprint.Offset;
         const auto& size = job.footprint.Footprint;
-        ScreenshotImage::SavePng(job.path, pixels, size.Width, size.Height, size.RowPitch, job.hdr, size.Format);
+        ScreenshotImage::SavePng(job.path, pixels, size.Width, size.Height, size.RowPitch, job.hdr, size.Format, job.iccOnly);
         Message("Saved " + job.path.filename().string());
-        LOG_INFO("OptiHDR screenshot saved: {}", job.path.string());
+        LOG_INFO("OptiHDR screenshot saved: {} (colour metadata: {})", job.path.string(), job.hdr ? (job.iccOnly ? "BT.2100 PQ ICC only" : "BT.2100 PQ cICP") : "sRGB");
     } catch (HRESULT error) {
         Message("HDR screenshot failed (see OptiScaler.log)");
         LOG_ERROR("OptiHDR screenshot failed: {:08X}, path {}", static_cast<unsigned>(error), job.path.string());

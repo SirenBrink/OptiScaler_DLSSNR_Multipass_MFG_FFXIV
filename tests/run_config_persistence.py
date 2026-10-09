@@ -20,7 +20,7 @@ def function(signature):
     return source[start:end]
 
 fields = re.findall(r'^\s*(CustomOptional<[^\n]+>\s+(?:FfxivHDR\w*|LowLatencyInput|LowLatencyOutput|VulkanUseCopyForInputs|VulkanUseCopyForOutput|AnisotropyModifyComp|AnisotropyModifyMinMax|DlssNrVitFirstPassOnly)\s*\{[^\n]+?;)', header, re.M)
-assert len(fields) == 19
+assert len(fields) == 21
 load_start = source.index('            if (auto v = readUInt("LowLatency", "Input")')
 load = source[load_start:source.index('            ForceHDR.set_from_config', load_start)]
 for field in ['AnisotropyModifyComp', 'AnisotropyModifyMinMax', 'DlssNrVitFirstPassOnly']:
@@ -76,7 +76,7 @@ int main(int argc,char**argv) {
  c.FfxivHDRNRSceneInput=true;c.FfxivHDRReShadeHighlights=true;c.FfxivHDRMode=1;c.FfxivHDR=true;c.FfxivHDRPeak=1450.0f;c.FfxivHDRPaper=185.0f;
  c.FfxivHDRExpansion=0.73f;c.FfxivHDRContrast=1.23f;
  c.FfxivHDRSaturation=1.17f;c.FfxivHDRVibrance=-0.32f;
- c.FfxivHDRScreenshotKey=0x79;c.FfxivHDRScreenshotFormat=1;
+ c.FfxivHDRScreenshotKey=0x79;c.FfxivHDRScreenshotFormat=1;c.FfxivHDRScreenshotIccOnly=true;
  c.LowLatencyInput=LowLatencyInput::Reflex;c.LowLatencyOutput=LowLatencyMode::XeLL;
  c.VulkanUseCopyForInputs=true;c.VulkanUseCopyForOutput=true;
  c.AnisotropyModifyComp=false;c.AnisotropyModifyMinMax=false;
@@ -95,7 +95,7 @@ int main(int argc,char**argv) {
  assert(!twice.FfxivHDRReShadeHighlights.value_or_default());
  assert(twice.FfxivHDRScreenshotKey.value_or_default()==UnboundKey);
  loaded.absoluteFileName=path/"missing"/"OptiScaler.ini";assert(!loaded.Save());
- std::cout<<"PASS: 19 settings round-trip; all twelve independent HDR resets persist; failed writes report failure\n";
+ std::cout<<"PASS: 21 settings round-trip; independent HDR resets persist; failed writes report failure\n";
 }
 '''
 simpleini = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else repo / 'external/simpleini'

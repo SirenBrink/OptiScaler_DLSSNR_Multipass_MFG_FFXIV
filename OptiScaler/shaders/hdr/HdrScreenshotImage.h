@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <vector>
 #include <span>
+#include "HdrScreenshotIcc.h"
 
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "ole32.lib")
@@ -35,8 +36,21 @@ inline uint32_t Crc(const BYTE* bytes, size_t size) {
     for(size_t i=0;i<size;++i) { crc^=bytes[i]; for(int k=0;k<8;++k) crc=(crc>>1)^(0xedb88320u & (0u-(crc&1))); }
     return ~crc;
 }
-inline void WriteColourChunk(std::ostream& out, bool hdr)
+inline void WriteColourChunk(std::ostream& out, bool hdr, bool iccOnly = false)
 {
+    if (hdr && iccOnly) {
+        // Keep the HDR signal inside ICC's cicp tag; no outer PNG cICP.
+        // Include the terminating profile-name NUL and compression method 0.
+        constexpr char name[] = "RGB_D65_202_Rel_PeQ";
+        std::vector<BYTE> chunk{'i','C','C','P'};
+        chunk.insert(chunk.end(), name, name + sizeof(name));
+        chunk.push_back(0);
+        chunk.insert(chunk.end(), PqIccCompressed.begin(), PqIccCompressed.end());
+        WriteBE(out, uint32_t(chunk.size()-4));
+        out.write(reinterpret_cast<const char*>(chunk.data()), chunk.size());
+        WriteBE(out, Crc(chunk.data(), chunk.size()));
+        return;
+    }
     // PNG Third Edition: cICP 9/16/0/1 = BT.2020, PQ, RGB, full range.
     // SDR uses the standard sRGB chunk with perceptual rendering intent.
     const BYTE pq[]={'c','I','C','P',9,16,0,1}, srgb[]={'s','R','G','B',0};
@@ -45,7 +59,7 @@ inline void WriteColourChunk(std::ostream& out, bool hdr)
     WriteBE(out,uint32_t(length-4));out.write(reinterpret_cast<const char*>(bytes),length);WriteBE(out,Crc(bytes,length));
 }
 inline void SavePng(const std::filesystem::path& path, const void* pixels, UINT width, UINT height,
-                    UINT rowPitch, bool hdr, DXGI_FORMAT sourceFormat=DXGI_FORMAT_R10G10B10A2_UNORM)
+                    UINT rowPitch, bool hdr, DXGI_FORMAT sourceFormat=DXGI_FORMAT_R10G10B10A2_UNORM, bool iccOnly=false)
 {
     using Microsoft::WRL::ComPtr;
     if (!pixels || !width || !height || width > 32768 || height > 32768 || rowPitch < width * 4)
@@ -117,7 +131,7 @@ inline void SavePng(const std::filesystem::path& path, const void* pixels, UINT 
         if(!memcmp(type,"IHDR",4)) {
             if(header || offset!=8 || length!=13) throw E_FAIL;
             out.write(reinterpret_cast<const char*>(png.data()+offset),length+12);
-            WriteColourChunk(out,hdr);header=true;
+            WriteColourChunk(out,hdr,iccOnly);header=true;
         } else {
             if(!header) throw E_FAIL;
             if(memcmp(type,"cICP",4) && memcmp(type,"sRGB",4) && memcmp(type,"gAMA",4) && memcmp(type,"cHRM",4) && memcmp(type,"iCCP",4))

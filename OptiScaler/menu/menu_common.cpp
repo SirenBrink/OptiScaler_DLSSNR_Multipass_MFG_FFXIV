@@ -3116,6 +3116,12 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         if (ImGui::Combo("Screenshot format", &screenshotFormat, screenshotFormats, 2)) config->FfxivHDRScreenshotFormat = screenshotFormat;
         resetHdr("FfxivHDRScreenshotFormat", config->FfxivHDRScreenshotFormat);
         ShowHelpMarker("Saves one PNG to game/OptiScaler/Screenshots while OptiHDR is active. SDR preserves the image before OptiHDR, including ReShade. HDR captures OptiHDR output and needs a compatible viewer.\nThe separate Companion nameplate window is not captured. FFXIV's original screenshot function is unchanged.");
+        ImGui::BeginDisabled(screenshotFormat != 1);
+        bool screenshotIccOnly = config->FfxivHDRScreenshotIccOnly.value_or_default();
+        if (ImGui::Checkbox("HDR PNG: ICC only (sharing)", &screenshotIccOnly)) config->FfxivHDRScreenshotIccOnly = screenshotIccOnly;
+        resetHdr("FfxivHDRScreenshotIccOnly", config->FfxivHDRScreenshotIccOnly);
+        ShowHelpMarker("Embeds a BT.2100 PQ ICC profile and omits the outer PNG cICP chunk. HDR pixels are unchanged.\nExperimental compatibility option for sharing; Discord support must be checked on the receiving device.\nWindows Photos and Explorer may display this differently. Uses a CC0 PQ profile, not Apple's exact profile.\nSDR screenshots and the live game are unaffected.");
+        ImGui::EndDisabled();
         static auto screenshotShortcut = Keybind("Screenshot shortcut", 15);
         screenshotShortcut.Render(config->FfxivHDRScreenshotKey, "Reset");
         ImGui::TextWrapped("Optional: one key, Escape cancels, Backspace unbinds. Save Settings to keep your choice.");

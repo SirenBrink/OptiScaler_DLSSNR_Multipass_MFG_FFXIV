@@ -62,6 +62,31 @@ int main(int argc,char** argv) try {
         expect(colour==1 && idat>0 && end);
     };
     metadata(path,true);
+
+    auto iccPath=path.parent_path()/(path.stem().string()+"-ICC.png");
+    Hdr10::ScreenshotImage::SavePng(iccPath,src.data(),3,2,256,true,DXGI_FORMAT_R10G10B10A2_UNORM,true);
+    auto imageChunks=[](const std::filesystem::path& file,bool icc) {
+        std::ifstream in(file,std::ios::binary);std::vector<BYTE>b((std::istreambuf_iterator<char>(in)),{}),idat;
+        unsigned colours=0;
+        for(size_t i=8;i<b.size();) {
+            expect(b.size()-i>=12);size_t n=Hdr10::ScreenshotImage::ReadBE(&b[i]);expect(n<=b.size()-i-12);
+            auto*p=&b[i+4];expect(Hdr10::ScreenshotImage::ReadBE(p+4+n)==Hdr10::ScreenshotImage::Crc(p,n+4));
+            if(!memcmp(p,"IDAT",4))idat.insert(idat.end(),p+4,p+4+n);
+            if(!memcmp(p,"cICP",4)){expect(!icc);++colours;}
+            if(!memcmp(p,"iCCP",4)){
+                expect(icc);++colours;
+                constexpr char name[]="RGB_D65_202_Rel_PeQ";
+                expect(n==sizeof(name)+1+Hdr10::ScreenshotImage::PqIccCompressed.size());
+                expect(!memcmp(p+4,name,sizeof(name)) && p[4+sizeof(name)]==0);
+                expect(!memcmp(p+5+sizeof(name),Hdr10::ScreenshotImage::PqIccCompressed.data(),Hdr10::ScreenshotImage::PqIccCompressed.size()));
+            }
+            expect(memcmp(p,"gAMA",4)&&memcmp(p,"cHRM",4)&&memcmp(p,"sRGB",4));
+            i+=n+12;
+        }
+        expect(colours==1);return idat;
+    };
+    expect(imageChunks(path,false)==imageChunks(iccPath,true));
+    puts("PASS: optional ICC-only HDR PNG has valid chunks/CRCs, no outer cICP, identical compressed HDR pixels");
     puts("PASS: HDR PNG roundtrip preserves every 10-bit source value, nits, row stride; valid PQ/BT.2020 metadata and CRCs");
     const std::array<std::array<BYTE,3>,6> expectedSdr={{{0,0,0},{128,96,64},{255,255,255},{230,12,44},{11,199,53},{17,28,210}}};
     const DXGI_FORMAT formats[]={DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,DXGI_FORMAT_R8G8B8A8_TYPELESS,

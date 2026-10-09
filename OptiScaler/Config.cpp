@@ -933,6 +933,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             FfxivHDRVibrance.set_from_config(readFloat("HDR", "Vibrance"));
             FfxivHDRScreenshotKey.set_from_config(readInt("HDR", "ScreenshotKey"));
             FfxivHDRScreenshotFormat.set_from_config(readInt("HDR", "ScreenshotFormat"));
+            FfxivHDRScreenshotIccOnly.set_from_config(readBool("HDR", "ScreenshotIccOnly"));
             ForceHDR.set_from_config(readBool("HDR", "ForceHDR"));
             UseHDR10.set_from_config(readBool("HDR", "UseHDR10"));
             SkipColorSpace.set_from_config(readBool("HDR", "SkipColorSpace"));
@@ -1413,6 +1414,7 @@ bool Config::SaveIni()
     auto screenshotKey = Instance()->FfxivHDRScreenshotKey.value_for_config();
     ini.SetValue("HDR", "ScreenshotKey", GetIntValue(screenshotKey, screenshotKey > 0).c_str());
     ini.SetValue("HDR", "ScreenshotFormat", GetIntValue(Instance()->FfxivHDRScreenshotFormat.value_for_config()).c_str());
+    ini.SetValue("HDR", "ScreenshotIccOnly", GetBoolValue(Instance()->FfxivHDRScreenshotIccOnly.value_for_config()).c_str());
     ini.SetValue("DlssNr", "VitAllowUnverified", GetBoolValue(Instance()->DlssNrVitAllowUnverified.value_for_config()).c_str());
     ini.SetValue("DlssNr", "VitFirstPassOnly", GetBoolValue(Instance()->DlssNrVitFirstPassOnly.value_for_config()).c_str());
     ini.SetValue("DlssNr", "VitEvery", GetIntValue(Instance()->DlssNrVitEvery.value_for_config()).c_str());
