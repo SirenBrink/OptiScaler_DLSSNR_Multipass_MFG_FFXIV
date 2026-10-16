@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "DlssNr_GpuLifetime.h"
+#include "RecordedListIndex.h"
 #include <Util.h>
 #include <algorithm>
 #include <vector>
@@ -25,6 +26,7 @@ struct GpuLifetime::Impl
     // Reset notifications may arrive on a different engine thread from Record/Retire.
     // Recursive because collection/destruction can re-enter the tracker on this thread.
     std::recursive_mutex mutex;
+    RecordedListIndex<> index;
     struct Timeline
     {
         Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
@@ -139,6 +141,7 @@ void GpuLifetime::Record(ID3D12GraphicsCommandList* commands)
     if (!commands)
         return;
     commands = Identity(commands);
+    state->index.Add(commands);
     state->Collect();
     for (const auto& use : state->recordings)
         if (use->open && use->commands == commands)
@@ -159,6 +162,16 @@ void GpuLifetime::Record(ID3D12GraphicsCommandList* commands)
     }
     state->currentGeneration.push_back(use);
     state->recordings.push_back(std::move(use));
+}
+bool GpuLifetime::MayHaveRecording(ID3D12CommandList* commands) const
+{
+    return impl->index.MayContain(Identity(commands));
+}
+bool GpuLifetime::MayHaveRecording(UINT count, ID3D12CommandList* const* lists) const
+{
+    if (!lists) return false;
+    for (UINT i = 0; i < count; ++i) if (MayHaveRecording(lists[i])) return true;
+    return false;
 }
 std::function<bool()> GpuLifetime::CompletionProbe(ID3D12GraphicsCommandList* commands)
 {
@@ -186,6 +199,7 @@ std::function<bool()> GpuLifetime::ReuseProbe(ID3D12GraphicsCommandList* command
 }
 GpuSubmission GpuLifetime::BeginSubmission(UINT count, ID3D12CommandList* const* lists)
 {
+    if (!MayHaveRecording(count, lists)) return {};
     const auto state = impl;
     std::lock_guard lock(state->mutex);
     if (state->recordings.empty() || !lists)
@@ -262,12 +276,14 @@ void GpuLifetime::Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12Command
 }
 void GpuLifetime::ResetRecording(ID3D12CommandList* commands)
 {
+    if (!MayHaveRecording(commands)) return;
     const auto state = impl;
     std::lock_guard lock(state->mutex);
     commands = Identity(commands);
     for (auto& use : state->recordings)
         if (use->commands == commands)
             use->open = false;
+    state->index.Reset(commands);
     state->Collect();
 }
 bool GpuLifetime::HasOpenRecording(ID3D12CommandList* commands)

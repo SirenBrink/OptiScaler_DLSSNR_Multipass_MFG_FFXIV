@@ -8,6 +8,8 @@
 #include <atomic>
 #include <barrier>
 #include <thread>
+#include <future>
+#include <chrono>
 #include <vector>
 #include <Util.h>
 #include "../OptiScaler/dlssnr/DlssNr_GpuLifetime.h"
@@ -370,6 +372,46 @@ try
         { auto abandoned = slots.BeginSubmission(1, lists); }
         slots.ResetRecording(commands.Get());
         expect(!slots.Acquire(commands.Get()), "abandoned submission allowed descriptor overwrite");
+    }
+    {
+        DlssNr::GpuLifetime watched;
+        expect(!watched.MayHaveRecording(commands.Get()), "unrecorded list entered NR path");
+        watched.Record(commands.Get());
+        expect(watched.MayHaveRecording(commands.Get()), "recorded list missing from filter");
+        TestUtil::wrapped=static_cast<IUnknown*>(allocator.Get());
+        TestUtil::real=static_cast<IUnknown*>(commands.Get());
+        expect(watched.MayHaveRecording(reinterpret_cast<ID3D12CommandList*>(allocator.Get())), "wrapped list missed by filter");
+        TestUtil::wrapped=nullptr;TestUtil::real=nullptr;
+        ID3D12CommandList* batch[]{nullptr,commands.Get()};
+        expect(watched.MayHaveRecording(2,batch), "mixed batch skipped tracked list");
+        expect(!watched.MayHaveRecording(2,nullptr), "null batch matched");
+        // Retain the entry through every captured execution, including replay.
+        auto pending=watched.BeginSubmission(2,batch);
+        expect(bool(pending) && watched.MayHaveRecording(commands.Get()), "submission removed replay coverage");
+        pending.CompleteNoThrow(queue.Get());
+        expect(watched.MayHaveRecording(commands.Get()), "completed submission removed replay coverage");
+        watched.ResetRecording(commands.Get());
+        expect(!watched.MayHaveRecording(commands.Get()), "reset did not remove index entry");
+        watched.Record(commands.Get());
+        expect(watched.MayHaveRecording(commands.Get()), "same-address rerecording missed");
+        watched.ResetRecording(commands.Get());
+    }
+    {
+        // Model a long NR recording/retirement holding the tracker lock.
+        // Unrelated game submissions and resets must complete without waiting.
+        DlssNr::GpuLifetime tracker;
+        std::promise<void> locked,release;auto releaseReady=release.get_future();
+        auto holding=std::async(std::launch::async,[&]{tracker.Retire([&]{locked.set_value();releaseReady.wait();});});
+        locked.get_future().wait();
+        auto notification=std::async(std::launch::async,[&]{
+            ID3D12CommandList* untracked[]{commands.Get()};
+            const bool skipped=!tracker.BeginSubmission(1,untracked);
+            tracker.ResetRecording(commands.Get());return skipped;
+        });
+        const bool completed=notification.wait_for(std::chrono::seconds(1))==std::future_status::ready;
+        release.set_value();holding.get();
+        const bool skipped=notification.get();
+        expect(completed && skipped,"unrelated batch or reset blocked behind NR tracker lock");
     }
     std::puts("NR GPU lifetime smoke passed (including dormant and shared model generations)");
     return 0;

@@ -21,6 +21,9 @@ class GpuLifetime
     GpuLifetime(const GpuLifetime&) = delete;
     GpuLifetime& operator=(const GpuLifetime&) = delete;
     void Record(ID3D12GraphicsCommandList* commands);
+    // Conservative lock-free rejection of unrelated lists, including wrapper aliases.
+    bool MayHaveRecording(ID3D12CommandList* commands) const;
+    bool MayHaveRecording(UINT count, ID3D12CommandList* const* lists) const;
     // The probe retains the captured tracker state; discarded work never satisfies it.
     std::function<bool()> CompletionProbe(ID3D12GraphicsCommandList* commands);
     // Completion plus recording closure: retained for HDR/FFXIV texture pools.

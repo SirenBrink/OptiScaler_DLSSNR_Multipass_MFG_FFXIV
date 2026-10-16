@@ -14,3 +14,8 @@ namespace Util { inline bool CheckForRealObject(const char*, IUnknown* object, I
 if ($LASTEXITCODE -ne 0) { throw 'NR lifetime test compilation failed.' }
 & "$build/smoke.exe"
 if ($LASTEXITCODE -ne 0) { throw "NR lifetime test failed (exit $LASTEXITCODE)." }
+
+& cl.exe /nologo /std:c++20 /EHsc /W4 /WX "/Fo$build/index.obj" "/Fe$build/index.exe" "$PSScriptRoot/nr_recorded_list_index.cpp"
+if ($LASTEXITCODE -ne 0) { throw 'Recorded-list index compilation failed.' }
+& "$build/index.exe"
+if ($LASTEXITCODE -ne 0) { throw 'Recorded-list index regression failed.' }
