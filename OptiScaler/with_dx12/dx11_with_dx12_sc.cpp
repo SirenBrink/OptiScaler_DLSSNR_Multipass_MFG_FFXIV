@@ -392,10 +392,13 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (_real != nullptr)
     {
         FramePacingTrace::Scope hiddenTiming(FramePacingTrace::Phase::HiddenPresent);
-        UINT realFlags = Flags;
-        auto realPresentResult = _real->Present(0, realFlags);
+        // This auxiliary DX11 present must not throttle the visible DX12/FG
+        // output. Its producer commands were already flushed above. If DXGI
+        // would block, skip this hidden presentation without retrying or waiting.
+        const UINT realFlags = Flags | DXGI_PRESENT_DO_NOT_WAIT;
+        const auto realPresentResult = _real->Present(0, realFlags);
 
-        if (FAILED(realPresentResult))
+        if (FAILED(realPresentResult) && realPresentResult != DXGI_ERROR_WAS_STILL_DRAWING)
             LOG_WARN("hidden real DX11 Present failed: {:X}", (UINT) realPresentResult);
     }
 
