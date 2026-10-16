@@ -19,6 +19,7 @@ class DLSSG_Dx12 : public virtual IFGFeature_Dx12
     ID3D12Fence* dlssgFence[BUFFER_COUNT] = {};
     UINT64 lastOptionFrame = 0;
     std::atomic<UINT64> _observedMultiplier { 0 }; // tick count in high bits, multiplier in low byte
+    std::atomic<bool> _ownsFramePacing { false };
     int _sampleMode = -1;
     TemporalContinuity::SuccessfulFrames _historyFrames;
 
@@ -33,6 +34,7 @@ class DLSSG_Dx12 : public virtual IFGFeature_Dx12
     const char* Name() override final { return "DLSSG"; };
     feature_version Version() override final;
     HWND Hwnd() override final;
+    bool OwnsFramePacing() const override final { return _ownsFramePacing.load(std::memory_order_acquire); }
     unsigned GetObservedFrameMultiplier() const override final
     {
         const auto sample = _observedMultiplier.load(std::memory_order_relaxed);

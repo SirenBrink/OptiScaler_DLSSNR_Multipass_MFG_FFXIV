@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Reflex_Hooks.h"
 #include <Config.h>
+#include <framegen/dlssg/DynamicMfgPolicy.h>
 
 #include <nvapi/fakenvapi.h>
 
@@ -572,6 +573,10 @@ void ReflexHooks::update(bool fgActive, bool isVulkan)
         State::Instance().reflexShowWarning = false;
         return;
     }
+    auto* fg = State::Instance().currentFG;
+    // The wrapper reports IsActive even during a temporary FG pause. Such
+    // frames have no generated presents and must use the undivided cap.
+    fgActive = fgActive && (!fg || !fg->IsPaused());
     // We can still use just the markers to limit the fps with Reflex disabled
     // But need to fallback in case a game stops sending them for some reason
     _updatesWithoutMarker++;
@@ -622,6 +627,28 @@ void ReflexHooks::update(bool fgActive, bool isVulkan)
     static LowLatencyMode lastLowLatencyMode = fakenvapi::getCurrentMode();
     static IUnknown* lastLimitDevice = nullptr;
     static HANDLE lastLimitVkDevice = nullptr;
+    static bool lastNativePacing = false;
+    const bool nativePacing = fgActive && fg && !fg->IsPaused() && fg->OwnsFramePacing();
+    if (nativePacing)
+    {
+        // Streamline owns the output cap, including dynamic factor changes.
+        // Do not divide the cap or reprogram Reflex from presentation telemetry.
+        State::Instance().reflexLimitsFps = true;
+        State::Instance().reflexShowWarning = false;
+        lastNativePacing = true;
+        lastFps = 0;
+        lastLimitDevice = _lastSleepDev;
+        lastLimitVkDevice = _lastVkSleepDev;
+        lastReflexLimitsFps = true;
+        lastLowLatencyMode = fakenvapi::getCurrentMode();
+        return;
+    }
+    if (lastNativePacing)
+    {
+        lastNativePacing = false;
+        lastFps = 0;
+        setFPSLimit(0);
+    }
 
     // Reset required when toggling Reflex
     if (State::Instance().reflexLimitsFps != lastReflexLimitsFps ||
@@ -643,7 +670,7 @@ void ReflexHooks::update(bool fgActive, bool isVulkan)
     if (!State::Instance().reflexLimitsFps)
         return;
 
-    float currentFps = Config::Instance()->FramerateLimit.value_or_default();
+    float currentFps = DynamicMfgPolicy::Target(Config::Instance()->FramerateLimit.value_or_default());
     static uint8_t lastFgNumFramesToGenerate = 0;
 
     if (lastFgNumFramesToGenerate != _FgNumFramesToGenerate)
@@ -666,7 +693,9 @@ void ReflexHooks::update(bool fgActive, bool isVulkan)
         }
 
         lastFgNumFramesToGenerate = _FgNumFramesToGenerate;
-        setFPSLimit(currentFps);
+        // Apply only the final cap below, including zero when a factor swap
+        // and cap disable happen together. Never apply a full-rate interim cap.
+        lastFps = -1.0f;
 
         if (_FgNumFramesToGenerate == 0)
             LOG_DEBUG("DLSS FG no longer detected");
@@ -680,7 +709,7 @@ void ReflexHooks::update(bool fgActive, bool isVulkan)
     {
         currentFps /= 2;
     }
-    else if (_FgNumFramesToGenerate > 0 && fakenvapi::isUsingAsMainNvapi() &&
+    else if (fgActive && _FgNumFramesToGenerate > 0 && fakenvapi::isUsingAsMainNvapi() &&
              fakenvapi::getCurrentMode() != LowLatencyMode::XeLL)
     {
         currentFps /= (_FgNumFramesToGenerate + 1);
@@ -699,10 +728,9 @@ void ReflexHooks::setFPSLimit(float fps)
     if (State::Instance().externalFrameGeneration)
         return;
     LOG_INFO("Set FPS Limit to: {}", fps);
-    if (fps == 0.0)
-        _minimumIntervalUs = 0;
-    else
-        _minimumIntervalUs = static_cast<uint32_t>(std::round(1'000'000 / fps));
+    auto* fg = State::Instance().currentFG;
+    if (fps > 0 && fg && fg->IsActive() && !fg->IsPaused() && fg->OwnsFramePacing()) return;
+    _minimumIntervalUs = DynamicMfgPolicy::LimitUs(fps);
 
     if (_lastSleepDev != nullptr)
     {

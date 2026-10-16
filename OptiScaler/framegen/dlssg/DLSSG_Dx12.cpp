@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <misc/FramePacingTrace.h>
 #include <shaders/hdr/Hdr10.h>
 
 #include "DLSSG_Dx12.h"
@@ -10,6 +11,7 @@
 #include <hooks/Reflex_Hooks.h>
 #include <hooks/Streamline_Hooks.h>
 #include "MfgUnlock.h"
+#include "DynamicMfgPolicy.h"
 #include <misc/ExternalHudless.h>
 #include <hooks/DxgiFactory_Hooks.h>
 
@@ -290,6 +292,7 @@ void DLSSG_Dx12::Activate()
 
 void DLSSG_Dx12::Deactivate()
 {
+    _ownsFramePacing.store(false, std::memory_order_release);
     _historyFrames.Invalidate();
     _sceneHistory.Invalidate();
     for (auto& slot : _guideSnapshots) for (auto& guide : slot) guide.valid = false;
@@ -333,7 +336,15 @@ bool DLSSG_Dx12::Shutdown()
 
 bool DLSSG_Dx12::Dispatch()
 {
+    FramePacingTrace::Scope cpuTiming(FramePacingTrace::Phase::FGDispatch);
     LOG_FUNC();
+    // Publish ownership only after an accepted dispatch. Every failed/paused
+    // dispatch relinquishes it so the ordinary limiter can recover.
+    struct PacingUpdate {
+        std::atomic<bool>& owner;
+        bool accepted = false;
+        ~PacingUpdate() { owner.store(accepted, std::memory_order_release); }
+    } pacing { _ownsFramePacing };
 
     UINT64 willDispatchFrame = 0;
     auto fIndex = GetDispatchIndex(willDispatchFrame);
@@ -356,11 +367,13 @@ bool DLSSG_Dx12::Dispatch()
 
     auto& state = State::Instance();
 
-    if (Config::Instance()->FGDLSSGInterpolationCount.value_or_default() > _maxInterpolationCount)
+    if (Config::Instance()->FGDLSSGInterpolationCount.value_or_default() < 1 ||
+        Config::Instance()->FGDLSSGInterpolationCount.value_or_default() > _maxInterpolationCount)
     {
-        Config::Instance()->FGDLSSGInterpolationCount = _maxInterpolationCount;
-        LOG_WARN("Requested interpolation count is higher than max supported, setting to max: {}",
-                 _maxInterpolationCount);
+        Config::Instance()->FGDLSSGInterpolationCount = std::clamp(
+            Config::Instance()->FGDLSSGInterpolationCount.value_or_default(), 1, std::max(1, _maxInterpolationCount));
+        LOG_WARN("Requested interpolation count is outside the supported range, using: {}",
+                 Config::Instance()->FGDLSSGInterpolationCount.value_or_default());
     }
 
     if (_framesToInterpolate != Config::Instance()->FGDLSSGInterpolationCount.value_or_default())
@@ -376,10 +389,10 @@ bool DLSSG_Dx12::Dispatch()
     options.numFramesToGenerate = _framesToInterpolate;
     options.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
 
-    if (Config::Instance()->FGDLSSGForceDMFG.value_or_default())
+    if (Config::Instance()->FGDLSSGForceDMFG.value_or_default() && _supportsDMFG)
     {
         options.mode = sl::DLSSGMode::eDynamic;
-        options.dynamicTargetFrameRate = Config::Instance()->FGDLSSGFramerateTargetDMFG.value_or_default();
+        options.dynamicTargetFrameRate = DynamicMfgPolicy::Target(Config::Instance()->FGDLSSGFramerateTargetDMFG.value_or_default());
     }
 
     // Separate UI path: without this DLSS-G treats tagged HUD-less / UI images as hints only and still
@@ -455,9 +468,10 @@ bool DLSSG_Dx12::Dispatch()
     // Let Streamline see the same output cap as the user, so dynamic MFG can account for it.
     if (options.mode == sl::DLSSGMode::eDynamic)
     {
-        const float limit = Config::Instance()->FramerateLimit.value_or_default();
-        if (limit > 0.0f && std::isfinite(limit))
-            reflexConst.frameLimitUs = static_cast<uint32_t>(std::clamp(1000000.0 / limit, 1.0, 4294967295.0));
+        reflexConst.frameLimitUs = DynamicMfgPolicy::LimitUs(Config::Instance()->FramerateLimit.value_or_default());
+        // Remove the legacy override before Streamline programs Reflex. This
+        // does not touch driver state or enqueue a second limiter operation.
+        ReflexHooks::clearFPSLimitOverride();
     }
 
     auto reflexSetOptionsResult = StreamlineProxy::ReflexSetOptions()(reflexConst);
@@ -653,6 +667,8 @@ bool DLSSG_Dx12::Dispatch()
     else
         _historyFrames.Invalidate();
 
+    pacing.accepted = DynamicMfgPolicy::OwnsPacing(options.mode == sl::DLSSGMode::eDynamic,
+        dlssgSetOptionsResult == sl::Result::eOk, reflexSetOptionsResult == sl::Result::eOk);
     LOG_DEBUG("Result: Ok");
 
     return true;

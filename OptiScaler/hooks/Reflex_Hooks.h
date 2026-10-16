@@ -1,5 +1,6 @@
 #pragma once
 #include <d3d12.h>
+#include <atomic>
 #include <nvapi/NvApiTypes.h>
 
 #include "Hook_Utils.h"
@@ -21,7 +22,7 @@ enum TimingType : uint32_t
 class ReflexHooks
 {
     inline static bool _inited = false;
-    inline static uint32_t _minimumIntervalUs = 0;
+    inline static std::atomic<uint32_t> _minimumIntervalUs { 0 };
     inline static NV_SET_SLEEP_MODE_PARAMS _lastSleepParams {};
     inline static IUnknown* _lastSleepDev = nullptr;
     inline static uint8_t _FgNumFramesToGenerate = 0;
@@ -87,4 +88,5 @@ class ReflexHooks
 
     // 0 - disables the fps cap
     static void setFPSLimit(float fps);
+    static void clearFPSLimitOverride() { _minimumIntervalUs.store(0, std::memory_order_relaxed); }
 };
