@@ -167,6 +167,23 @@ bool VitDrop(State&s,const Kernel*k,NvU32 count,std::vector<Kernel>&kept)
     for(NvU32 i=0;i<count;++i){
         ++o.launches;
         const auto role=s.vitRole.Lookup(k[i].hFunction,s.allowUnverified);
+        if(role==DlssNrVitReuse::Role::Start && s.allowUnverified &&
+           s.vitRole.Lookup(k[i].hFunction,false)==DlssNrVitReuse::Role::None){
+            // Conservative identity check, without assuming an alternate
+            // runtime's argument layout. Changed/unreadable bindings compute
+            // fully; the verified runtime path remains unchanged.
+            unsigned char bytes[4096];SIZE_T read=0;uint64_t signature=0;
+            if(k[i].pParams && k[i].paramSize && k[i].paramSize<=sizeof(bytes) &&
+               ReadProcessMemory(GetCurrentProcess(),k[i].pParams,bytes,k[i].paramSize,&read) && read==k[i].paramSize){
+                signature=1469598103934665603ull;
+                const auto hash=[&](uint64_t value){for(unsigned b=0;b<8;++b){signature^=(value>>(b*8))&255;signature*=1099511628211ull;}};
+                hash(reinterpret_cast<uintptr_t>(k[i].hFunction));hash(k[i].paramSize);
+                hash(k[i].gridDim.x);hash(k[i].gridDim.y);hash(k[i].gridDim.z);
+                hash(k[i].blockDim.x);hash(k[i].blockDim.y);hash(k[i].blockDim.z);hash(k[i].dynSharedMemBytes);
+                for(SIZE_T b=0;b<read;++b){signature^=bytes[b];signature*=1099511628211ull;}
+            }
+            s.vit.CheckBindings(signature);
+        }
         if(role!=DlssNrVitReuse::Role::None)++o.known;
         else if(auto it=s.observedFunctions.find(k[i].hFunction);it!=s.observedFunctions.end()){
             ++o.unknown;
@@ -250,8 +267,11 @@ void SetPrecision(unsigned precision){auto&s=S();std::lock_guard<std::recursive_
  s.enabled=on;s.candidate=candidate;s.status=candidate?"Candidate hybrid selected; waiting for original model":on?"Hybrid FFN selected; waiting for supported original model":"Original FP8 selected";
 }
 void SetEnabled(bool on){SetPrecision(on?4u:0u);}
+static thread_local ReuseCounts lastReuseEvaluation;
+ReuseCounts LastReuseEvaluation(){return lastReuseEvaluation;}
 void BeginEvaluate(const void*feature,bool reset,unsigned every,bool allowUnverified)
 {
+    lastReuseEvaluation = {};
     auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);
     if(s.allowUnverified!=allowUnverified){
         s.vit.Clear();s.allowUnverified=allowUnverified;
@@ -266,7 +286,10 @@ void EndEvaluate(bool success)
 {
     auto&s=S();std::lock_guard<std::recursive_mutex>g(s.mutex);
     if(!s.vit.Evaluating())return;
-    const auto o=Observation();s.vit.End();if(!success)s.vit.Clear();
+    const auto o=Observation();
+    const ReuseCounts counts{s.vit.EvaluationComputed(),s.vit.EvaluationReused()};
+    const bool wellFormed=s.vit.End();if(!success)s.vit.Clear();
+    lastReuseEvaluation=success && wellFormed ? counts : ReuseCounts{};
     std::string reason;
     if(!success)reason="NR evaluation failed; cached result invalidated";
     else if(s.vit.Disabled())reason="unexpected NR launch order; restart required";

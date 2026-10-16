@@ -1,11 +1,12 @@
 #include "pch.h"
+#include <misc/FramePacingTrace.h>
 #include <shaders/hdr/Hdr10.h>
 #include <shaders/hdr/HdrScreenshot.h>
 #include <misc/FfxivLightingCapture.h>
-#include <misc/companion/Companion.h>
 #include <misc/ExternalHudless.h>
 #include <misc/ExternalHudlessNormalize.h>
 #include <misc/UiPaste.h>
+#include <misc/FfxivPreviewFGMap.h>
 #include <shaders/ui_extract/UE_Dx12.h>
 #include <framegen/IFGFeature_Dx12.h>
 #include "dx11_with_dx12_sc.h"
@@ -315,6 +316,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetDevice(REFIID riid, void** ppDevice)
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 {
+    FramePacingTrace::Scope cpuTiming(FramePacingTrace::Phase::NativePresent);
     if (_real == nullptr || _fgSwapChain == nullptr)
         return DXGI_ERROR_DEVICE_REMOVED;
 
@@ -360,6 +362,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     _TagExternalHudless();
 
     // Builds the image LocalPresent pastes over every DLSS-G output frame (see misc/UiPaste.h).
+    // This runs before the SceneFrame destructor. Publish the matching preview
+    // guide now; normal scene/HDR cleanup must remain after the HUD conversion.
+    FfxivPreviewFGMap::PublishForHudPaste();
     _ProduceUiPaste(hudlessThisFrame, hudlessSlotThisFrame);
     // Failed/invalidated producers must not leave a scene-only base frame without its UI.
     if (_uiFreeThisFrame && !_UiPasteReady()) {
@@ -386,9 +391,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
 
     if (_real != nullptr)
     {
+        FramePacingTrace::Scope hiddenTiming(FramePacingTrace::Phase::HiddenPresent);
         UINT realFlags = Flags;
-
-        // Do not wait for it
         auto realPresentResult = _real->Present(0, realFlags);
 
         if (FAILED(realPresentResult))
@@ -985,36 +989,42 @@ bool Dx11wDx12SC::_CopyDx11BackBufferToShared(UINT index)
     if (_hdrOutput && State::Instance().gameExe == "ffxiv_dx11.exe")
         FfxivHdrPreview::SealFrame();
     _dx11Context->CopyResource(_sharedDx11BackBufferCopies[_currentFakeIndex], sourceTexture);
-    // Bake the diagnostic marks beside the native HUD, once per source frame, before
-    // the interop fence and HDR/FG. A late overlay on each generated Present can pair
-    // newer CPU coordinates with an older HUD image and appear to wander.
-    if (State::Instance().gameExe == "ffxiv_dx11.exe")
-        FfxivCompanion::DrawSourceMarkers(_dx11Context, _sharedDx11BackBufferCopies[_currentFakeIndex]);
     sourceTexture->Release();
     return true;
 }
 
 bool Dx11wDx12SC::_WaitDx11ThenDx12()
 {
+    FramePacingTrace::Scope cpuTiming(FramePacingTrace::Phase::InteropSubmit);
     if (_dx11Context4 == nullptr || _dx11Fence == nullptr || _dx12CommandQueue == nullptr ||
         _dx12SharedFence == nullptr)
         return false;
 
     const auto waitValue = _sharedFenceValue++;
 
-    auto result = _dx11Context4->Signal(_dx11Fence, waitValue);
+    HRESULT result;
+    {
+        FramePacingTrace::Scope signalTiming(FramePacingTrace::Phase::InteropSignal);
+        result = _dx11Context4->Signal(_dx11Fence, waitValue);
+    }
     if (FAILED(result))
     {
         LOG_ERROR("DX11 Signal failed: {:X}", (UINT) result);
         return false;
     }
 
-    _dx11Context4->Flush();
+    {
+        FramePacingTrace::Scope flushTiming(FramePacingTrace::Phase::InteropFlush);
+        _dx11Context4->Flush();
+    }
 
     // Important:
     // Do not block the FG/present queue on the D3D11 shared fence.
     // Isolate the cross-API wait on the interop copy queue.
-    result = _dx12CommandQueue->Wait(_dx12SharedFence, waitValue);
+    {
+        FramePacingTrace::Scope queueTiming(FramePacingTrace::Phase::InteropQueueWait);
+        result = _dx12CommandQueue->Wait(_dx12SharedFence, waitValue);
+    }
     if (FAILED(result))
     {
         LOG_ERROR("interop copy queue Wait on D3D11 fence failed: {:X}", (UINT) result);
@@ -1026,6 +1036,7 @@ bool Dx11wDx12SC::_WaitDx11ThenDx12()
 
 bool Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
 {
+    FramePacingTrace::Scope cpuTiming(FramePacingTrace::Phase::CopyAllocatorWait);
     if (_copySubmissionFailed) return false;
 
     if (slot >= _copyAllocatorFenceValues.size())
@@ -1140,6 +1151,9 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     if (_hdrOutput)
     {
         auto scene=FfxivSceneHdr::Open(_dx12Device,(UINT)copySource->GetDesc().Width,copySource->GetDesc().Height);
+        // REST removed the HUD from this source. Its native UI transmittance
+        // must not alter the underlying world before the real HUD is pasted.
+        if (hudlessSource) scene.previewMask.Reset();
         copySource = Hdr10::Convert(_dx12Device, _copyCommandLists[copySlot], copySource, sourceBefore,scene);
         if(copySource && Config::Instance()->FfxivHDRMode.value_or_default()==1 && _fg && _fg->IsActive()){
             // The original HUD-less copy was recorded on the upscaler list.
@@ -1150,7 +1164,9 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
             {auto input=_fg->GetResource(FG_ResourceType::HudlessColor,frame);
              if(input && !input->hdrEncoded){hudless=*input.resource;nativeHudless=input->GetResource();}}
             if(nativeHudless){
-                auto* hdrHudless=Hdr10::Convert(_dx12Device,_copyCommandLists[copySlot],nativeHudless.Get(),hudless.state,scene);
+                auto hudlessScene=scene;
+                hudlessScene.previewMask.Reset();
+                auto* hdrHudless=Hdr10::Convert(_dx12Device,_copyCommandLists[copySlot],nativeHudless.Get(),hudless.state,std::move(hudlessScene));
                 if(hdrHudless){hudless.resource=hdrHudless;hudless.copy=nullptr;hudless.hdrEncoded=true;
                     hudless.cmdList=_copyCommandLists[copySlot];hudless.state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
                     hudless.validity=FG_ResourceValidity::ValidNow;hudless.frameIndex=frame;
@@ -1168,16 +1184,17 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
 
     _copyCommandLists[copySlot]->CopyResource(fgBackBuffer, copySource);
     // SDR captures preserve the pre-HDR ReShade image; HDR captures use the
-    // converted frame. Opti's menu and external Companion window are later.
+    // converted frame. Opti's menu is drawn later.
     // REST can make the FG presentation source HUD-less. A screenshot must
     // instead convert the complete native SDR frame, including its actual UI.
     ID3D12Resource* screenshotSource=copySource;
-    if(_hdrOutput && hudlessSource && Hdr10::Screenshot::PendingHDR()){
+    const bool captureMenu = Hdr10::Screenshot::CaptureMenu();
+    if(_hdrOutput && hudlessSource && !captureMenu && Hdr10::Screenshot::PendingHDR()){
         auto scene=FfxivSceneHdr::Open(_dx12Device,(UINT)_openedDx11BackBuffers[copySlot]->GetDesc().Width,_openedDx11BackBuffers[copySlot]->GetDesc().Height);
         auto* complete=Hdr10::Convert(_dx12Device,_copyCommandLists[copySlot],_openedDx11BackBuffers[copySlot],_openedDx11BackBufferStates[copySlot],std::move(scene));
         if(complete){screenshotSource=complete;TransitionResource(_copyCommandLists[copySlot],complete,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE);}
     }
-    auto hdrCapture = _hdrOutput ? Hdr10::Screenshot::Prepare(_handle, _dx12Device,
+    auto hdrCapture = _hdrOutput && !captureMenu ? Hdr10::Screenshot::Prepare(_handle, _dx12Device,
         _copyCommandLists[copySlot], screenshotSource, _openedDx11BackBuffers[copySlot],
         _openedDx11BackBufferStates[copySlot]) : nullptr;
     if(screenshotSource!=copySource)TransitionResource(_copyCommandLists[copySlot],screenshotSource,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1841,7 +1858,7 @@ void Dx11wDx12SC::_ProduceUiPaste(bool hudlessReady, UINT slot)
 
     if (!hudlessReady)
     {
-        UiPaste::Invalidate("No HUD-less image this frame");
+        UiPaste::MissingSample();
         return;
     }
 

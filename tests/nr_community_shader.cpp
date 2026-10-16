@@ -56,6 +56,34 @@ int wmain(int argc,wchar_t** argv) try {
     expect(argc==4);Runner r(argv);
     static_assert(sizeof(DlssNrConstants)==256);
     static_assert(offsetof(DlssNrConstants,SpatialWarp)==144);
+    {
+        const std::vector<float> pixels{.06f,.5f,1.5f,.3f,3.f,1.f,.4f,.8f};
+        auto source=r.make(2,1,4,pixels), proxy=r.make(2,1,4),keep=r.make(2,1,4);
+        DlssNrConstants linear{};linear.Mode=DlssNrMode_Encode;linear.Width=2;linear.Height=1;
+        linear.WhitePoint=2;linear.ReversibleMode=5;
+        r.run(linear,source,source,source,proxy,keep);
+        auto packed=r.read(proxy), untouched=r.read(keep);
+        for(size_t i=0;i<pixels.size();++i){
+            expect(std::abs(untouched[i]-pixels[i])<1e-6f);
+            expect(std::abs(packed[i]-(i%4==3?1.f:std::clamp(pixels[i]/2,0.f,1.f)))<1e-6f);
+        }
+        // A neutral model answer must preserve sub-white colour and original
+        // alpha, including matched residual reconstruction at another size.
+        const std::vector<float> neutral{.03f,.25f,.75f,.4f,.12f,.5f,.9f,.8f};
+        auto original=r.make(2,1,4,neutral), encoded=r.make(2,1,4),retained=r.make(2,1,4),out=r.make(2,1,4);
+        linear.WhitePoint=1;r.run(linear,original,original,original,encoded,retained);
+        for(unsigned transfer:{0u,1u}){
+            linear.Mode=DlssNrMode_Resolve;linear.ApplyModel=1;linear.Transfer=transfer;
+            linear.TransferStrength=1;linear.ColourStrength=1;linear.MaxRatio=3;
+            r.run(linear,encoded,encoded,retained,out,keep);auto restored=r.read(out);
+            for(size_t i=0;i<neutral.size();++i)expect(std::abs(restored[i]-neutral[i])<.0002f);
+        }
+        // An SDR passthrough frame ignores the linear mapping choice.
+        linear.Mode=DlssNrMode_Encode;linear.Passthrough=1;
+        r.run(linear,original,original,original,encoded,retained);auto bypass=r.read(encoded);
+        for(size_t i=0;i<neutral.size();++i)expect(bypass[i]==neutral[i]);
+        puts("PASS: linear NR proxy stores per-channel normalized light, clips input only, preserves original RGB/alpha, neutral resolve and SDR passthrough");
+    }
     // Actual typed scalar/RG UAVs and independent offset/padded source regions.
     std::vector<float> dep(16*10), mv(20*12*2);
     for(unsigned y=0;y<10;++y)for(unsigned x=0;x<16;++x)dep[y*16+x]=float(x+100*y);
@@ -87,7 +115,7 @@ int wmain(int argc,wchar_t** argv) try {
         layout.ordinaryW=320;layout.ordinaryH=160;
         auto sc=MakeConstants(layout,102,{{0,0,320,160},{0,0,320,160}},1,1,320,160);
         DlssNrConstants bytes{};std::memcpy(&bytes,&sc,sizeof(sc));r.run(bytes,p,a,o,up,ua,1);
-        for(unsigned hdr : {0u,1u})for(unsigned mode : {0u,1u,2u,3u,4u})for(float strength : {0.f,1.f,2.f}) {
+        for(unsigned hdr : {0u,1u})for(unsigned mode : {0u,1u,2u,3u,4u,5u})for(float strength : {0.f,1.f,2.f}) {
             k={};k.Mode=DlssNrMode_Resolve;k.Width=320;k.Height=160;k.WhitePoint=1;
             k.Passthrough=hdr?0:1;k.ApplyModel=1;k.Transfer=1;k.SpatialResidual=1;k.ReversibleMode=mode;
             k.TransferStrength=strength;k.ColourStrength=1;k.MaxRatio=3;

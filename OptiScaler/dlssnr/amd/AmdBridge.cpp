@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "AmdBridge.h"
+#include <dlssnr/NrFocusPolicy.h>
 #include "AmdPreSr.h"
 #include "AmdPrerequisites.h"
 
@@ -180,6 +181,11 @@ ID3D12Resource* Prepare(ID3D12GraphicsCommandList* commandList, NVSDK_NGX_Parame
                         ID3D12CommandQueue* queue, unsigned int featureFlags, bool interop)
 {
     std::lock_guard frameLock(frameMutex);
+    if (FocusPolicy::Paused(Config::Instance()->DlssNrPauseOnFocusLoss.value_or_default()))
+    {
+        InvalidateHistory();
+        return nullptr;
+    }
     if (!commandList || !parameters)
         return nullptr;
 

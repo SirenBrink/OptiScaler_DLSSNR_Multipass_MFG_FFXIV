@@ -25,12 +25,19 @@ int main(int argc, char** argv)
     c.DlssNrSpatialWorkX = 87.0f;
     c.DlssNrVitEvery = 2u;
     c.DlssNrPassFeedback = 0.5f;
+    c.DlssNrReversibleMode = 5u;
     const auto elaborate = Capture(c);
     Apply(defaults, c);
     assert(Capture(c) == defaults && !c.DlssNrPass2Intensity.has_value());
     Apply(elaborate, c);
     assert(Capture(c) == elaborate && c.DlssNrExtraPasses[26].intensity.value() == 1.75f);
     assert(!c.DlssNrExtraPasses[25].intensity.has_value());
+    assert(c.DlssNrReversibleMode.value() == 5u);
+    auto invalidMapping = elaborate;
+    invalidMapping["ReversibleMode"] = 6u;
+    bool invalidMappingRejected = false;
+    try { Apply(invalidMapping, c); } catch (...) { invalidMappingRejected = true; }
+    assert(invalidMappingRejected && Capture(c) == elaborate);
     c.DlssNrToggleKey = 123;
     c.DlssNrHoldFrame = true;
     for (const auto& badValue : {Json(-1), Json(1.5), Json("two"), Json(1000)})

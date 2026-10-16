@@ -1,3 +1,5 @@
+> Retired: the FFXIV Companion integration has been removed. These notes describe historical tests; use REST HUD isolation instead.
+
 # Independent nameplate replacement test
 
 Companion 0.1.1 is unchanged. In the OptiScaler Companion section, use

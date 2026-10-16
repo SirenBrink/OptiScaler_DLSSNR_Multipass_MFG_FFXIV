@@ -99,6 +99,7 @@ class IFGFeature
     virtual feature_version Version() = 0;
     virtual const char* Name() = 0;
 
+    virtual bool OwnsFramePacing() const { return false; }
     virtual bool Present() = 0;
     virtual void Activate() = 0;
     virtual void Deactivate() = 0;

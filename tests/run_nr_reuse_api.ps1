@@ -12,7 +12,7 @@ function Extract([string]$signature){
  if($depth){throw 'Unclosed function'}
  $taskSource.Substring($start,$end-$start)
 }
-$taskExtract=(Extract 'template<class Kernel>')+"`n"+(Extract 'NvAPI_Status __cdecl LaunchEx(')+"`n"+(Extract 'void BeginEvaluate(')
+$taskExtract="using DlssNrNative::ReuseCounts;`nstatic thread_local ReuseCounts lastReuseEvaluation;`n"+(Extract 'ReuseCounts LastReuseEvaluation(')+"`n"+(Extract 'template<class Kernel>')+"`n"+(Extract 'NvAPI_Status __cdecl LaunchEx(')+"`n"+(Extract 'void BeginEvaluate(')+"`n"+(Extract 'void EndEvaluate(')
 [IO.File]::WriteAllText("$taskBuild/nr_reuse_api_production.inl",$taskExtract)
 & cl /nologo /std:c++20 /EHsc /W4 "/I$NvapiInclude" "/I$taskBuild" "/Fo$taskBuild/test.obj" "/Fe$taskBuild/test.exe" "$PSScriptRoot/nr_reuse_api.cpp"
 if($LASTEXITCODE -ne 0){throw 'Reuse API compile failed'}

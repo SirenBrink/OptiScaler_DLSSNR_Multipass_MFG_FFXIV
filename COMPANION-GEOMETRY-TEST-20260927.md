@@ -1,3 +1,5 @@
+> Retired: the FFXIV Companion integration has been removed. These notes describe historical tests; use REST HUD isolation instead.
+
 # Companion owned GPU geometry test
 
 This extends the accepted Companion 0.1.1 native-command substitution test. It is

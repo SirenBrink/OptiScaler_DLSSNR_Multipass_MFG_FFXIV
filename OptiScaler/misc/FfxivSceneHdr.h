@@ -1,3 +1,4 @@
+#include "FfxivPreviewDLSS.h"
 #pragma once
 #include <d3d11_1.h>
 #include <d3d12.h>
@@ -214,5 +215,5 @@ inline void CollectLocked(Data& s,bool keepWarm,ULONGLONG now) {
         return !keepWarm || now-p->lastUse>=2000;
     });
 }
-inline void EndFrame(){auto& s=State();std::lock_guard lock(s.mutex);s.aliases.clear();s.latest.reset();s.reconstructed={};FfxivHdrPreview::EndFrame();CollectLocked(s,Requested(),GetTickCount64());}
+inline void EndFrame(){FfxivPreviewDLSS::Tick();auto& s=State();std::lock_guard lock(s.mutex);s.aliases.clear();s.latest.reset();s.reconstructed={};FfxivHdrPreview::EndFrame();CollectLocked(s,Requested(),GetTickCount64());}
 }

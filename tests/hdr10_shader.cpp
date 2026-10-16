@@ -205,5 +205,31 @@ int main()try{
   c->Unmap(read.Get(),0);
  }
  puts("PASS: almost opaque preview bounds background HDR by native transmittance; no foreground colour gain from extreme world highlights");
+ // A faint native UI glow must approach the unchanged world continuously.
+ // Before this fix its almost invisible edge expanded the entire background
+ // as UI and then added scene HDR again, creating a bright halo/panel flash.
+ for(int x=0;x<260;++x)for(int channel=0;channel<3;++channel){
+  pixels[x*4+channel]=.85f;referencePixels[x*4+channel]=.85f;scenePixels[x*4+channel]=2.f;
+  maskPixels[x*4+channel]=x/259.f;
+ }
+ c->UpdateSubresource(src.Get(),0,nullptr,pixels.data(),260*16,0);
+ c->UpdateSubresource(reference.Get(),0,nullptr,referencePixels.data(),260*16,0);
+ c->UpdateSubresource(scene.Get(),0,nullptr,scenePixels.data(),260*16,0);
+ c->UpdateSubresource(mask.Get(),0,nullptr,maskPixels.data(),260*16,0);
+ k.expand=1;k.pad[0]=1;k.reshadeHighlights=0;k.peak=1100;
+ c->UpdateSubresource(cb.Get(),0,nullptr,&k,0,0);
+ c->CSSetUnorderedAccessViews(0,1,uav.GetAddressOf(),nullptr);c->Dispatch(33,1,1);
+ c->CSSetUnorderedAccessViews(0,1,&nullU,nullptr);c->CopyResource(read.Get(),dst.Get());
+ check(c->Map(read.Get(),0,D3D11_MAP_READ,0,&mapped));
+ auto* ramp=(unsigned*)mapped.pData;
+ const double opaqueUI=decode(ramp[0]&1023),uncoveredWorld=decode(ramp[259]&1023);
+ expect(uncoveredWorld>opaqueUI);
+ for(int x=0;x<260;++x){
+  const double luminance=decode(ramp[x]&1023);
+  expect(luminance>=opaqueUI-1 && luminance<=uncoveredWorld+1);
+ }
+ expect(fabs(decode(ramp[258]&1023)-uncoveredWorld)<uncoveredWorld*.01);
+ c->Unmap(read.Get(),0);
+ puts("PASS: native UI alpha ramp stays bounded and approaches the uncovered HDR world without halos or brightness jumps");
  return 0;
 }catch(const std::exception&e){puts(e.what());return 1;}

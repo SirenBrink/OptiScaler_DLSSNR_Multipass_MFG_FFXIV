@@ -238,9 +238,6 @@ class Config
     CustomOptional<bool, NoDefault> DisableReactiveMask;
     CustomOptional<float> DlssReactiveMaskBias { 0.45f };
 
-    // Optional Companion nameplate layer. Both features are opt-in.
-    CustomOptional<bool> CompanionHudReplacement { false };
-    CustomOptional<bool> CompanionHudInterpolation { false };
 
     // Logging
     CustomOptional<bool> LogToFile { false };
@@ -330,7 +327,8 @@ class Config
 
     // The RenoDX reversible proxy mode. 0 = today's soft-knee encode + our composition (default,
     // byte-identical); 1 = unclipped Neutwo proxy + our composition; 2 = Neutwo proxy + pure-inverse
-    // replace. An in-game A/B and a way back. Default 0 = byte-identical to before.
+    // replace; 3/4 = hybrid composed/replace; 5 = direct linear + composed.
+    // Default 0 preserves the original mapping.
     CustomOptional<uint32_t> DlssNrReversibleMode { 0 };
 
     // Whether the model's edit is applied. Off keeps the pass running (so Hold frame works) but shows
@@ -548,6 +546,7 @@ class Config
     CustomOptional<float> DlssNrSpatialShiftY { 0.0f };
     CustomOptional<float> DlssNrPassFeedback { 1.0f };
     CustomOptional<uint32_t> DlssNrVitEvery { 1 };
+    CustomOptional<bool> DlssNrPauseOnFocusLoss { false };
     CustomOptional<bool> DlssNrVitAllowUnverified { false };
     CustomOptional<bool> DlssNrVitFirstPassOnly { true };
 
@@ -1071,6 +1070,14 @@ class Config
     CustomOptional<bool> FfxivHDR { false };
     CustomOptional<bool> FfxivHDRReShadeHighlights { false };
     CustomOptional<bool> FfxivHDRNRSceneInput { false };
+    CustomOptional<bool> FfxivPreviewNRTrace { false }; // Temporary preview discovery; INI only.
+    CustomOptional<bool> FfxivPreviewAA { false };
+    CustomOptional<bool> FfxivPreviewDLSS { false };
+    CustomOptional<bool> FfxivPreviewNR { false };
+    CustomOptional<bool> FfxivPreviewNRReuse { false };
+    CustomOptional<bool> FfxivPreviewFG { false };
+    CustomOptional<bool> FfxivPreviewUpscale { true };
+    CustomOptional<bool> FfxivPreviewGuideCapture { false }; // Temporary, bounded shader/binding capture.
     CustomOptional<bool> FfxivHDRDLSSSceneInput { false };
     CustomOptional<int> FfxivHDRMode { 0 }; // 0: SDR expansion, 1: RenoDX scene HDR
     CustomOptional<float> FfxivHDRPeak { 1100.0f };
@@ -1081,6 +1088,7 @@ class Config
     CustomOptional<float> FfxivHDRVibrance { 0.0f };
     CustomOptional<int> FfxivHDRScreenshotKey { UnboundKey };
     CustomOptional<bool> FfxivHDRScreenshotIccOnly { false };
+    CustomOptional<bool> FfxivHDRScreenshotMenu { false };
     CustomOptional<int> FfxivHDRScreenshotFormat { 0 }; // 0: SDR PNG, 1: HDR PNG
     CustomOptional<bool> ForceHDR { false };
     CustomOptional<bool> UseHDR10 { false };

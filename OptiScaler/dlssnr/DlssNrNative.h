@@ -6,6 +6,8 @@ void SetEnabled(bool enabled);
 void SetPrecision(unsigned precision);
 void BeginEvaluate(const void* feature, bool reset, unsigned every, bool allowUnverified = false);
 void EndEvaluate(bool success = true);
+struct ReuseCounts { unsigned computed = 0, reused = 0; };
+ReuseCounts LastReuseEvaluation(); // calling thread's last completed evaluation
 // The stable policy recomputes downstream passes; disabling it restores all-pass reuse.
 inline unsigned ReuseEveryForPass(unsigned pass, unsigned requestedEvery, bool firstPassOnly = true)
 {

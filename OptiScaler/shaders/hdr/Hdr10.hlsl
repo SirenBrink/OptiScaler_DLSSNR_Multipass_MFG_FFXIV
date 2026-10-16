@@ -83,7 +83,17 @@ float3 MapScenePeak(float3 value) {
             float3 background=neutral*PaperWhite;
             float3 backgroundHdr=MapScenePeak(background*max(scale,1));
             float3 backgroundSdr=MapScenePeak(background);
-            extended=MapScenePeak(ui)+max(backgroundHdr-backgroundSdr,0)*coverage*transmittance;
+            float3 compositeSdr=MapScenePeak(rgb);
+            float3 uiExtra=max(MapScenePeak(ui)-compositeSdr,0);
+            // Only the foreground receives the UI expansion. Applying it to
+            // the whole SDR composite produced a brightness discontinuity as
+            // alpha approached zero (soft text glows and fading panels).
+            extended=compositeSdr+uiExtra*(1-transmittance)
+                +max(backgroundHdr-backgroundSdr,0)*coverage*transmittance;
+            // Keep the zero-alpha limit identical to the ordinary scene path,
+            // including post-ReShade grading and the reference transfer curve.
+            float3 uncovered=MapScenePeak(lerp(ui,rgb*max(scale,1),coverage));
+            extended=lerp(extended,uncovered,smoothstep(.96,1,transmittance));
             float high=max(extended.r,max(extended.g,extended.b));
             if(high>Peak)extended*=Peak/high;
         } else {

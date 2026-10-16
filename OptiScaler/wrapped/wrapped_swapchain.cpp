@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <misc/FramePacingTrace.h>
 #include "wrapped_swapchain.h"
 #include <hooks/DxgiSwapchainSizing.h>
 
@@ -151,6 +152,7 @@ void ReportD3D12LiveObjects(ID3D12Device* device)
 static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
                             const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP)
 {
+    FramePacingTrace::Scope cpuTiming(FramePacingTrace::Phase::OutputPresent);
     if (State::Instance().isShuttingDown)
     {
         if (pPresentParameters == nullptr)
@@ -411,6 +413,9 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     }
 
     LOG_DEBUG("Calling original present");
+
+    if (willPresent && !isD3D11)
+        UiPaste::FinishPresentDiagnostics();
 
     // swapchain present
     if (pPresentParameters == nullptr)

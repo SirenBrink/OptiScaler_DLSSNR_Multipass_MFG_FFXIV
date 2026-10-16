@@ -9,9 +9,14 @@
 #include <filesystem>
 #include "FfxivLightingScan.h"
 #include "FfxivSceneHdr.h"
+#include "FfxivPreviewTrace.h"
+#include "FfxivPreviewEnhance.h"
+#include "FfxivPreviewGuides.h"
+#include "FfxivPreviewMotion.h"
+#include "FfxivPreviewDLSS.h"
+#include <unordered_set>
+#include <mutex>
 #include <Config.h>
-#include "companion/CompanionGpu.h"
-#include "companion/CompanionLayer.h"
 
 // Native exposure scan hooks. Signatures identify the game's
 // shaders, extracted read-only from SqPack on 2026-09-23. No engine RVA is hooked.
@@ -55,12 +60,13 @@ inline UINT Identify(const void* input, size_t size)
     return 0;
 }
 using Create = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*,const void*,SIZE_T,ID3D11ClassLinkage*,ID3D11PixelShader**);
-using CreateLayout = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*,const D3D11_INPUT_ELEMENT_DESC*,UINT,const void*,SIZE_T,ID3D11InputLayout**);
-inline CreateLayout createLayout=nullptr;
-inline HRESULT STDMETHODCALLTYPE OnCreateLayout(ID3D11Device* d,const D3D11_INPUT_ELEMENT_DESC* desc,UINT count,const void* code,SIZE_T size,ID3D11InputLayout** out)
+using CreateVertex = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*,const void*,SIZE_T,ID3D11ClassLinkage*,ID3D11VertexShader**);
+inline CreateVertex createVertex=nullptr;
+inline HRESULT STDMETHODCALLTYPE OnCreateVertex(ID3D11Device* d,const void* code,SIZE_T size,ID3D11ClassLinkage* link,ID3D11VertexShader** out)
 {
-    auto hr=createLayout(d,desc,count,code,size,out);
-    if(SUCCEEDED(hr) && out && *out) FfxivCompanion::Layer::TagLayout(*out,desc,count,code,size);
+    const auto hr=createVertex(d,code,size,link,out);
+    if(SUCCEEDED(hr) && out && *out && Config::Instance()->FfxivPreviewGuideCapture.value_or_default())
+        FfxivPreviewGuides::Tag(*out,code,size);
     return hr;
 }
 using Draw = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,UINT,UINT);
@@ -77,30 +83,87 @@ inline Copy copy=nullptr;inline CopyRegion copyRegion=nullptr;
 inline void STDMETHODCALLTYPE OnCopy(ID3D11DeviceContext* c,ID3D11Resource* dest,ID3D11Resource* source)
 {
     copy(c,dest,source);
+    if(c==context)FfxivPreviewDLSS::Copy(c,dest,source,true);
+    if(context && !inside && Config::Instance()->FfxivPreviewNRTrace.value_or_default())FfxivPreviewTrace::Copy(dest,source,true);
     if(c==context && !inside){FfxivLightingScan::ColorCopy(dest,source,true);FfxivSceneHdr::Copy(dest,source,true);}
 }
 inline void STDMETHODCALLTYPE OnCopyRegion(ID3D11DeviceContext* c,ID3D11Resource* dest,UINT sub,UINT x,UINT y,UINT z,ID3D11Resource* source,UINT from,const D3D11_BOX* box)
 {
     copyRegion(c,dest,sub,x,y,z,source,from,box);
+    if(c==context)FfxivPreviewDLSS::Copy(c,dest,source,!sub && !from && !x && !y && !z && !box);
+    if(context && !inside && Config::Instance()->FfxivPreviewNRTrace.value_or_default())FfxivPreviewTrace::Copy(dest,source,!sub && !from && !x && !y && !z && !box);
     if(c==context && !inside){const bool full=!sub && !from && !x && !y && !z && !box;FfxivLightingScan::ColorCopy(dest,source,full);FfxivSceneHdr::Copy(dest,source,full);}
+}
+using ClearTarget=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11RenderTargetView*,const FLOAT*);
+using ClearDepth=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11DepthStencilView*,UINT,FLOAT,UINT8);
+using Query=void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,ID3D11Asynchronous*);
+inline ClearTarget clearTarget=nullptr;
+inline ClearDepth clearDepth=nullptr;
+inline Query beginQuery=nullptr,endQuery=nullptr;
+inline std::mutex queryMutex;
+inline std::unordered_set<ID3D11Asynchronous*> queries;
+inline void STDMETHODCALLTYPE OnBeginQuery(ID3D11DeviceContext* c,ID3D11Asynchronous* q) {
+    if(c==context) {
+        ComPtr<ID3D11Query> query;D3D11_QUERY_DESC desc{};
+        const bool known=q && SUCCEEDED(q->QueryInterface(IID_PPV_ARGS(&query)));
+        if(known)query->GetDesc(&desc);
+        if(!known || FfxivPreviewMotion::BlocksReplay(desc.Query)) {
+            std::lock_guard lock(queryMutex);queries.insert(q);FfxivPreviewMotion::activeQueries.store(UINT(queries.size()));
+        }
+    }
+    beginQuery(c,q);
+}
+inline void STDMETHODCALLTYPE OnEndQuery(ID3D11DeviceContext* c,ID3D11Asynchronous* q) {
+    endQuery(c,q);
+    if(c==context){std::lock_guard lock(queryMutex);queries.erase(q);FfxivPreviewMotion::activeQueries.store(UINT(queries.size()));}
+}
+inline void STDMETHODCALLTYPE OnClearTarget(ID3D11DeviceContext* c,ID3D11RenderTargetView* target,const FLOAT* value) {
+    if(c==context && !inside && !FfxivPreviewMotion::replaying && Config::Instance()->FfxivPreviewGuideCapture.value_or_default())
+        FfxivPreviewMotion::Clear(c,target);
+    clearTarget(c,target,value);
+}
+inline void STDMETHODCALLTYPE OnClearDepth(ID3D11DeviceContext* c,ID3D11DepthStencilView* target,UINT flags,FLOAT value,UINT8 stencil) {
+    clearDepth(c,target,flags,value,stencil);
+    if(c==context)FfxivPreviewDLSS::ClearDepth(c,target,flags);
 }
 inline HRESULT STDMETHODCALLTYPE CreateShader(ID3D11Device* d,const void* code,SIZE_T size,ID3D11ClassLinkage* link,ID3D11PixelShader** out)
 {
     auto hr=create(d,code,size,link,out);
-    if (SUCCEEDED(hr) && out && *out) FfxivCompanion::Gpu::TagShader(*out, code, size);
-    if (SUCCEEDED(hr) && out && *out) FfxivCompanion::Layer::TagPixel(*out, code, size);
+    if(SUCCEEDED(hr) && out && *out && Config::Instance()->FfxivPreviewGuideCapture.value_or_default())
+        FfxivPreviewGuides::Tag(*out,code,size);
     if (SUCCEEDED(hr) && out && *out)
         if (auto id=Identify(code,size))
         {
             if (SUCCEEDED((*out)->SetPrivateData(tag,sizeof(id),&id))) ++created[id-1];
         }
     if (SUCCEEDED(hr) && out && *out && code && size>=32 && !std::memcmp(code,"DXBC",4))
-        FfxivSceneHdr::Tag(*out,Crc(code,size));
+    {
+        auto crc=Crc(code,size);FfxivSceneHdr::Tag(*out,crc);FfxivPreviewMotion::Tag(*out,crc);FfxivPreviewDLSS::Tag(*out,crc);
+        if(crc==2067850010u || Config::Instance()->FfxivPreviewNRTrace.value_or_default())FfxivPreviewTrace::Shader(*out,crc);
+        if(crc==2067850010u)LOG_INFO("CharaView enhancement: equipment display shader tagged");
+    }
     return hr;
 }
-template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&& original)
+template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&& nativeDraw)
 {
-    if(c==context && !inside) FfxivCompanion::Layer::Observe(c);
+    if(FfxivPreviewEnhance::processing || FfxivPreviewMotion::replaying){nativeDraw();return;}
+    if(c==context && !inside && Config::Instance()->FfxivPreviewGuideCapture.value_or_default())
+        FfxivPreviewGuides::Observe(c);
+    auto enhanced=[&] {
+        if(Config::Instance()->FfxivPreviewDLSS.value_or_default())FfxivPreviewDLSS::Draw(c,nativeDraw);
+        else if(Config::Instance()->FfxivPreviewAA.value_or_default())
+            FfxivPreviewEnhance::Around(c,Config::Instance()->FfxivPreviewUpscale.value_or_default(),nativeDraw);
+        else nativeDraw();
+    };
+    auto original=[&] {
+        if(c==context && Config::Instance()->FfxivPreviewGuideCapture.value_or_default() && !Config::Instance()->FfxivPreviewDLSS.value_or_default())
+            FfxivPreviewMotion::Around(c,enhanced);
+        else enhanced();
+    };
+    if(context && !inside && Config::Instance()->FfxivPreviewNRTrace.value_or_default()) {
+        FfxivPreviewTrace::Observe(c);
+        if(c==context)FfxivPreviewTrace::Report(c,true);
+    }
     const bool wanted=Config::Instance()->DlssNrWhitePointSource.value_or_default()==2;
     if (!inside && c==context && FfxivSceneHdr::Requested()) {
         struct HdrGuard { HdrGuard(){inside=true;} ~HdrGuard(){inside=false;} } guard;
@@ -108,7 +171,10 @@ template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&&
         if(id==6 || !wanted)FfxivLightingScan::Tick(c,wanted);
         FfxivLightingScan::Before(c,id);
         UINT hdrStage=0,hdrBytes=sizeof(hdrStage);if(ps)ps->GetPrivateData(FfxivSceneHdr::shaderTag,&hdrBytes,&hdrStage);
-        if(hdrStage==6)FfxivHdrPreview::BeforeDraw(c,original);
+        if(hdrStage==6){
+            if(Config::Instance()->FfxivPreviewNRTrace.value_or_default())FfxivPreviewTrace::Report(c);
+            FfxivHdrPreview::BeforeDraw(c,original);
+        }
         original();FfxivLightingScan::After(c,id);
         FfxivSceneHdr::AfterDraw(c,original);return;
     }
@@ -129,17 +195,12 @@ template<class F> inline void Around(ID3D11DeviceContext* c,const char* kind,F&&
 inline void STDMETHODCALLTYPE OnDraw(ID3D11DeviceContext* c,UINT n,UINT start) { Around(c,"Draw",[&]{draw(c,n,start);}); }
 inline void STDMETHODCALLTYPE OnIndexed(ID3D11DeviceContext* c,UINT n,UINT start,INT b)
 {
-    if(c==context && !inside && FfxivCompanion::Layer::InterceptVisibilityIndexed(c,n,start,b,indexed))return;
-    auto normal = [&]{ Around(c,"DrawIndexed",[&]{indexed(c,n,start,b);}); };
-    if (c == context && !inside) FfxivCompanion::Gpu::AroundIndexed(c,n,start,normal);
-    else normal();
+    Around(c,"DrawIndexed",[&]{indexed(c,n,start,b);});
 }
 inline void STDMETHODCALLTYPE OnInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,UINT f) { Around(c,"DrawInstanced",[&]{instanced(c,n,i,start,f);}); }
 inline void STDMETHODCALLTYPE OnIndexedInstanced(ID3D11DeviceContext* c,UINT n,UINT i,UINT start,INT b,UINT f)
 {
-    auto normal = [&]{ Around(c,"DrawIndexedInstanced",[&]{indexedInstanced(c,n,i,start,b,f);}); };
-    if (c == context && !inside && i) FfxivCompanion::Gpu::AroundIndexed(c,n,start,normal);
-    else normal();
+    Around(c,"DrawIndexedInstanced",[&]{indexedInstanced(c,n,i,start,b,f);});
 }
 inline void STDMETHODCALLTYPE OnIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { Around(c,"DrawInstancedIndirect",[&]{indirect(c,b,o);}); }
 inline void STDMETHODCALLTYPE OnIndexedIndirect(ID3D11DeviceContext* c,ID3D11Buffer* b,UINT o) { Around(c,"DrawIndexedInstancedIndirect",[&]{indexedIndirect(c,b,o);}); }
@@ -151,26 +212,33 @@ inline void Install(ID3D11Device* d)
     ComPtr<ID3D11DeviceContext> c; d->GetImmediateContext(&c); if (!c) return;
     auto dv=*reinterpret_cast<void***>(d), cv=*reinterpret_cast<void***>(c.Get());
     create=reinterpret_cast<Create>(dv[15]); draw=reinterpret_cast<Draw>(cv[13]); indexed=reinterpret_cast<Indexed>(cv[12]);
-    createLayout=reinterpret_cast<CreateLayout>(dv[11]);
+    createVertex=reinterpret_cast<CreateVertex>(dv[12]);
     instanced=reinterpret_cast<Instanced>(cv[21]); indexedInstanced=reinterpret_cast<IndexedInstanced>(cv[20]);
     indirect=reinterpret_cast<Indirect>(cv[40]); indexedIndirect=reinterpret_cast<Indirect>(cv[39]);
+    clearTarget=reinterpret_cast<ClearTarget>(cv[50]);beginQuery=reinterpret_cast<Query>(cv[27]);endQuery=reinterpret_cast<Query>(cv[28]);
+    clearDepth=reinterpret_cast<ClearDepth>(cv[53]);
     copy=reinterpret_cast<Copy>(cv[47]);copyRegion=reinterpret_cast<CopyRegion>(cv[46]);
     if (DetourTransactionBegin()!=NO_ERROR) { create=nullptr; return; }
     bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
 #define LIGHT_ATTACH(o,h) ok &= DetourAttach(reinterpret_cast<PVOID*>(&o),h)==NO_ERROR
     LIGHT_ATTACH(create,CreateShader); LIGHT_ATTACH(draw,OnDraw); LIGHT_ATTACH(indexed,OnIndexed);
-    LIGHT_ATTACH(createLayout,OnCreateLayout);
+    LIGHT_ATTACH(createVertex,OnCreateVertex);
     LIGHT_ATTACH(instanced,OnInstanced); LIGHT_ATTACH(indexedInstanced,OnIndexedInstanced);
     LIGHT_ATTACH(indirect,OnIndirect); LIGHT_ATTACH(indexedIndirect,OnIndexedIndirect);
+    LIGHT_ATTACH(clearTarget,OnClearTarget);LIGHT_ATTACH(beginQuery,OnBeginQuery);LIGHT_ATTACH(endQuery,OnEndQuery);
+    LIGHT_ATTACH(clearDepth,OnClearDepth);
     LIGHT_ATTACH(copy,OnCopy);LIGHT_ATTACH(copyRegion,OnCopyRegion);
 #undef LIGHT_ATTACH
     LONG result=ERROR_INVALID_FUNCTION;
     if (ok) result=DetourTransactionCommit(); else DetourTransactionAbort();
     if (result==NO_ERROR) { context=c.Get(); installed.store(true); LOG_INFO("FFXIV lighting: native exposure hooks ready"); }
-    else { create=nullptr; createLayout=nullptr; LOG_ERROR("FFXIV lighting: hook installation failed {}",result); }
+    else { create=nullptr; LOG_ERROR("FFXIV lighting: hook installation failed {}",result); }
 }
 inline void Detach()
 {
+    FfxivPreviewDLSS::Shutdown();
+    FfxivPreviewMotion::Shutdown();
+    FfxivPreviewEnhance::Shutdown();
     FfxivSceneHdr::EndFrame();
     FfxivLightingScan::Stop();
     installed.store(false);
@@ -178,12 +246,14 @@ inline void Detach()
     bool ok=DetourUpdateThread(GetCurrentThread())==NO_ERROR;
 #define LIGHT_DETACH(o,h) ok &= DetourDetach(reinterpret_cast<PVOID*>(&o),h)==NO_ERROR
     LIGHT_DETACH(create,CreateShader); LIGHT_DETACH(draw,OnDraw); LIGHT_DETACH(indexed,OnIndexed);
-    LIGHT_DETACH(createLayout,OnCreateLayout);
+    LIGHT_DETACH(createVertex,OnCreateVertex);
     LIGHT_DETACH(instanced,OnInstanced); LIGHT_DETACH(indexedInstanced,OnIndexedInstanced);
     LIGHT_DETACH(indirect,OnIndirect); LIGHT_DETACH(indexedIndirect,OnIndexedIndirect);
+    LIGHT_DETACH(clearTarget,OnClearTarget);LIGHT_DETACH(beginQuery,OnBeginQuery);LIGHT_DETACH(endQuery,OnEndQuery);
+    LIGHT_DETACH(clearDepth,OnClearDepth);
     LIGHT_DETACH(copy,OnCopy);LIGHT_DETACH(copyRegion,OnCopyRegion);
 #undef LIGHT_DETACH
-    if (ok) { if (DetourTransactionCommit()==NO_ERROR) { create=nullptr; createLayout=nullptr; context=nullptr; } }
+    if (ok) { if (DetourTransactionCommit()==NO_ERROR) { create=nullptr; context=nullptr; } }
     else DetourTransactionAbort();
 }
 }

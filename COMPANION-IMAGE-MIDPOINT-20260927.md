@@ -1,3 +1,5 @@
+> Retired: the FFXIV Companion integration has been removed. These notes describe historical tests; use REST HUD isolation instead.
+
 # Depth-tested nameplate image midpoint test — 2026-09-27
 
 Built and installed as game/winmm.dll; prior successful handoff build, config and log backed up beside this document. Companion plugin unchanged (0.1.2). No INI changes. This source build also includes pending XeFG OptiHDR support; the separately staged XeFG tester DLL is unchanged.

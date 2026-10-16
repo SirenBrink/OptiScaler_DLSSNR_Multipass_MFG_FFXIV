@@ -25,7 +25,7 @@ cbuffer Params : register(b0)
     uint  gCompareSwap;  // put the edited frame on the other side
     uint  gTransfer;     // 0 classic, 1 matched residual -- how a below-size model comes back
     float gDebugScale;   // what the debug views are scaled by, held still while the meter moves
-    uint  gReversibleMode; // 0 knee, 1 Neutwo+composed, 2 Neutwo+replace, 3 hybrid+composed, 4 hybrid+replace
+    uint  gReversibleMode; // 0 knee, 1 Neutwo+composed, 2 Neutwo+replace, 3 hybrid+composed, 4 hybrid+replace, 5 linear+composed
     uint  gApplyModel;     // 0 output the clean frame (pass still runs), 1 apply the model's edit
     uint  gUseGameExposure;// D3D12 source-1 only: 1 = read the game's live exposure in-shader (t4)
     float gExposurePreMul; // preExposure * trim, so the live white point is gExposurePreMul / exposure
@@ -842,6 +842,15 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         // is not passthrough (handled and returned above), so NeutwoEncode never sees a tone-mapped
         // frame. Both are undone by the resolve: the knee approximately, Neutwo exactly.
         float3 normalized = frame / WhitePoint();
+        // Adapt janblade cbf30d9d's direct linear input. Our input and resolve
+        // both use per-channel linear light; never sRGB-decode this proxy.
+        // Above-white detail is clipped for the model, retained in gKeep and
+        // restored by the existing composed highlight controls.
+        if (gReversibleMode == 5)
+        {
+            gTarget[id.xy] = float4(saturate(normalized), 1.0);
+            return;
+        }
         float3 display;
         if (gReversibleMode == 0)
             display = SoftKnee(normalized);        // soft knee
@@ -905,8 +914,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     float4 modelSample = gModel.SampleLevel(gLinear, modelUv, 0);
 
     // Nothing was encoded on the way in, so nothing is decoded here either.
-    float3 proxy = gPassthrough != 0 ? proxySample.rgb : SrgbToLinear(proxySample.rgb);
-    float3 model = gPassthrough != 0 ? modelSample.rgb : SrgbToLinear(modelSample.rgb);
+    float3 proxy = (gPassthrough != 0 || gReversibleMode == 5) ? proxySample.rgb : SrgbToLinear(proxySample.rgb);
+    float3 model = (gPassthrough != 0 || gReversibleMode == 5) ? modelSample.rgb : SrgbToLinear(modelSample.rgb);
 
     // The model's own answer, kept before the matched-residual block below can rewrite `model`, so the
     // replace decode uses what the model returned rather than the residual reconstruction.
@@ -1023,7 +1032,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         // lands in [0,1), so it needs no saturate.
         float3 fullProxy = gPassthrough != 0
                                ? saturate(original)
-                               : (gReversibleMode == 0   ? saturate(SoftKnee(original))
+                               : (gReversibleMode == 5   ? saturate(original)
+                                  : gReversibleMode == 0   ? saturate(SoftKnee(original))
                                   : gReversibleMode >= 3 ? HybridEncode(original)
                                                          : NeutwoEncode(original));
         proxy = fullProxy;

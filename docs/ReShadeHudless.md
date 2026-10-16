@@ -38,8 +38,6 @@ restores the full native frame. Missing captures invalidate the previous paste.
 The producer/consumer rings retain their completion fences; teardown does not
 release ownership when completion cannot be proved. In that exceptional case,
 resources are retained for process lifetime rather than recycled unsafely.
-The Companion layer's ReShade-isolating swapchain change is gated to the addon
-opt-in; the ordinary Companion path is unchanged otherwise.
 
 Known visual limitations remain: black/white fades can change most pixels and
 be mistaken for UI, and nameplates can look displaced at low real FPS because
@@ -58,7 +56,7 @@ detection is independent of the converted HDR colour. Live REST placement, fades
 Local SDR and HDR gameplay tests confirmed working capture/paste and resolved
 high-factor command-pool starvation, with zero queue-busy skips in the HDR run.
 Brief capture interruptions recovered normally. Wider testing of fades, teleports,
-Companion overlays and low real FPS remains necessary.
+and low real FPS remains necessary.
 
 The supplied addon source and standalone marker are retained under
 `optional/reshade-hudless`. The addon is built separately against ReShade's

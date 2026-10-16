@@ -32,6 +32,7 @@
   <ItemGroup>
     <ClInclude Include="shaders\dlssnr\precompile\DlssNr_GuideMatch_Shader.h" />
     <ClInclude Include="dlssnr\DlssNr_GpuSubmission.h" />
+    <ClInclude Include="dlssnr\RecordedListIndex.h" />
     <ClInclude Include="dlssnr\DlssNr_DescriptorSlots.h" />
     <ClInclude Include="low_latency\input\ConcurrentInputSelection.h" />
   </ItemGroup>
@@ -240,6 +241,7 @@
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <DebugInformationFormat>OldStyle</DebugInformationFormat>
       <AdditionalOptions>/w34996 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -585,6 +587,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="menu\menu_dx12.h" />
     <ClInclude Include="menu\menu_overlay_base.h" />
     <ClInclude Include="menu\menu_overlay_dx.h" />
+    <ClInclude Include="menu\OverlaySubmissionRing.h" />
     <ClInclude Include="menu\menu_overlay_vk.h" />
     <ClInclude Include="wrapped\wrapped_swapchain.h" />
     <ClInclude Include="Logger.h" />
@@ -676,9 +679,6 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="misc\ExternalHudless.cpp" />
     <ClCompile Include="misc\UiPaste.cpp" />
     <ClCompile Include="shaders\ui_extract\UE_Dx12.cpp" />
-    <ClCompile Include="misc\companion\Companion.cpp" />
-    <ClCompile Include="misc\companion\CompanionNative.cpp" />
-    <ClCompile Include="misc\companion\CompanionLayer.cpp" />
     <ClCompile Include="inputs\FSR2_Dx11.cpp" />
     <ClCompile Include="inputs\FSR2_Vk.cpp" />
     <ClCompile Include="inputs\XeSS_Dx11.cpp" />
@@ -915,6 +915,22 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <None Include="Source.def" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ItemGroup>
+    <ClInclude Include="misc\FfxivPreviewDLSS.h" />
+    <ClInclude Include="misc\FfxivPreviewNR.h" />
+    <ClInclude Include="misc\FramePacingTrace.h" />
+    <ClInclude Include="dlssnr\NrFocusPolicy.h" />
+    <ClInclude Include="framegen\dlssg\DynamicMfgPolicy.h" />
+    <ClInclude Include="misc\FfxivPreviewFGMap.h" />
+    <ClInclude Include="misc\FfxivPreviewFlow.h" />
+    <ClInclude Include="misc\FfxivPreviewPresentation.h" />
+    <ClInclude Include="misc\FfxivPreviewPasteCapture.h" />
+    <ClInclude Include="misc\FfxivPreviewInterop.h" />
+    <ClCompile Include="misc\FfxivPreviewNR.cpp" />
+    <ClCompile Include="misc\FfxivPreviewFGMap.cpp" />
+    <ClInclude Include="misc\FfxivPreviewCamera.h" />
+    <ClCompile Include="misc\FfxivPreviewDLSS.cpp" />
+  </ItemGroup>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>

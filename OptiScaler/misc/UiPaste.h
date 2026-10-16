@@ -47,6 +47,8 @@ void Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* fi
 
 // Game thread, once per real frame that does not call Produce. Stops pasting until the next Produce.
 void Invalidate(const char* reason);
+// Brief capture gaps retain completed UI for queued UI-free output frames.
+void MissingSample();
 // UI-free input is allowed only after a matching completed paste is available.
 bool Ready(ID3D12Device* device, UINT width, UINT height);
 
@@ -55,6 +57,8 @@ void Release();
 
 // Any thread that presents DLSS-G's native swapchain. Records and submits on `presentQueue`.
 void Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue);
+// Completes the bounded logging capture after overlays, immediately before native Present.
+void FinishPresentDiagnostics();
 
 void SetDebugTint(bool enabled);
 bool DebugTint();

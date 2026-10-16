@@ -1,12 +1,14 @@
 #include "pch.h"
 #include "menu_overlay_base.h"
 #include "menu_overlay_dx.h"
+#include "OverlaySubmissionRing.h"
 
 #include <Util.h>
 #include <Logger.h>
 #include <Config.h>
 #include <shaders/hdr/Hdr10.h>
 #include <shaders/hdr/HdrMenuLayer.h>
+#include <shaders/hdr/HdrScreenshot.h>
 
 #include <imgui/imgui_impl_dx11.h>
 #include <imgui/imgui_impl_dx12.h>
@@ -20,8 +22,7 @@ static unsigned int overlayResizeDepth = 0;
 static std::atomic<unsigned int> overlayBusyPresents {0};
 static unsigned int overlayResizePresents = 0;
 static unsigned int overlayDraws = 0;
-static unsigned int overlayGpuWaits = 0;
-static ULONGLONG overlayGpuWaitMs = 0;
+static unsigned int overlayGpuBusySkips = 0;
 static ULONGLONG overlayReportTime = 0;
 MenuOverlayDx::ScopedResize::ScopedResize()
 {
@@ -36,6 +37,9 @@ MenuOverlayDx::ScopedResize::~ScopedResize()
 
 // menu
 static int const NUM_BACK_BUFFERS = 8;
+// Four full 8X batches of small command/upload buffers. HDR menu textures stay
+// shared and GPU-ordered on the presenting queue; no extra full-screen images.
+static constexpr unsigned OVERLAY_FRAMES_IN_FLIGHT = 32;
 static int const SRV_HEAP_SIZE = 64;
 static bool _dx11Device = false;
 static bool _dx12Device = false;
@@ -52,13 +56,13 @@ static ID3D12DescriptorHeap* g_pd3dSrvDescHeap = nullptr;
 static DescriptorHeapAllocator g_pd3dSrvDescHeapAlloc;
 static ID3D12CommandQueue* g_pd3dCommandQueue = nullptr;
 static ID3D12GraphicsCommandList* g_pd3dCommandList = nullptr;
-static ID3D12CommandAllocator* g_commandAllocators[NUM_BACK_BUFFERS] = {};
+static ID3D12CommandAllocator* g_commandAllocators[OVERLAY_FRAMES_IN_FLIGHT] = {};
+static OverlaySubmissionRing<OVERLAY_FRAMES_IN_FLIGHT> g_overlaySubmissions;
 static ID3D12Fence* g_overlayFence = nullptr;
 static UINT64 g_overlayFenceValue = 0;
 // Retired only after the overlay fence completes, never under loader lock.
 static Hdr10::MenuLayer* g_hdrMenuLayer = nullptr;
 static bool g_hdrMenuLayerEnabled = false;
-static HANDLE g_overlayFenceEvent = nullptr;
 static ID3D12Resource* g_mainRenderTargetResource[NUM_BACK_BUFFERS] = {};
 static D3D12_CPU_DESCRIPTOR_HANDLE g_mainRenderTargetDescriptor[NUM_BACK_BUFFERS] = {};
 
@@ -181,16 +185,15 @@ static void CleanupRenderTargetDx12(bool clearQueue)
         SAFE_RELEASE(g_pd3dRtvDescHeap);
         SAFE_RELEASE(g_pd3dSrvDescHeap);
 
-        for (UINT i = 0; i < NUM_BACK_BUFFERS; ++i)
+        for (UINT i = 0; i < OVERLAY_FRAMES_IN_FLIGHT; ++i)
         {
             SAFE_RELEASE(g_commandAllocators[i]);
         }
 
         SAFE_RELEASE(g_pd3dCommandList);
         SAFE_RELEASE(g_overlayFence);
-        if (g_overlayFenceEvent) CloseHandle(g_overlayFenceEvent);
-        g_overlayFenceEvent = nullptr;
         g_overlayFenceValue = 0;
+        g_overlaySubmissions.Reset();
 
         if (g_pd3dCommandQueue != nullptr)
             g_pd3dCommandQueue = nullptr;
@@ -404,7 +407,7 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
             g_pd3dSrvDescHeapAlloc.Create(device, g_pd3dSrvDescHeap);
         }
 
-        for (UINT i = 0; i < NUM_BACK_BUFFERS; ++i)
+        for (UINT i = 0; i < OVERLAY_FRAMES_IN_FLIGHT; ++i)
         {
             result =
                 device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_commandAllocators[i]));
@@ -428,6 +431,7 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
             return;
         }
         g_overlayFenceValue = 0;
+        g_overlaySubmissions.Reset();
         result = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_commandAllocators[0], NULL,
                                            IID_PPV_ARGS(&g_pd3dCommandList));
         if (result != S_OK)
@@ -455,7 +459,7 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
         ImGui_ImplDX12_InitInfo initInfo {};
         initInfo.Device = device;
         initInfo.CommandQueue = (ID3D12CommandQueue*) currentSCCommandQueue;
-        initInfo.NumFramesInFlight = NUM_BACK_BUFFERS;
+        initInfo.NumFramesInFlight = OVERLAY_FRAMES_IN_FLIGHT;
         g_hdrMenuLayerEnabled = Hdr10::Active() && scDesc.BufferDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM;
         initInfo.RTVFormat = g_hdrMenuLayerEnabled ? DXGI_FORMAT_R8G8B8A8_UNORM : scDesc.BufferDesc.Format;
         if (g_hdrMenuLayerEnabled)
@@ -490,36 +494,21 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
         {
             _showRenderImGuiDebugOnce = true;
 
-            // Retire our own draw before resetting its allocator and ImGui upload buffers.
-            // Skipping busy frames makes the overlay disappear on generated presents.
-            if (!g_overlayFence || g_overlayFence->GetCompletedValue() == UINT64_MAX)
+            // A native FG presentation callback must never wait for the GPU:
+            // pending work can depend on the producer returning from Present.
+            // Fence only the upload/allocator slot about to be reused instead
+            // of synchronizing every generated output with the previous one.
+            if (!g_overlayFence || g_overlayFenceValue == UINT64_MAX)
             {
                 pSwapChain->Release();
                 return;
             }
-            if (g_overlayFence->GetCompletedValue() < g_overlayFenceValue)
+            const auto overlayCompleted = g_overlayFence->GetCompletedValue();
+            if (!g_overlaySubmissions.Ready(overlayCompleted))
             {
-                const auto waitStarted = GetTickCount64();
-                ++overlayGpuWaits;
-                if (!g_overlayFenceEvent)
-                    g_overlayFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-                const auto waitResult = g_overlayFenceEvent
-                    ? g_overlayFence->SetEventOnCompletion(g_overlayFenceValue, g_overlayFenceEvent)
-                    : E_OUTOFMEMORY;
-                if (FAILED(waitResult) ||
-                    WaitForSingleObject(g_overlayFenceEvent, 2000) != WAIT_OBJECT_0 ||
-                    g_overlayFence->GetCompletedValue() < g_overlayFenceValue)
-                {
-                    LOG_ERROR("DX12 overlay completion wait failed or timed out: {:X}", (UINT) waitResult);
-                    pSwapChain->Release();
-                    return;
-                }
-                if (g_overlayFence->GetCompletedValue() == UINT64_MAX)
-                {
-                    pSwapChain->Release();
-                    return;
-                }
-                overlayGpuWaitMs += GetTickCount64() - waitStarted;
+                ++overlayGpuBusySkips;
+                pSwapChain->Release();
+                return;
             }
             ImGui_ImplDX12_NewFrame();
 
@@ -527,13 +516,15 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
             {
                 ImGui::Render();
 
-                if (ImGui::GetDrawData()->TotalVtxCount == 0)
+                if (ImGui::GetDrawData()->TotalVtxCount == 0 ||
+                    ImGui::GetDrawData()->DisplaySize.x <= 0 || ImGui::GetDrawData()->DisplaySize.y <= 0)
                 {
                     pSwapChain->Release();
                     return;
                 }
                 UINT backBufferIdx = pSwapChain->GetCurrentBackBufferIndex();
-                ID3D12CommandAllocator* commandAllocator = g_commandAllocators[backBufferIdx];
+                const auto overlaySlot = g_overlaySubmissions.Index();
+                ID3D12CommandAllocator* commandAllocator = g_commandAllocators[overlaySlot];
                 D3D12_RECT hdrMenuBounds{};
                 if (g_hdrMenuLayerEnabled)
                 {
@@ -545,6 +536,13 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                         return;
                     }
                     if (!g_hdrMenuLayer) g_hdrMenuLayer = new Hdr10::MenuLayer;
+                    if (!g_hdrMenuLayer->Matches(g_pd3dDeviceParam, outputDesc) &&
+                        overlayCompleted < g_overlayFenceValue)
+                    {
+                        ++overlayGpuBusySkips; // never replace a layer still read by queued draws
+                        pSwapChain->Release();
+                        return;
+                    }
                     ScopedSkipHeapCapture skipHeapCapture {};
                     const auto hr = g_hdrMenuLayer->Ensure(g_pd3dDeviceParam,
                         g_mainRenderTargetResource[backBufferIdx]->GetDesc());
@@ -588,8 +586,17 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                 if (g_hdrMenuLayerEnabled)
                     g_hdrMenuLayer->Begin(g_pd3dCommandList, g_mainRenderTargetResource[backBufferIdx], &hdrMenuBounds);
                 ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_pd3dCommandList);
+                g_overlaySubmissions.DrawRecorded();
                 if (g_hdrMenuLayerEnabled)
                     g_hdrMenuLayer->End(g_pd3dCommandList, g_mainRenderTargetDescriptor[backBufferIdx]);
+
+                // Read back after the menu's HDR composite on the same queue.
+                // No cross-queue texture borrowing or second ImGui draw.
+                auto screenshot = g_hdrMenuLayerEnabled && Hdr10::Screenshot::CaptureMenu()
+                    ? Hdr10::Screenshot::Prepare(MenuOverlayBase::Handle(), g_pd3dDeviceParam,
+                        g_pd3dCommandList, g_mainRenderTargetResource[backBufferIdx], nullptr,
+                        D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET)
+                    : nullptr;
 
                 barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
                 barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
@@ -605,7 +612,18 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                 }
 
                 ID3D12CommandList* ppCommandLists[] = { g_pd3dCommandList };
+                // The HDR layer is shared. Preserve GPU order even if a
+                // provider switches presenting queues; this token was already
+                // submitted by an earlier draw and requires no CPU wait.
+                result = ((ID3D12CommandQueue*) currentSCCommandQueue)->Wait(g_overlayFence, g_overlayFenceValue);
+                if (FAILED(result))
+                {
+                    LOG_ERROR("DX12 overlay queue dependency failed: {:X}", (UINT)result);
+                    pSwapChain->Release();
+                    return;
+                }
                 ((ID3D12CommandQueue*) currentSCCommandQueue)->ExecuteCommandLists(1, ppCommandLists);
+                Hdr10::Screenshot::Submit(screenshot, (ID3D12CommandQueue*) currentSCCommandQueue);
                 result = ((ID3D12CommandQueue*) currentSCCommandQueue)->Signal(
                     g_overlayFence, ++g_overlayFenceValue);
                 if (FAILED(result))
@@ -614,15 +632,15 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                     g_overlayFenceValue = UINT64_MAX;
                     LOG_ERROR("DX12 overlay completion signal failed: {:X}", (UINT) result);
                 }
+                g_overlaySubmissions.Submitted(overlaySlot, g_overlayFenceValue);
                 ++overlayDraws;
                 const auto reportNow = GetTickCount64();
                 if (reportNow - overlayReportTime >= 5000)
                 {
-                    LOG_INFO("DX12 menu presentation: {} draws, {} busy-lock skips, {} resize skips, {} GPU waits ({} ms total); HDR layer {}",
+                    LOG_INFO("DX12 menu presentation: {} draws, {} busy-lock skips, {} resize skips, {} GPU-busy skips; HDR layer {}",
                         overlayDraws, overlayBusyPresents.exchange(0), overlayResizePresents,
-                        overlayGpuWaits, overlayGpuWaitMs, g_hdrMenuLayerEnabled);
-                    overlayDraws = overlayResizePresents = overlayGpuWaits = 0;
-                    overlayGpuWaitMs = 0;
+                        overlayGpuBusySkips, g_hdrMenuLayerEnabled);
+                    overlayDraws = overlayResizePresents = overlayGpuBusySkips = 0;
                     overlayReportTime = reportNow;
                 }
             }

@@ -1,9 +1,13 @@
-## FFXIV integration updates — September 2026
+## FFXIV integration updates
 
-- **OptiHDR with XeFG:** matching RGB10A2 HDR10 output and HUD-free inputs, alongside existing DLSS-G support. Windows HDR is required; leave RTX HDR and Auto HDR disabled. XeFG extracts UI from the HDR backbuffer instead of using separate SDR UI overlays. This path passed automated conversion/lifetime tests; user XeFG HDR validation is pending.
-- **[FFXIV OptiScaler Companion](https://github.com/SirenBrink/FFXIV-OptiScaler-Companion):** version 0.1.2 supplies same-draw nameplate metadata for an opt-in, 30-second native-depth replacement test. In the Companion section, enable **Lightweight 2x position interpolation** if desired, then **Start depth-tested nameplate replacement (30s)**. Interpolation is bounded between observed positions and bypasses unsupported cases. It does not match 6X FG; an accepted midpoint adds one overlay refresh of visual delay. Replacement and interpolation have received positive in-game testing, but remain experimental.
+REST HUD isolation replaces the retired Dalamud Companion integration. The Companion plugin is no longer required or used. Character-preview DLSS and NR use independent preview instances through the DX12 bridge; preview interpolation uses REST HUD isolation.
 
-[Companion implementation and validation notes](COMPANION-INTEGRATION-20260926.md).
+- **OptiHDR with XeFG:** matching RGB10A2 HDR10 output and HUD-free inputs, alongside existing DLSS-G support. Windows HDR is required; leave RTX HDR and Auto HDR disabled. XeFG extracts UI from the HDR backbuffer instead of using separate SDR UI overlays. This path passed automated conversion/lifetime tests and local XeFG HDR gameplay testing.
+
+
+- **Character previews (experimental):** under Neural Rendering -> Character preview, enable 2x-output DLSS, optional native-resolution NR applied after upscaling, and separate preview bottleneck reuse. Histories are separate from the main scene and idle instances retire after GPU completion. Preview interpolation uses the REST paste path and pauses while the OptiScaler menu is visible.
+- **Background NR pause:** the optional "Pause NR while game is unfocused" checkbox preserves the saved enabled state and resumes with fresh history. It applies to scene and preview NR and defaults off.
+- **Compatibility:** unverified NR reuse now falls back to full computation when its input bindings change or cannot be read safely. Affected hardware still requires user testing.
 
 ---
 # OptiScaler DLSS-NR pre-SR multipass fork

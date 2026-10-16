@@ -127,8 +127,11 @@ class MenuLayer {
         return S_OK;
     }
 public:
-    // Caller must retire the previous menu submission before reuse, resize or
-    // destruction. The DX12 overlay's existing completion fence owns this rule.
+    bool Matches(ID3D12Device* d, const D3D12_RESOURCE_DESC& desc) const {
+        return device.Get()==d && width==desc.Width && height==desc.Height && layer;
+    }
+    // Unchanged layers may be reused in GPU order on one queue. The caller
+    // must retire all prior menu submissions before resizing or destruction.
     HRESULT Ensure(ID3D12Device* d, const D3D12_RESOURCE_DESC& desc) {
         if(!d || desc.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
            desc.Format!=DXGI_FORMAT_R10G10B10A2_UNORM || desc.SampleDesc.Count!=1 ||

@@ -25,8 +25,8 @@ struct State {
     DlssNrVitReuse::RoleRegistry<NVDX_ObjectHandle> vitRole;
     std::map<NVDX_ObjectHandle,ObservedFunction>observedFunctions;
     std::map<std::tuple<ID3D12GraphicsCommandList*,int>,Session>sessions;
-    std::recursive_mutex mutex;uint64_t evaluations=0,extendedCalls=0;bool restartRequired=false;
-    std::string status;bool allowUnverified=false,enabled=false;
+    std::recursive_mutex mutex;uint64_t evaluations=0,extendedCalls=0,legacyCalls=0;bool restartRequired=false;
+    std::string status,reuseReason;bool allowUnverified=false,enabled=false;
     std::atomic<decltype(&NvAPI_D3D12_LaunchCuKernelChainEx)>launchEx{nullptr};
 };
 State& S(){static State value;return value;}
@@ -57,6 +57,8 @@ int main() try {
     check(s.vitRole.RemoveFunction(unknown),"unverified function teardown not tracked");
     int argument=23;void* pointers[]{&argument};
     NVAPI_CU_KERNEL_LAUNCH_PARAMS_EX kernels[3]{};
+    uint64_t binding=1234;
+    kernels[0].pParams=&binding;kernels[0].paramSize=sizeof(binding);
     kernels[0].hFunction=start;kernels[1].hFunction=finish;kernels[2].hFunction=other;
     kernels[2].kernelParams=pointers;kernels[2].gridDim={4,3,2};kernels[2].blockDim={32,4,1};kernels[2].dynSharedMemBytes=77;
     // Startup must bypass the lock even when another thread owns it.
@@ -104,9 +106,25 @@ int main() try {
     // The same production template must filter the basic launch ABI too.
     NVAPI_CU_KERNEL_LAUNCH_PARAMS basic[3]{};
     for(int i=0;i<3;++i)basic[i].hFunction=kernels[i].hFunction;
+    basic[0].pParams=&binding;basic[0].paramSize=sizeof(binding);
     basic[2].pParams=&argument;basic[2].paramSize=sizeof(argument);
     BeginEvaluate(&feature,false,2,true);std::vector<NVAPI_CU_KERNEL_LAUNCH_PARAMS> kept;
     check(VitDrop(s,basic,3,kept) && kept.size()==1 && kept[0].pParams==&argument,"basic override lost retained arguments");s.vit.End();
+    ++binding;
+    BeginEvaluate(&feature,false,2,true);
+    check(LaunchEx(cmd,kernels,3)==NVAPI_OK && captured.size()==3,"changed unverified bindings reused stale scratch");s.vit.End();
+    BeginEvaluate(&feature,false,2,true);
+    check(LaunchEx(cmd,kernels,3)==NVAPI_OK && captured.size()==1,"stable unverified bindings did not reuse");s.vit.End();
+    kernels[0].pParams=nullptr;kernels[0].paramSize=0;
+    for(int i=0;i<2;++i){BeginEvaluate(&feature,false,2,true);
+        check(LaunchEx(cmd,kernels,3)==NVAPI_OK && captured.size()==3,"missing unverified bindings allowed reuse");s.vit.End();}
+    kernels[0].pParams=reinterpret_cast<void*>(1);kernels[0].paramSize=sizeof(binding);
+    BeginEvaluate(&feature,false,2,true);
+    check(LaunchEx(cmd,kernels,3)==NVAPI_OK && captured.size()==3,"unreadable unverified arguments allowed reuse");s.vit.End();
+    kernels[0].pParams=&binding;kernels[0].paramSize=4097;
+    BeginEvaluate(&feature,false,2,true);
+    check(LaunchEx(cmd,kernels,3)==NVAPI_OK && captured.size()==3,"oversized unverified arguments allowed reuse");s.vit.End();
+    kernels[0].pParams=&binding;kernels[0].paramSize=sizeof(binding);
     s.enabled=true;BeginEvaluate(&feature,false,2,true);
     check(!s.vit.Evaluating(),"override allowed hybrid reuse");s.enabled=false;
     // A full downstream evaluation must not erase pass 1's alternating cache.
@@ -131,6 +149,23 @@ int main() try {
             check(LaunchEx(cmd,kernels,3)==NVAPI_OK && captured.size()==(frame%2 ? 1u : 3u),"original all-pass reuse not restored");s.vit.End();
         }
     }
+    // Scene and twelve portrait/preview instances must warm and reuse their
+    // own buffers independently. Counters must describe this evaluation only.
+    s.vit.Clear();int previews[13]{};
+    for(unsigned frame=0;frame<4;++frame)for(auto& preview:previews){
+        BeginEvaluate(&preview,false,2,true);
+        check(LaunchEx(cmd,kernels,3)==NVAPI_OK,"preview launch failed");EndEvaluate(true);
+        const auto counts=LastReuseEvaluation();
+        check(counts.computed==(frame%2?0u:1u) && counts.reused==(frame%2?1u:0u),"preview reuse history or per-evaluation counters mixed");
+    }
+    BeginEvaluate(&previews[0],false,1,true);EndEvaluate(true);
+    check(LastReuseEvaluation().computed==0 && LastReuseEvaluation().reused==0,"disabled preview inherited previous counters");
+    BeginEvaluate(&previews[1],true,2,true);
+    check(LaunchEx(cmd,kernels,3)==NVAPI_OK && captured.size()==3,"preview reset reused an old bottleneck");EndEvaluate(true);
+    check(LastReuseEvaluation().computed==1 && LastReuseEvaluation().reused==0,"preview reset counters wrong");
+    BeginEvaluate(&previews[1],false,2,true);
+    check(LaunchEx(cmd,kernels,3)==NVAPI_OK,"preview failed-evaluation setup failed");EndEvaluate(false);
+    check(LastReuseEvaluation().computed==0 && LastReuseEvaluation().reused==0,"failed evaluation counted as successful preview reuse");
     for(unsigned pass=0;pass<30;++pass)
         check(DlssNrNative::ReuseEveryForPass(pass,1,false)==1,"original mode ignored reuse disabled");
     const auto previous=calls;s.sessions[{cmd,0}].pending=true;s.vit.Begin(&feature,false,2);

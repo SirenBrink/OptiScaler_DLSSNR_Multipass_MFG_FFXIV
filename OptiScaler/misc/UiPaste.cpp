@@ -1,10 +1,16 @@
 #include "pch.h"
+#include <misc/FramePacingTrace.h>
 #include "UiPaste.h"
 
 #include <State.h>
 #include <Config.h>
+#include <menu/menu_overlay_base.h>
 #include <Util.h>
 #include "ExternalHudless.h"
+#include "FfxivPreviewFGMap.h"
+#include "FfxivPreviewPresentation.h"
+#include "FfxivPreviewPasteCapture.h"
+#include "FfxivPreviewFlow.h"
 #include <shaders/hdr/Hdr10.h>
 #include <misc/FfxivSceneHdr.h>
 
@@ -20,16 +26,18 @@
 
 namespace
 {
-// Paste images: newest-ready + previous (read by the producer) + one being written + one spare.
-constexpr UINT SlotCount = 4;
+// A preview needs three retained captures when its latest write is still on
+// the GPU. Extra full-size images are created only while preview FG is active.
+constexpr UINT SlotCount = 7;
 
 // Consumer command storage must cover high MFG factors as well as base-frame GPU backlog.
 // 32 entries cover four base frames at 8x without allocating additional full-size UI images.
 // Never reset an allocator or overwrite descriptors while their fence is incomplete.
 constexpr UINT PasteRing = 32;
 
-// Producer descriptor table: t0 final, t1 HUD-less, t2 previous paste image, u0 output.
-constexpr UINT ProduceDescriptors = 5;
+// Producer descriptor table: t0 final, t1 HUD-less, t2 previous paste image,
+// t3 HDR final, t4 preview guide, u0 output.
+constexpr UINT ProduceDescriptors = 6;
 
 constexpr D3D12_RESOURCE_STATES ImageRestState = static_cast<D3D12_RESOURCE_STATES>(
     static_cast<int>(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) |
@@ -48,12 +56,14 @@ cbuffer Params : register(b0)
     uint HasPrevious;
     uint Cleanup;
     uint UseHDR;
+    uint UsePreviewMap;
 };
 
 Texture2D<float4> FinalTexture : register(t0);
 Texture2D<float4> HudlessTexture : register(t1);
 Texture2D<float4> PreviousPaste : register(t2);
 Texture2D<float4> HdrFinalTexture : register(t3);
+Texture2D<float4> PreviewMotion : register(t4);
 RWTexture2D<float4> PasteTexture : register(u0);
 
 float PixelDifference(int2 p)
@@ -72,6 +82,12 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     int2 p = int2(id.xy);
     int r = (int) Radius;
     bool isUi = false;
+
+    // The 3D character can be present in both the final and REST HUD-less
+    // images. Keep its mapped preview area in the paste so the two captured
+    // poses can actually reach the generated frames.
+    if (UsePreviewMap != 0)
+        isUi = PreviewMotion.Load(int3(p, 0)).a > 0.75;
 
     [loop]
     for (int y = -r; y <= r && !isUi; ++y)
@@ -102,9 +118,26 @@ const char* PasteShaderCode = R"(
 cbuffer Params : register(b0)
 {
     uint DebugTint;
+    uint UsePreviewMotion;
+    float PreviewPhase;
+    uint Reserved;
+    uint UsePreviewFlow;
 };
 
 Texture2D<float4> PasteTexture : register(t0);
+Texture2D<float4> PreviewMotion : register(t1);
+Texture2D<float4> PreviewTexture : register(t2);
+Texture2D<float4> PreviousPreviewTexture : register(t3);
+Texture2D<float4> PreviewFlow : register(t4);
+SamplerState PreviewLinear : register(s0);
+
+bool InPreview(float2 p, float history, uint2 size)
+{
+    if (any(p < 0.0) || any(p >= float2(size))) return false;
+    int2 pixel = clamp(int2(round(p)), int2(0,0), int2(size)-1);
+    float4 guide = PreviewMotion.Load(int3(pixel,0));
+    return guide.a > .75 && abs(guide.b - history) < .03;
+}
 
 float4 VSMain(uint vid : SV_VertexID) : SV_Position
 {
@@ -114,7 +147,89 @@ float4 VSMain(uint vid : SV_VertexID) : SV_Position
 
 float4 PSMain(float4 pos : SV_Position) : SV_Target
 {
-    float4 c = PasteTexture.Load(int3(int2(pos.xy), 0));
+    int2 p = int2(pos.xy);
+    float4 c = PasteTexture.Load(int3(p, 0));
+    if (UsePreviewMotion != 0)
+    {
+        float4 guide = PreviewMotion.Load(int3(p, 0));
+        if (guide.a > 0.75)
+        {
+            uint w, h; PasteTexture.GetDimensions(w, h);
+            float2 motion = (guide.rg * 255.0 - 128.0) * (128.0 / 255.0);
+            if (UsePreviewFlow != 0)
+            {
+                uint fw, fh; PreviewFlow.GetDimensions(fw, fh);
+                float4 flow = PreviewFlow.SampleLevel(PreviewLinear,
+                    float2(p) / (float2(fw,fh) * 4.0), 0);
+                if (Reserved != 0 && flow.a > 0.99 && flow.b > 0.5 &&
+                    InPreview(float2(p) + flow.rg, guide.b, uint2(w,h)))
+                {
+                    // Quarter-size flow is filtered across silhouette edges.
+                    // Validate it against the full-size pixel before replacing
+                    // native geometry motion; background flow must not pull
+                    // the character outline into a neighbouring surface.
+                    float3 current = PreviewTexture.Load(int3(p,0)).rgb;
+                    float4 refinedOld = PreviousPreviewTexture.SampleLevel(PreviewLinear,
+                        (float2(p) + flow.rg + .5) / float2(w,h), 0);
+                    float4 nativeOld = PreviousPreviewTexture.SampleLevel(PreviewLinear,
+                        (float2(p) + motion + .5) / float2(w,h), 0);
+                    float refinedError = dot(abs(refinedOld.rgb-current), float3(1.0/3.0,1.0/3.0,1.0/3.0));
+                    float nativeError = dot(abs(nativeOld.rgb-current), float3(1.0/3.0,1.0/3.0,1.0/3.0));
+                    if (refinedOld.a > .75 && refinedError <= max(.002, nativeError * .85))
+                        motion = flow.rg;
+                }
+            }
+            if (Reserved != 0)
+            {
+                // The guide is previous minus current in output pixels. Move
+                // both real poses toward the desired time, then blend only the
+                // preview region. The rest of the HUD stays on PasteTexture.
+                float2 oldPosition = float2(p) + motion * PreviewPhase;
+                float2 newPosition = float2(p) - motion * (1.0 - PreviewPhase);
+                if (InPreview(oldPosition, guide.b, uint2(w,h)) &&
+                    InPreview(newPosition, guide.b, uint2(w,h)))
+                {
+                    float4 oldPose = PreviousPreviewTexture.SampleLevel(PreviewLinear,
+                        (oldPosition + 0.5) / float2(w, h), 0);
+                    float4 newPose = PreviewTexture.SampleLevel(PreviewLinear,
+                        (newPosition + 0.5) / float2(w, h), 0);
+                    if (oldPose.a > 0.75 && newPose.a > 0.75)
+                    {
+                        // A large disagreement after warping is usually an
+                        // occlusion or a bad match, not a surface to dissolve.
+                        // Prefer the nearer pose there, preserving both exact
+                        // endpoints and normal blending for aligned detail.
+                        float3 difference = abs(oldPose.rgb - newPose.rgb);
+                        float rejection = smoothstep(.025, .10, max(difference.r,max(difference.g,difference.b)));
+                        float weight = lerp(PreviewPhase, step(.5,PreviewPhase), rejection);
+                        c = lerp(oldPose, newPose, weight);
+                    }
+                    else if (newPose.a > 0.75)
+                        c = newPose;
+                    else if (oldPose.a > 0.75)
+                        c = oldPose;
+                }
+                else
+                    c = PreviewTexture.Load(int3(p,0)); // retain this panel at its boundary
+            }
+            else
+            {
+                float2 source = float2(p) + motion * PreviewPhase;
+                if (all(source >= 0.0) && all(source < float2(w, h)))
+                {
+                    int2 guidePixel = clamp(int2(round(source)), int2(0, 0), int2(w, h) - 1);
+                    float4 sourceGuide = PreviewMotion.Load(int3(guidePixel, 0));
+                    if (sourceGuide.a > 0.75 && abs(sourceGuide.b - guide.b) < 0.03)
+                    {
+                        float4 moved = PreviewTexture.SampleLevel(PreviewLinear,
+                            (source + 0.5) / float2(w, h), 0);
+                        if (moved.a > 0.75)
+                            c = moved;
+                    }
+                }
+            }
+        }
+    }
 
     if (c.a <= 0.0)
         discard;
@@ -135,6 +250,7 @@ struct ProduceConstants
     uint32_t hasPrevious;
     uint32_t cleanup;
     uint32_t useHDR;
+    uint32_t usePreviewMap;
 };
 
 enum class SlotState
@@ -146,6 +262,11 @@ enum class SlotState
 struct Slot
 {
     ID3D12Resource* image = nullptr;
+    ID3D12Resource* previewMotion = nullptr; // owned by previewMotionOwner
+    std::shared_ptr<void> previewMotionOwner;
+    ID3D12Resource* previewFlow = nullptr;
+    ID3D12DescriptorHeap* flowHeap = nullptr;
+    UINT64 flowPreviousFrame = 0;
     SlotState state = SlotState::Empty;
     UINT64 frame = 0;
     UINT64 producedValue = 0; // g_produceFence value that completes the write
@@ -159,6 +280,7 @@ struct Slot
 struct Retired
 {
     ID3D12Resource* resource = nullptr;
+    std::shared_ptr<void> previewMotionOwner;
     UINT64 producedValue = 0;
     UINT64 readValue = 0;
 };
@@ -171,6 +293,8 @@ bool g_failed = false; // shader/pipeline creation failed on this device
 // Producer
 ID3D12RootSignature* g_produceRootSig = nullptr;
 ID3D12PipelineState* g_producePso = nullptr;
+ID3D12PipelineState* g_previewFlowPso = nullptr;
+bool g_previewFlowFailed = false;
 ID3D12GraphicsCommandList* g_produceList = nullptr;
 ID3D12Fence* g_produceFence = nullptr;
 UINT64 g_produceValue = 0;
@@ -181,6 +305,7 @@ std::vector<Retired> g_retired;
 UINT64 g_width = 0;
 UINT g_height = 0;
 DXGI_FORMAT g_imageFormat = DXGI_FORMAT_UNKNOWN;
+UINT g_missingSamples = 0;
 UINT64 g_frame = 0;      // one tick per real frame (Produce or Invalidate)
 int g_lastWritten = -1;  // slot written by the previous Produce, if that was the previous frame
 
@@ -200,11 +325,39 @@ ID3D12Fence* g_pasteFence = nullptr;
 UINT64 g_pasteValue = 0;
 UINT64 g_pasteCounter = 0;
 UINT64 g_lastPastedFrame = 0;
+UINT g_sameFramePastes = 0;
+// The game's character preview can update at a different cadence than the
+// scene. Preserve its last image and guide across intervening real frames.
+int g_previewSlot = -1;
+int g_previousPreviewSlot = -1;
+int g_olderPreviewSlot = -1;
+FfxivPreviewPresentation::Clock g_previewClock;
+UINT64 g_previewPairFrame = 0;
+UINT64 g_previousPreviewPairFrame = 0;
+bool g_previewBatchInterpolate = false;
+float g_previewPhaseLow = 1.0f;
+float g_previewPhaseHigh = 0.0f;
+double g_previewLastUpdateMs = 0.0;
+double g_previewPeriodMs = 33.3;
+UINT64 g_previewGuidedPastes = 0;
+UINT64 g_previewPairedPastes = 0;
+UINT64 g_previewUnguidedPastes = 0;
+UINT64 g_previewFlowBuilt = 0;
+UINT64 g_previewFlowPasted = 0;
+UINT g_previewTracedOutputs = 0;
+UINT64 g_previewAdvancedBatches = 0;
+UINT64 g_previewHeldBatches = 0;
+UINT64 g_previewPendingBatches = 0;
+UINT64 g_previewMaxSourceLag = 0;
 ID3D12CommandQueue* g_checkedQueue = nullptr;
 bool g_checkedQueueOk = false;
 bool g_loggedFirstPaste = false;
+bool g_loggedPreviewMotion = false;
 
 std::atomic<bool> g_debugTint { false };
+// Device changes are exceptional; preserve any shared map held by abandoned
+// GPU work just as the existing raw D3D12 images are preserved.
+std::vector<std::shared_ptr<void>> g_orphanedPreviewMaps;
 
 UiPaste::Status g_status {};
 double g_lastSummaryMs = 0.0;
@@ -354,15 +507,27 @@ void RetireImagesLocked()
 {
     for (auto& slot : g_slots)
     {
-        if (slot.image != nullptr)
-            g_retired.push_back({ slot.image, slot.producedValue, slot.lastReadValue });
+        if (slot.image != nullptr || slot.previewMotionOwner)
+            g_retired.push_back({ slot.image, std::move(slot.previewMotionOwner), slot.producedValue, slot.lastReadValue });
+        if (slot.previewFlow != nullptr)
+            g_retired.push_back({slot.previewFlow, {}, slot.producedValue, slot.lastReadValue});
 
         slot.image = nullptr;
+        slot.previewFlow = nullptr;
+        slot.flowPreviousFrame = 0;
+        slot.previewMotion = nullptr;
         slot.state = SlotState::Empty;
         slot.frame = 0;
     }
 
     g_lastWritten = -1;
+    g_previewSlot = -1;
+    g_previousPreviewSlot = -1;
+    g_olderPreviewSlot = -1;
+    g_previewClock.Reset();
+    g_previewPairFrame = g_previousPreviewPairFrame = 0;
+    g_previewLastUpdateMs = 0.0;
+    g_previewPeriodMs = 33.3;
     g_width = 0;
     g_height = 0;
     g_imageFormat = DXGI_FORMAT_UNKNOWN;
@@ -374,15 +539,26 @@ void ForgetDeviceLocked()
     // dropped without Release: they may still be referenced by work we cannot wait for here.
     g_produceRootSig = nullptr;
     g_producePso = nullptr;
+    g_previewFlowPso = nullptr;
+    g_previewFlowFailed = false;
     g_produceList = nullptr;
     g_produceFence = nullptr;
     g_produceValue = 0;
+    for(auto& slot:g_slots)if(slot.previewMotionOwner)g_orphanedPreviewMaps.push_back(std::move(slot.previewMotionOwner));
+    for(auto& item:g_retired)if(item.previewMotionOwner)g_orphanedPreviewMaps.push_back(std::move(item.previewMotionOwner));
     g_slots = {};
     g_retired.clear();
     g_width = 0;
     g_height = 0;
     g_imageFormat = DXGI_FORMAT_UNKNOWN;
     g_lastWritten = -1;
+    g_previewSlot = -1;
+    g_previousPreviewSlot = -1;
+    g_olderPreviewSlot = -1;
+    g_previewClock.Reset();
+    g_previewPairFrame = g_previousPreviewPairFrame = 0;
+    g_previewLastUpdateMs = 0.0;
+    g_previewPeriodMs = 33.3;
 
     g_pasteRootSig = nullptr;
     g_pastePso = nullptr;
@@ -420,14 +596,16 @@ bool EnsureProducerLocked(ID3D12Device* device)
         return true;
 
     CD3DX12_DESCRIPTOR_RANGE ranges[2];
-    ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0);
+    ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0);
     ranges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);
 
     CD3DX12_ROOT_PARAMETER params[2];
     params[0].InitAsConstants(sizeof(ProduceConstants) / 4, 0);
     params[1].InitAsDescriptorTable(2, ranges);
 
-    CD3DX12_ROOT_SIGNATURE_DESC rootDesc(2, params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+    CD3DX12_STATIC_SAMPLER_DESC flowSampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    CD3DX12_ROOT_SIGNATURE_DESC rootDesc(2, params, 1, &flowSampler, D3D12_ROOT_SIGNATURE_FLAG_NONE);
     if (!CreateRootSignature(device, rootDesc, &g_produceRootSig, "produce"))
     {
         g_failed = true;
@@ -471,6 +649,74 @@ bool EnsureProducerLocked(ID3D12Device* device)
     return true;
 }
 
+void RecordPreviewFlowLocked(Slot& slot, int previous, ID3D12GraphicsCommandList* list)
+{
+    slot.flowPreviousFrame = 0;
+    if (!slot.previewMotion)
+    {
+        // Target selection has proved all prior reads/writes completed.
+        ReleaseCom(slot.previewFlow);
+        return;
+    }
+    if (previous < 0 || !g_slots[previous].previewMotion || g_previewFlowFailed)
+        return;
+    if (!g_previewFlowPso)
+    {
+        auto* shader = CompileShader(FfxivPreviewFlow::FlowShaderCode, "CSMain", "cs_5_0");
+        if (!shader) { g_previewFlowFailed = true; return; }
+        D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};
+        desc.pRootSignature = g_produceRootSig;
+        desc.CS = {shader->GetBufferPointer(), shader->GetBufferSize()};
+        const auto result = g_device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&g_previewFlowPso));
+        shader->Release();
+        if (FAILED(result))
+        {
+            LOG_WARN("CharaView FG: image-motion pipeline unavailable: {:X}; native guides retained", UINT(result));
+            g_previewFlowFailed = true;
+            return;
+        }
+        LOG_INFO("CharaView FG: quarter-resolution image-motion refinement ready");
+    }
+    const UINT width = (UINT(g_width) + 3) / 4, height = (g_height + 3) / 4;
+    if (!slot.previewFlow)
+    {
+        CD3DX12_HEAP_PROPERTIES heap(D3D12_HEAP_TYPE_DEFAULT);
+        const auto desc = CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R16G16B16A16_FLOAT,
+            width, height, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        if (FAILED(g_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+            ImageRestState, nullptr, IID_PPV_ARGS(&slot.previewFlow)))) return;
+        slot.previewFlow->SetName(L"CharaView image-motion refinement");
+    }
+    if (!slot.flowHeap)
+        slot.flowHeap = CreateHeap(g_device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, ProduceDescriptors, true);
+    if (!slot.flowHeap) return;
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE descriptor(slot.flowHeap->GetCPUDescriptorHandleForHeapStart());
+    ID3D12Resource* inputs[]{slot.image, g_slots[previous].image, slot.image, slot.image, slot.previewMotion};
+    for (unsigned i = 0; i < 5; ++i)
+    {
+        CreateSrv(inputs[i], i == 4 ? DXGI_FORMAT_R8G8B8A8_UNORM : g_imageFormat, descriptor);
+        descriptor.Offset(1, g_csuIncrement);
+    }
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+    uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    g_device->CreateUnorderedAccessView(slot.previewFlow, nullptr, &uav, descriptor);
+    Barrier(list, slot.previewFlow, ImageRestState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Barrier(list, slot.previewMotion, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    ID3D12DescriptorHeap* heaps[]{slot.flowHeap};
+    const UINT constants[]{UINT(g_width), g_height, width, height};
+    list->SetDescriptorHeaps(1, heaps);
+    list->SetComputeRootSignature(g_produceRootSig);
+    list->SetPipelineState(g_previewFlowPso);
+    list->SetComputeRoot32BitConstants(0, 4, constants, 0);
+    list->SetComputeRootDescriptorTable(1, slot.flowHeap->GetGPUDescriptorHandleForHeapStart());
+    list->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    Barrier(list, slot.previewFlow, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, ImageRestState);
+    Barrier(list, slot.previewMotion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+    slot.flowPreviousFrame = g_slots[previous].frame;
+}
+
 bool EnsureConsumerLocked(DXGI_FORMAT backBufferFormat)
 {
     if (g_failed || g_device == nullptr)
@@ -479,13 +725,16 @@ bool EnsureConsumerLocked(DXGI_FORMAT backBufferFormat)
     if (g_pasteRootSig == nullptr)
     {
         CD3DX12_DESCRIPTOR_RANGE range;
-        range.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+        range.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0);
 
         CD3DX12_ROOT_PARAMETER params[2];
-        params[0].InitAsConstants(1, 0, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+        params[0].InitAsConstants(5, 0, 0, D3D12_SHADER_VISIBILITY_PIXEL);
         params[1].InitAsDescriptorTable(1, &range, D3D12_SHADER_VISIBILITY_PIXEL);
 
-        CD3DX12_ROOT_SIGNATURE_DESC rootDesc(2, params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+        CD3DX12_STATIC_SAMPLER_DESC previewSampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+            D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+        CD3DX12_ROOT_SIGNATURE_DESC rootDesc(2, params, 1, &previewSampler, D3D12_ROOT_SIGNATURE_FLAG_NONE);
         if (!CreateRootSignature(g_device, rootDesc, &g_pasteRootSig, "paste"))
         {
             g_failed = true;
@@ -551,7 +800,7 @@ bool EnsureConsumerLocked(DXGI_FORMAT backBufferFormat)
 
     if (g_pasteCsuHeap == nullptr)
     {
-        g_pasteCsuHeap = CreateHeap(g_device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, PasteRing, true);
+        g_pasteCsuHeap = CreateHeap(g_device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, PasteRing * 5, true);
         g_pasteRtvHeap = CreateHeap(g_device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, PasteRing, false);
 
         if (g_pasteCsuHeap == nullptr || g_pasteRtvHeap == nullptr)
@@ -661,6 +910,16 @@ void LogSummaryLocked()
     g_lastSummaryMs = now;
     LOG_INFO("UI paste: built {}, pasted {}, skipped {}; last: {}", g_status.produced, g_status.pasted,
              g_status.skipped, g_status.lastMessage);
+    if (Config::Instance()->FfxivPreviewFG.value_or_default() && g_previewGuidedPastes)
+        LOG_INFO("CharaView FG: guided pastes {}, paired {}, unguided {}, preview period {:.1f} ms; output phases [{:.3f}, {:.3f}]; image-motion built {}, pasted {}",
+                  g_previewGuidedPastes, g_previewPairedPastes, g_previewUnguidedPastes, g_previewPeriodMs,
+                  g_previewPhaseLow, g_previewPhaseHigh, g_previewFlowBuilt, g_previewFlowPasted);
+    g_previewPhaseLow = 1.0f;
+    g_previewPhaseHigh = 0.0f;
+    if (g_previewAdvancedBatches || g_previewHeldBatches)
+        LOG_INFO("CharaView FG timing: advanced {} batches, held {}, GPU-dependent {}, maximum source lag {} real frames",
+                 g_previewAdvancedBatches, g_previewHeldBatches, g_previewPendingBatches, g_previewMaxSourceLag);
+    g_previewAdvancedBatches = g_previewHeldBatches = g_previewPendingBatches = g_previewMaxSourceLag = 0;
 }
 } // namespace
 
@@ -668,10 +927,12 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
                       DXGI_FORMAT finalFormat, ID3D12Resource* hudless, DXGI_FORMAT hudlessFormat,
                       const ProduceParams& params)
 {
+    FramePacingTrace::Scope cpuTiming(FramePacingTrace::Phase::HudProduce);
     if (device == nullptr || queue == nullptr || finalImage == nullptr || hudless == nullptr)
         return;
 
     std::lock_guard lock(g_mutex);
+    g_missingSamples=0;
 
     ++g_frame;
     const int previousWritten = g_lastWritten;
@@ -714,9 +975,20 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
     const auto read = Completed(g_pasteFence);
     int target = -1;
 
-    for (int i = 0; i < (int) SlotCount; ++i)
+    const bool previewHistoryActive = g_previewSlot >= 0 || g_previousPreviewSlot >= 0 ||
+                                      g_olderPreviewSlot >= 0;
+    const int slotLimit = previewHistoryActive ? (int) SlotCount : 4;
+    for (int i = 0; i < slotLimit; ++i)
     {
         if (i == previous || i == newest)
+            continue;
+
+        // A preview commonly updates at 30 Hz while the scene runs faster.
+        // Keep its last image until the next preview update, provided it is
+        // still fresh; it is also read by the presentation queue below.
+        if ((i == g_previewSlot || i == g_previousPreviewSlot || i == g_olderPreviewSlot) &&
+            Config::Instance()->FfxivPreviewFG.value_or_default() &&
+            Util::MillisecondsNow() - g_slots[i].producedAtMs < 200.0)
             continue;
 
         // producedValue also guards the slot's allocator and descriptor heap, even after a resize
@@ -732,6 +1004,17 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
         }
     }
 
+    // Preserve the main HUD if the other slots are all in flight. The
+    // preview then uses the unwarped HUD image until a new guide is captured.
+    for (int heldIndex : {g_olderPreviewSlot, g_previousPreviewSlot, g_previewSlot})
+    {
+        if (target >= 0 || heldIndex < 0 || heldIndex == previous || heldIndex == newest)
+            continue;
+        const auto& held = g_slots[heldIndex];
+        if (held.producedValue <= produced && held.lastReadValue <= read)
+            target = heldIndex;
+    }
+
     if (target < 0)
     {
         SetMessageLocked("No free UI image this frame (presents are running behind)");
@@ -739,7 +1022,16 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
     }
 
     auto& slot = g_slots[target];
+    if (target == g_previewSlot)
+        g_previewSlot = -1;
+    if (target == g_previousPreviewSlot)
+        g_previousPreviewSlot = -1;
+    if (target == g_olderPreviewSlot)
+        g_olderPreviewSlot = -1;
     slot.state = SlotState::Empty;
+    slot.flowPreviousFrame = 0;
+    slot.previewMotion = nullptr;
+    slot.previewMotionOwner.reset(); // prior paste reads completed before target selection
 
     if (slot.image == nullptr && !CreateImageLocked(slot, (UINT) target))
     {
@@ -800,6 +1092,12 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
             return;
         }
     }
+    // Hold the guide before submitting the producer. Its valid pixels identify
+    // the preview even when REST's image difference does not include it.
+    auto preview = FfxivPreviewFGMap::Open(device, (UINT)g_width, g_height);
+    slot.previewMotion = preview.resource;
+    slot.previewMotionOwner = std::move(preview.owner);
+
     CD3DX12_CPU_DESCRIPTOR_HANDLE cpu(slot.heap->GetCPUDescriptorHandleForHeapStart());
     CreateSrv(finalImage, finalFormat, cpu);
     cpu.Offset(1, g_csuIncrement);
@@ -812,6 +1110,9 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
     cpu.Offset(1, g_csuIncrement);
 
     CreateSrv(hdrFinal ? hdrFinal : finalImage, hdrFinal ? DXGI_FORMAT_R10G10B10A2_UNORM : finalFormat, cpu);
+    cpu.Offset(1, g_csuIncrement);
+    CreateSrv(slot.previewMotion ? slot.previewMotion : finalImage,
+              slot.previewMotion ? DXGI_FORMAT_R8G8B8A8_UNORM : finalFormat, cpu);
     cpu.Offset(1, g_csuIncrement);
     D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
     uavDesc.Format = g_imageFormat;
@@ -826,12 +1127,16 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
     constants.hasPrevious = previous >= 0 ? 1 : 0;
     constants.cleanup = params.cleanup ? 1 : 0;
     constants.useHDR = params.hdr ? 1 : 0;
+    constants.usePreviewMap = slot.previewMotion ? 1 : 0;
 
     auto list = g_produceList;
 
     // Both inputs rest in COMMON between uses (interop copy / Streamline tagging / UI extraction).
     Barrier(list, finalImage, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     Barrier(list, hudless, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (slot.previewMotion)
+        Barrier(list, slot.previewMotion, D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     Barrier(list, slot.image, ImageRestState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     ID3D12DescriptorHeap* heaps[] = { slot.heap };
@@ -843,8 +1148,13 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
     list->Dispatch((UINT) ((g_width + 15) / 16), (g_height + 15) / 16, 1);
 
     Barrier(list, slot.image, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, ImageRestState);
+    if (slot.previewMotion)
+        Barrier(list, slot.previewMotion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_COMMON);
     Barrier(list, hudless, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
     Barrier(list, finalImage, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+
+    RecordPreviewFlowLocked(slot, previous, list);
 
     hr = list->Close();
     if (FAILED(hr))
@@ -872,6 +1182,24 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
     slot.frame = g_frame;
     slot.producedValue = value;
     slot.producedAtMs = Util::MillisecondsNow();
+    if (slot.flowPreviousFrame) ++g_previewFlowBuilt;
+    if (slot.previewMotion)
+    {
+        if (g_previewLastUpdateMs > 0.0)
+        {
+            const double period = slot.producedAtMs - g_previewLastUpdateMs;
+            if (period >= 18.0 && period <= 100.0)
+                g_previewPeriodMs = std::clamp(g_previewPeriodMs * 0.75 + period * 0.25, 20.0, 100.0);
+        }
+        g_previewLastUpdateMs = slot.producedAtMs;
+        g_olderPreviewSlot = g_previousPreviewSlot;
+        g_previousPreviewSlot = g_previewSlot;
+        g_previewSlot = target;
+    }
+    if(slot.previewMotion && !g_loggedPreviewMotion){
+        g_loggedPreviewMotion=true;
+        LOG_INFO("UI paste: first CharaView motion map attached to a real frame ({}x{})",g_width,g_height);
+    }
     g_lastWritten = target;
 
     if (g_status.produced++ == 0)
@@ -880,18 +1208,47 @@ void UiPaste::Produce(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Res
     SetMessageLocked("Active");
 }
 
+void UiPaste::MissingSample()
+{
+    std::lock_guard lock(g_mutex);
+    ++g_frame;
+    ++g_missingSamples;
+    const auto now=Util::MillisecondsNow();
+    // Keep at most two missing real frames and 100 ms. Never resurrect expired
+    // images, and preserve their GPU fences and monotonic presentation order.
+    for(auto& slot:g_slots)if(slot.state==SlotState::Ready &&
+        (g_missingSamples>2 || now-slot.producedAtMs>100.0))slot.state=SlotState::Empty;
+    // A retained HUD sample must stay still when its matching real-frame
+    // preview guides are missing. Keep the owner until prior GPU reads retire.
+    for(auto& slot:g_slots)slot.previewMotion=nullptr;
+    g_previewSlot=-1;
+    g_previousPreviewSlot=-1;
+    g_olderPreviewSlot=-1;
+    g_previewClock.Reset();
+    g_previewPairFrame = g_previousPreviewPairFrame = 0;
+    g_lastWritten=-1; // recovery must not use stale mask feedback
+    SetMessageLocked(g_missingSamples<=2?"Brief HUD capture gap":"No HUD-less image this frame");
+}
+
 void UiPaste::Invalidate(const char* reason)
 {
     std::lock_guard lock(g_mutex);
 
     ++g_frame;
+    g_missingSamples=0;
     g_lastWritten = -1;
 
     for (auto& slot : g_slots)
     {
         if (slot.state == SlotState::Ready)
             slot.state = SlotState::Empty;
+        slot.previewMotion = nullptr;
     }
+    g_previewSlot = -1;
+    g_previousPreviewSlot = -1;
+    g_olderPreviewSlot = -1;
+    g_previewClock.Reset();
+    g_previewPairFrame = g_previousPreviewPairFrame = 0;
 
     SetMessageLocked(reason);
 }
@@ -920,6 +1277,7 @@ void UiPaste::Release()
 
 void UiPaste::Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
 {
+    FramePacingTrace::Scope cpuTiming(FramePacingTrace::Phase::HudPaste);
     if (swapChain == nullptr || presentQueue == nullptr)
         return;
 
@@ -1048,6 +1406,54 @@ void UiPaste::Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
 
     const auto backBufferDesc = backBuffer->GetDesc();
     auto& slot = g_slots[pick];
+    // Keep the chosen pair stable through the native present burst. A newer
+    // GPU capture completing halfway through it must not reset preview motion.
+    const bool samePreviewBatch = g_previewClock.Batch() == g_frame;
+    int previewPick = -1;
+    // Avoid adding fresh-producer dependencies from native present callbacks
+    // while the menu slows presentation. The completed HUD retains the
+    // DLSS/NR preview; interpolation resumes when the menu closes.
+    if (Config::Instance()->FfxivPreviewFG.value_or_default() && !MenuOverlayBase::IsVisible())
+    {
+        for (int i = 0; i < (int) SlotCount; ++i)
+        {
+            const auto& candidate = g_slots[i];
+            // The ordinary HUD is deliberately one real frame behind for
+            // stable timing. The preview has its own interpolation clock and
+            // must use the newest submitted capture, even if it is one frame
+            // newer than the selected HUD image. Otherwise its paired pose
+            // check almost never succeeds at a 30 Hz preview cadence. Ready
+            // means ExecuteCommandLists and Signal have already been queued.
+            // The present queue waits for that token below; requiring CPU-
+            // observed completion here repeats old pairs then skips poses
+            // whenever the rendering queue has more than one frame in flight.
+            if (candidate.state != SlotState::Ready || !candidate.image || !candidate.previewMotion ||
+                candidate.producedValue == UINT64_MAX || candidate.frame > g_frame ||
+                now - candidate.producedAtMs > 150.0)
+                continue;
+            if (samePreviewBatch && candidate.frame != g_previewPairFrame)
+                continue;
+            if (previewPick < 0 || candidate.frame > g_slots[previewPick].frame)
+                previewPick = i;
+        }
+    }
+    int previousPreviewPick = -1;
+    if (previewPick >= 0)
+    {
+        for (int i = 0; i < (int) SlotCount; ++i)
+        {
+            const auto& earlier = g_slots[i];
+            const double previewGap = g_slots[previewPick].producedAtMs - earlier.producedAtMs;
+            if (earlier.state != SlotState::Ready || !earlier.image || !earlier.previewMotion ||
+                earlier.producedValue == UINT64_MAX || earlier.frame >= g_slots[previewPick].frame ||
+                previewGap < 4.0 || previewGap > 100.0 || now - earlier.producedAtMs > 200.0)
+                continue;
+            if (samePreviewBatch && earlier.frame != g_previousPreviewPairFrame)
+                continue;
+            if (previousPreviewPick < 0 || earlier.frame > g_slots[previousPreviewPick].frame)
+                previousPreviewPick = i;
+        }
+    }
 
     if (backBufferDesc.Width != g_width || backBufferDesc.Height != g_height || backBufferDesc.SampleDesc.Count != 1)
     {
@@ -1080,14 +1486,28 @@ void UiPaste::Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
         return;
     }
 
-    CD3DX12_CPU_DESCRIPTOR_HANDLE srv(g_pasteCsuHeap->GetCPUDescriptorHandleForHeapStart(), (INT) ring,
+    CD3DX12_CPU_DESCRIPTOR_HANDLE srv(g_pasteCsuHeap->GetCPUDescriptorHandleForHeapStart(), (INT) ring * 5,
                                       g_csuIncrement);
-    CD3DX12_GPU_DESCRIPTOR_HANDLE srvGpu(g_pasteCsuHeap->GetGPUDescriptorHandleForHeapStart(), (INT) ring,
+    CD3DX12_GPU_DESCRIPTOR_HANDLE srvGpu(g_pasteCsuHeap->GetGPUDescriptorHandleForHeapStart(), (INT) ring * 5,
                                          g_csuIncrement);
     CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(g_pasteRtvHeap->GetCPUDescriptorHandleForHeapStart(), (INT) ring,
                                       g_rtvIncrement);
 
     CreateSrv(slot.image, g_imageFormat, srv);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE motionSrv(srv, 1, g_csuIncrement);
+    CreateSrv(previewPick >= 0 ? g_slots[previewPick].previewMotion : slot.image,
+              previewPick >= 0 ? DXGI_FORMAT_R8G8B8A8_UNORM : g_imageFormat, motionSrv);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE previewSrv(motionSrv, 1, g_csuIncrement);
+    CreateSrv(previewPick >= 0 ? g_slots[previewPick].image : slot.image, g_imageFormat, previewSrv);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE previousPreviewSrv(previewSrv, 1, g_csuIncrement);
+    CreateSrv(previousPreviewPick >= 0 ? g_slots[previousPreviewPick].image : slot.image,
+              g_imageFormat, previousPreviewSrv);
+    const bool usePreviewFlow = previewPick >= 0 && previousPreviewPick >= 0 &&
+        g_slots[previewPick].previewFlow &&
+        g_slots[previewPick].flowPreviousFrame == g_slots[previousPreviewPick].frame;
+    CD3DX12_CPU_DESCRIPTOR_HANDLE flowSrv(previousPreviewSrv, 1, g_csuIncrement);
+    CreateSrv(usePreviewFlow ? g_slots[previewPick].previewFlow : slot.image,
+              usePreviewFlow ? DXGI_FORMAT_R16G16B16A16_FLOAT : g_imageFormat, flowSrv);
 
     D3D12_RENDER_TARGET_VIEW_DESC rtvDesc = {};
     rtvDesc.Format = rtvFormat;
@@ -1098,14 +1518,41 @@ void UiPaste::Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
 
     // A presentable backbuffer is in PRESENT (== COMMON) whenever Present is called.
     Barrier(list, backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    if(previewPick >= 0)
+        Barrier(list, g_slots[previewPick].previewMotion, D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     ID3D12DescriptorHeap* heaps[] = { g_pasteCsuHeap };
     list->SetDescriptorHeaps(1, heaps);
     list->SetGraphicsRootSignature(g_pasteRootSig);
     list->SetPipelineState(g_pastePso);
 
-    const UINT debugTint = g_debugTint.load(std::memory_order_relaxed) ? 1u : 0u;
-    list->SetGraphicsRoot32BitConstants(0, 1, &debugTint, 0);
+    struct PasteConstants { UINT debugTint; UINT usePreviewMotion; float phase; UINT reserved; UINT useFlow; };
+    const UINT64 previewFrame = previewPick >= 0 ? g_slots[previewPick].frame : 0;
+    unsigned multiplier = fg->GetObservedFrameMultiplier();
+    if (!multiplier)
+        multiplier = std::clamp(fg->GetInterpolatedFrameCount(), 0u, 7u) + 1;
+    const bool continuousPair = previousPreviewPick >= 0 && g_previewBatchInterpolate &&
+        g_slots[previousPreviewPick].frame == g_previewPairFrame && previewFrame != g_previewPairFrame;
+    const auto previewStep = g_previewClock.Plan(g_frame, multiplier, continuousPair);
+    // Repeated captures must hold the current pose instead of replaying the
+    // previous-to-current transition on the next real-frame batch.
+    const bool interpolateBatch = samePreviewBatch ? g_previewBatchInterpolate :
+                                  previewFrame != g_previewPairFrame;
+    const float previewPhase = previousPreviewPick < 0 ? 0.0f :
+                               interpolateBatch ? previewStep.Phase() : 1.0f;
+    const PasteConstants constants{g_debugTint.load(std::memory_order_relaxed) ? 1u : 0u,
+                                  previewPick >= 0 ? 1u : 0u,
+                                  previewPhase,
+                                  previousPreviewPick >= 0 ? 1u : 0u,
+                                  usePreviewFlow ? 1u : 0u};
+    if (previousPreviewPick >= 0 && g_previewFlowBuilt >= 120 && g_previewTracedOutputs < 64 &&
+        Config::Instance()->LogToFile.value_or_default())
+        LOG_INFO("CharaView FG output {}: batch {}, pair {} -> {}, output {}/{}, phase {:.3f}, flow {}, buffer {} @ {:X}, queue {:X}",
+                 ++g_previewTracedOutputs, g_frame, g_slots[previousPreviewPick].frame, previewFrame,
+                 previewStep.output, previewStep.count, previewPhase, usePreviewFlow,
+                 backBufferIndex, size_t(backBuffer), size_t(presentQueue));
+    list->SetGraphicsRoot32BitConstants(0, 5, &constants, 0);
     list->SetGraphicsRootDescriptorTable(1, srvGpu);
 
     D3D12_VIEWPORT viewport = { 0.0f, 0.0f, (float) g_width, (float) g_height, 0.0f, 1.0f };
@@ -1114,7 +1561,17 @@ void UiPaste::Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
     list->RSSetScissorRects(1, &scissor);
     list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    auto previewCapture = previousPreviewPick >= 0 && previewPick >= 0 ?
+        FfxivPreviewPasteCapture::Prepare(g_device, g_slots[previousPreviewPick].image,
+            g_slots[previewPick].image, g_slots[previewPick].previewMotion, backBuffer,
+            g_slots[previewPick].previewMotionOwner, previewPhase, g_frame,
+            g_slots[previousPreviewPick].frame, g_slots[previewPick].frame) : nullptr;
+    FfxivPreviewPasteCapture::RecordBefore(previewCapture, list, ImageRestState);
     list->DrawInstanced(3, 1, 0, 0);
+    FfxivPreviewPasteCapture::RecordAfter(previewCapture, list);
+    if(previewPick >= 0)
+        Barrier(list, g_slots[previewPick].previewMotion, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_COMMON);
 
     Barrier(list, backBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
 
@@ -1127,12 +1584,26 @@ void UiPaste::Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
         return;
     }
 
-    // Already completed (checked above), so this never delays the present; it only makes the
-    // dependency explicit on the GPU timeline.
-    presentQueue->Wait(g_produceFence, slot.producedValue);
+    // The ordinary HUD is already complete. Preview images may still be in
+    // flight: their producer and signal were submitted before this FG batch,
+    // so wait on the GPU rather than selecting a stale CPU-completed pose.
+    UINT64 requiredValue = slot.producedValue;
+    if (previewPick >= 0)
+        requiredValue = std::max(requiredValue, g_slots[previewPick].producedValue);
+    if (previousPreviewPick >= 0)
+        requiredValue = std::max(requiredValue, g_slots[previousPreviewPick].producedValue);
+    hr = presentQueue->Wait(g_produceFence, requiredValue);
+    if (FAILED(hr))
+    {
+        LOG_ERROR("UI paste: producer dependency failed: {:X}", (UINT) hr);
+        ++g_status.skipped;
+        SetMessageLocked("Present queue could not wait for the HUD image");
+        return;
+    }
 
     ID3D12CommandList* lists[] = { list };
     presentQueue->ExecuteCommandLists(1, lists);
+    FfxivPreviewPasteCapture::DeferFinal(previewCapture, presentQueue);
 
     const auto value = ++g_pasteValue;
     hr = presentQueue->Signal(g_pasteFence, value);
@@ -1141,14 +1612,52 @@ void UiPaste::Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
         // Submitted without a completion token: keep this slot and allocator out of reuse.
         LOG_ERROR("UI paste: paste Signal failed: {:X}", (UINT) hr);
         slot.lastReadValue = UINT64_MAX;
+        if (previewPick >= 0)
+            g_slots[previewPick].lastReadValue = UINT64_MAX;
+        if (previousPreviewPick >= 0)
+            g_slots[previousPreviewPick].lastReadValue = UINT64_MAX;
         g_pasteAllocatorValues[ring] = UINT64_MAX;
         ++g_pasteCounter;
         return;
     }
 
     slot.lastReadValue = value;
+    if (previewPick >= 0)
+    {
+        g_slots[previewPick].lastReadValue = value;
+        if (!samePreviewBatch)
+        {
+            if (interpolateBatch) ++g_previewAdvancedBatches;
+            else ++g_previewHeldBatches;
+            if (g_slots[previewPick].producedValue > produced) ++g_previewPendingBatches;
+            g_previewMaxSourceLag = std::max(g_previewMaxSourceLag, g_frame - previewFrame);
+        }
+        ++g_previewGuidedPastes;
+        if (usePreviewFlow) ++g_previewFlowPasted;
+        if (previousPreviewPick >= 0)
+        {
+            g_slots[previousPreviewPick].lastReadValue = value;
+            ++g_previewPairedPastes;
+        }
+        g_previewClock.Commit(previewStep);
+        g_previewPairFrame = previewFrame;
+        g_previousPreviewPairFrame = previousPreviewPick >= 0 ? g_slots[previousPreviewPick].frame : 0;
+        g_previewBatchInterpolate = interpolateBatch;
+        if (previousPreviewPick >= 0)
+        {
+            g_previewPhaseLow = std::min(g_previewPhaseLow, previewPhase);
+            g_previewPhaseHigh = std::max(g_previewPhaseHigh, previewPhase);
+        }
+    }
+    else
+    {
+        ++g_previewUnguidedPastes;
+        g_previewClock.Reset();
+        g_previewPairFrame = g_previousPreviewPairFrame = 0;
+    }
     g_pasteAllocatorValues[ring] = value;
     ++g_pasteCounter;
+    g_sameFramePastes = slot.frame == g_lastPastedFrame ? g_sameFramePastes + 1 : 1;
     g_lastPastedFrame = slot.frame;
     ++g_status.pasted;
 
@@ -1161,6 +1670,8 @@ void UiPaste::Paste(IDXGISwapChain* swapChain, ID3D12CommandQueue* presentQueue)
 }
 
 void UiPaste::SetDebugTint(bool enabled) { g_debugTint.store(enabled, std::memory_order_relaxed); }
+
+void UiPaste::FinishPresentDiagnostics() { FfxivPreviewPasteCapture::FinishFinal(); }
 
 bool UiPaste::DebugTint() { return g_debugTint.load(std::memory_order_relaxed); }
 

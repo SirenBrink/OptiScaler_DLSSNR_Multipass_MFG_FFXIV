@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <misc/FfxivPreviewDLSS.h>
 
 #include "Config.h"
 #include "Util.h"
@@ -17,6 +18,7 @@
 #include <imgui/ImGuiNotify.hpp>
 #include <misc/IdentifyGpu.h>
 #include <dlssnr/DlssNr.h>
+#include <misc/FfxivCharaViewTrace.h>
 
 static ID3D11Device* D3D11Device = nullptr;
 static ankerl::unordered_dense::map<unsigned int, ContextData<IFeature_Dx11>> Dx11Contexts;
@@ -326,6 +328,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Init_with_ProjectID(
 
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Shutdown()
 {
+    FfxivPreviewDLSS::Shutdown();
     shutdown = true;
 
     if (State::Instance().gameExe == "ffxiv_dx11.exe" && WithDx12::IsInited())
@@ -821,6 +824,26 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_EvaluateFeature(ID3D11DeviceConte
 
     State& state = State::Instance();
     auto handleId = InFeatureHandle->Id;
+    if (InParameters && Config::Instance()->FfxivPreviewNRTrace.value_or_default())
+    {
+        static std::atomic<UINT64> calls{0}, previewInputs{0}, previewOutputs{0};
+        const auto& snapshot = FfxivCharaViewTrace::Current();
+        auto identify = [&](const char* key) {
+            ID3D11Resource* resource = nullptr;
+            InParameters->Get(key, &resource);
+            Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+            if (!resource || FAILED(resource->QueryInterface(IID_PPV_ARGS(&texture)))) return -1;
+            D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
+            return FfxivCharaViewTrace::Match(snapshot,texture.Get(),desc.Width,desc.Height);
+        };
+        const int input=identify(NVSDK_NGX_Parameter_Color), output=identify(NVSDK_NGX_Parameter_Output);
+        if(input>=0 && input<8)++previewInputs;
+        if(output>=0 && output<8)++previewOutputs;
+        const auto count=++calls;
+        if(count%600==0 || (input>=0 && input<8) || (output>=0 && output<8))
+            LOG_INFO("CharaView NGX coverage: evaluations {}, preview inputs {}, preview outputs {}, current input entry {}, output entry {}",
+                count,previewInputs.load(),previewOutputs.load(),input,output);
+    }
     if (handleId < DLSS_MOD_ID_OFFSET)
     {
         if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::D3D11_EvaluateFeature() != nullptr)

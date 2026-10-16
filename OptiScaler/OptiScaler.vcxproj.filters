@@ -32,6 +32,7 @@
     </Filter>
     <ClInclude Include="shaders\dlssnr\precompile\DlssNr_GuideMatch_Shader.h" />
     <ClInclude Include="dlssnr\DlssNr_GpuSubmission.h" />
+    <ClInclude Include="dlssnr\RecordedListIndex.h" />
     <ClInclude Include="dlssnr\DlssNr_DescriptorSlots.h" />
     <ClInclude Include="low_latency\input\ConcurrentInputSelection.h" />
   </ItemGroup>
@@ -298,6 +299,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="menu\menu_overlay_dx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="menu\OverlaySubmissionRing.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="menu\menu_overlay_vk.h">
@@ -1635,5 +1639,21 @@
       <Filter>Source Files</Filter>
     </None>
     <None Include="shaders\magnifier\precompile\Magnifier_Shader_Vk.spv" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="misc\FfxivPreviewDLSS.h" />
+    <ClInclude Include="misc\FfxivPreviewNR.h" />
+    <ClInclude Include="misc\FramePacingTrace.h" />
+    <ClInclude Include="dlssnr\NrFocusPolicy.h" />
+    <ClInclude Include="framegen\dlssg\DynamicMfgPolicy.h" />
+    <ClInclude Include="misc\FfxivPreviewFGMap.h" />
+    <ClInclude Include="misc\FfxivPreviewFlow.h" />
+    <ClInclude Include="misc\FfxivPreviewPresentation.h" />
+    <ClInclude Include="misc\FfxivPreviewPasteCapture.h" />
+    <ClInclude Include="misc\FfxivPreviewInterop.h" />
+    <ClCompile Include="misc\FfxivPreviewNR.cpp" />
+    <ClCompile Include="misc\FfxivPreviewFGMap.cpp" />
+    <ClInclude Include="misc\FfxivPreviewCamera.h" />
+    <ClCompile Include="misc\FfxivPreviewDLSS.cpp" />
   </ItemGroup>
 </Project>

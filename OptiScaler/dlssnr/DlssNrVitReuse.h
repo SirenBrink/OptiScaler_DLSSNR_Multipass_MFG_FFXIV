@@ -91,6 +91,19 @@ class Filter
     }
 
     bool Evaluating() const { return ctx().active; }
+    unsigned EvaluationComputed() const { return ctx().computed; }
+    unsigned EvaluationReused() const { return ctx().reused; }
+    // An alternate runtime may rotate scratch bindings between evaluations.
+    // Reusing an earlier buffer's contents after that change is invalid.
+    void CheckBindings(uint64_t signature)
+    {
+        auto& c=ctx();
+        if(!c.active || c.inRange)return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& entry=entries_[c.key];
+        if(!signature || entry.bindings!=signature){entry.valid=false;entry.skips=0;}
+        entry.bindings=signature;
+    }
 
     // True when this launch is to be dropped. Must be called for every launch of the evaluation, in order.
     bool Drop(Role role)
@@ -144,12 +157,14 @@ class Filter
             if (c.skipping)
             {
                 c.skipping = false;
+                ++c.reused;
                 ++reused_;
                 return true;
             }
 
             std::lock_guard<std::mutex> lock(mutex_);
             entries_[c.key].valid = true;
+            ++c.computed;
             ++computed_;
             return false;
         }
@@ -222,6 +237,7 @@ class Filter
     {
         bool valid = false;  // the output buffer holds a complete result
         unsigned skips = 0;  // consecutive evaluations that reused it
+        uint64_t bindings = 0;
     };
 
     struct Ctx
@@ -233,6 +249,7 @@ class Filter
         bool inRange = false;
         bool skipping = false;
         bool anomaly = false;
+        unsigned computed = 0, reused = 0;
     };
 
     static Ctx& ctx()

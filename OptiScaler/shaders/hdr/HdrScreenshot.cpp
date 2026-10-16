@@ -5,6 +5,7 @@
 #include "HdrScreenshotReadback.h"
 #include <Config.h>
 #include <Util.h>
+#include <menu/menu_common.h>
 #include <atomic>
 #include <mutex>
 #include <new>
@@ -41,8 +42,16 @@ bool PendingHDR()
     return requested && GetTickCount64()-requested<=1000 && !S().busy.load() &&
         Config::Instance()->FfxivHDRScreenshotFormat.value_or_default()==1;
 }
+bool CaptureMenu()
+{
+    const auto* config = Config::Instance();
+    return Hdr10::Active() && config->FfxivHDRScreenshotFormat.value_or_default() == 1 &&
+        config->FfxivHDRScreenshotMenu.value_or_default() && config->OverlayMenu.value_or_default() &&
+        MenuCommon::IsVisible();
+}
 std::shared_ptr<Job> Prepare(HWND window, ID3D12Device* device, ID3D12GraphicsCommandList* commands,
-    ID3D12Resource* hdrSource, ID3D12Resource* sdrSource, D3D12_RESOURCE_STATES sdrState)
+    ID3D12Resource* hdrSource, ID3D12Resource* sdrSource, D3D12_RESOURCE_STATES sdrState,
+    D3D12_RESOURCE_STATES hdrState)
 {
     const auto requested = S().requested.exchange(0);
     if (!requested || GetTickCount64()-requested > 1000 || !device || !commands) return {};
@@ -62,7 +71,7 @@ std::shared_ptr<Job> Prepare(HWND window, ID3D12Device* device, ID3D12GraphicsCo
                 t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond,t.wMilliseconds,GetTickCount64(),job->hdr?L"HDR":L"SDR");
         // Finish potentially throwing preparation before recording a GPU use.
         Message(job->hdr ? "HDR screenshot queued" : "SDR screenshot queued");
-        job->RecordPreservingState(commands, job->hdr ? D3D12_RESOURCE_STATE_COPY_SOURCE : sdrState);
+        job->RecordPreservingState(commands, job->hdr ? hdrState : sdrState);
         return job;
     } catch (...) { if (!job) S().busy = false; Message("HDR screenshot allocation failed (see log)"); LOG_ERROR("OptiHDR screenshot allocation failed"); return {}; }
 }

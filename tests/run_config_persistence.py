@@ -19,11 +19,11 @@ def function(signature):
         end += 1
     return source[start:end]
 
-fields = re.findall(r'^\s*(CustomOptional<[^\n]+>\s+(?:FfxivHDR\w*|LowLatencyInput|LowLatencyOutput|VulkanUseCopyForInputs|VulkanUseCopyForOutput|AnisotropyModifyComp|AnisotropyModifyMinMax|DlssNrVitFirstPassOnly)\s*\{[^\n]+?;)', header, re.M)
-assert len(fields) == 21
+fields = re.findall(r'^\s*(CustomOptional<[^\n]+>\s+(?:FfxivHDR\w*|FfxivPreviewNRTrace|FfxivPreviewAA|FfxivPreviewDLSS|FfxivPreviewNR|FfxivPreviewNRReuse|FfxivPreviewFG|FfxivPreviewUpscale|FfxivPreviewGuideCapture|LowLatencyInput|LowLatencyOutput|VulkanUseCopyForInputs|VulkanUseCopyForOutput|AnisotropyModifyComp|AnisotropyModifyMinMax|DlssNrVitFirstPassOnly|DlssNrPauseOnFocusLoss)\s*\{[^\n]+?;)', header, re.M)
+assert len(fields) == 31
 load_start = source.index('            if (auto v = readUInt("LowLatency", "Input")')
 load = source[load_start:source.index('            ForceHDR.set_from_config', load_start)]
-for field in ['AnisotropyModifyComp', 'AnisotropyModifyMinMax', 'DlssNrVitFirstPassOnly']:
+for field in ['AnisotropyModifyComp', 'AnisotropyModifyMinMax', 'DlssNrVitFirstPassOnly', 'DlssNrPauseOnFocusLoss']:
     start = source.index(field + '.set_from_config')
     load += source[start:source.index(';', start) + 1] + '\n'
 
@@ -33,8 +33,9 @@ for key in ['ModifyComparison', 'ModifyMinMax']:
     start = source.index('ini.SetValue("Anisotropy", "' + key + '",')
     save += source[start:source.index(';', start) + 1] + '\n'
 
-start = source.index('ini.SetValue("DlssNr", "VitFirstPassOnly",')
-save += source[start:source.index(';', start) + 1] + '\n'
+for key in ['VitFirstPassOnly', 'PauseOnFocusLoss']:
+    start = source.index('ini.SetValue("DlssNr", "' + key + '",')
+    save += source[start:source.index(';', start) + 1] + '\n'
 
 tail_start = source.index('    auto pathWStr = absoluteFileName.wstring();', source.index('bool Config::SaveIni()'))
 save += source[tail_start:source.index('\n}', tail_start)]
@@ -72,11 +73,13 @@ int main(int argc,char**argv) {
  assert(argc==2);
  const std::filesystem::path path=argv[1];
  Config c; c.absoluteFileName=path;
- c.DlssNrVitFirstPassOnly=false;
+ c.DlssNrVitFirstPassOnly=false;c.DlssNrPauseOnFocusLoss=true;
+ c.FfxivPreviewDLSS=true;c.FfxivPreviewNR=true;c.FfxivPreviewNRReuse=true;c.FfxivPreviewFG=true;c.FfxivPreviewAA=true;c.FfxivPreviewUpscale=false;c.FfxivPreviewNRTrace=true;
+ c.FfxivPreviewGuideCapture=true;
  c.FfxivHDRNRSceneInput=true;c.FfxivHDRReShadeHighlights=true;c.FfxivHDRMode=1;c.FfxivHDR=true;c.FfxivHDRPeak=1450.0f;c.FfxivHDRPaper=185.0f;
  c.FfxivHDRExpansion=0.73f;c.FfxivHDRContrast=1.23f;
  c.FfxivHDRSaturation=1.17f;c.FfxivHDRVibrance=-0.32f;
- c.FfxivHDRScreenshotKey=0x79;c.FfxivHDRScreenshotFormat=1;c.FfxivHDRScreenshotIccOnly=true;
+ c.FfxivHDRScreenshotKey=0x79;c.FfxivHDRScreenshotFormat=1;c.FfxivHDRScreenshotIccOnly=true;c.FfxivHDRScreenshotMenu=true;
  c.LowLatencyInput=LowLatencyInput::Reflex;c.LowLatencyOutput=LowLatencyMode::XeLL;
  c.VulkanUseCopyForInputs=true;c.VulkanUseCopyForOutput=true;
  c.AnisotropyModifyComp=false;c.AnisotropyModifyMinMax=false;
@@ -95,11 +98,12 @@ int main(int argc,char**argv) {
  assert(!twice.FfxivHDRReShadeHighlights.value_or_default());
  assert(twice.FfxivHDRScreenshotKey.value_or_default()==UnboundKey);
  loaded.absoluteFileName=path/"missing"/"OptiScaler.ini";assert(!loaded.Save());
- std::cout<<"PASS: 21 settings round-trip; independent HDR resets persist; failed writes report failure\n";
+ std::cout<<"PASS: 31 settings round-trip including preview controls; independent HDR resets persist; failed writes report failure\n";
 }
 '''
 simpleini = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else repo / 'external/simpleini'
-with tempfile.TemporaryDirectory(prefix='optiscaler-persistence-') as temp:
+with tempfile.TemporaryDirectory(prefix='optiscaler-persistence-', dir=repo / 'tests') as temp:
+    assert pathlib.Path(temp).resolve().is_relative_to((repo / 'tests').resolve())
     build = pathlib.Path(temp)
     (build / 'test.cpp').write_text(code, encoding='utf-8')
     subprocess.run(['cl', '/nologo', '/std:c++latest', '/EHsc', '/UNDEBUG', f'/I{simpleini}', str(build / 'test.cpp'), f'/Fo{build}/', f'/Fe{build}/test.exe'], check=True)

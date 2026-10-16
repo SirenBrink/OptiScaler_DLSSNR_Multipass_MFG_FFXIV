@@ -7,6 +7,7 @@
 #include "DlssNrNative.h"
 #include "NrUserPresets.h"
 #include <misc/FfxivLightingCapture.h>
+#include <misc/FfxivPreviewNR.h>
 
 
 #include <Config.h>
@@ -132,6 +133,57 @@ void RenderMenu(Config* config, float menuResScale)
 
         RenderUserPresets(*config);
 
+        if (ImGui::TreeNode("Character preview (experimental)"))
+        {
+            bool temporal=config->FfxivPreviewDLSS.value_or_default();
+            if(ImGui::Checkbox("Preview DLSS (2x output, experimental)",&temporal))config->FfxivPreviewDLSS=temporal;
+            ImGui::Text("DLSS previews: %u active; %llu evaluations; %llu fallbacks",FfxivPreviewDLSS::instances.load(),FfxivPreviewDLSS::evaluated.load(),FfxivPreviewDLSS::fallbacks.load());
+            ImGui::Text("Temporal jitter: %llu evaluations",FfxivPreviewDLSS::jittered.load());
+            ImGui::BeginDisabled(!temporal);
+            bool previewNR=config->FfxivPreviewNR.value_or_default();
+            if(ImGui::Checkbox("Preview NR (one pass, experimental)",&previewNR))config->FfxivPreviewNR=previewNR;
+            HelpMarker("Generate the NR correction at native preview resolution and apply it after the 2x DLSS upscale. Reduces NR memory use while retaining DLSS detail and native transparency.");
+            ImGui::EndDisabled();
+            ImGui::Text("NR previews: %u active; %llu evaluations; %llu skipped",FfxivPreviewNR::instances.load(),FfxivPreviewNR::evaluated.load(),FfxivPreviewNR::skipped.load());
+            ImGui::BeginDisabled(!temporal || !previewNR || config->DlssNrPrecision.value_or_default()==4);
+            bool previewReuse=config->FfxivPreviewNRReuse.value_or_default();
+            if(ImGui::Checkbox("Reuse preview NR bottleneck",&previewReuse))config->FfxivPreviewNRReuse=previewReuse;
+            HelpMarker("Reuse each preview's own NR bottleneck every second evaluation. Resets, interruptions and setting changes compute fully. Uses the main NR kernel-verification setting; unavailable with hybrid precision. Save Settings to keep your choice.");
+            ImGui::EndDisabled();
+            ImGui::Text("Preview bottleneck: %llu computed; %llu reused",FfxivPreviewNR::bottleneckComputed.load(),FfxivPreviewNR::bottleneckReused.load());
+            ImGui::BeginDisabled(!temporal);
+            bool previewFG=config->FfxivPreviewFG.value_or_default();
+            if(ImGui::Checkbox("Refresh previews on generated frames (REST, experimental)",&previewFG))config->FfxivPreviewFG=previewFG;
+            ImGui::EndDisabled();
+            ImGui::TextWrapped("Requires DLSS-G and the REST HUD-less addon. Uses preview motion to refresh the existing HUD paste on generated frames; unsupported frames retain the normal paste.");
+            ImGui::TextDisabled("Preview interpolation pauses while this menu is open.");
+            ImGui::BeginDisabled(temporal);
+            bool aa=config->FfxivPreviewAA.value_or_default();
+            if(ImGui::Checkbox("Preview spatial AA",&aa))config->FfxivPreviewAA=aa;
+            bool upscale=config->FfxivPreviewUpscale.value_or_default();
+            if(ImGui::Checkbox("2x preview upscaling",&upscale))config->FfxivPreviewUpscale=upscale;
+            ImGui::EndDisabled();
+            ImGui::TextWrapped("DLSS uses each preview's native resolution with 2x output. Separate histories; up to 16 previews. Preview NR uses its own one-pass model with pass 1 tuning, applied when the window opens. Requires the DX12 bridge.");
+            if(config->FfxivPreviewGuideCapture.value_or_default()) {
+                ImGui::Text("Preview guide samples: %u / 24",FfxivPreviewGuides::captured.load());
+                ImGui::Text("Signed motion draws: %llu; clears: %llu",static_cast<unsigned long long>(FfxivPreviewMotion::draws.load()),static_cast<unsigned long long>(FfxivPreviewMotion::clears.load()));
+            }
+            if(aa && !temporal)
+            {
+                const auto processed=FfxivPreviewEnhance::processedDraws.load();
+                ImGui::Text("Processed preview draws: %llu",static_cast<unsigned long long>(processed));
+                if(!processed)
+                {
+                    if(FfxivPreviewEnhance::deferredCandidates.load())
+                        ImGui::TextWrapped("Native preview retained: deferred rendering needs a separate integration path.");
+                    else if(FfxivPreviewEnhance::immediateCandidates.load())
+                        ImGui::TextWrapped("Waiting for the native equipment preview texture.");
+                    else ImGui::TextWrapped("Waiting for the equipment preview display shader.");
+                }
+            }
+            ImGui::TreePop();
+        }
+
         const auto amdStatus = DlssNr::AmdBridge::Status();
         const auto amdPrerequisite = DlssNr::AmdBridge::PrerequisiteError();
         if (!amdStatus.empty())
@@ -142,8 +194,11 @@ void RenderMenu(Config* config, float menuResScale)
         bool enabled = config->DlssNrEnabled.value_or_default();
         if (ImGui::Checkbox("Enable Neural Rendering", &enabled))
             config->DlssNrEnabled = enabled;
-
         HelpMarker("Enhance lighting and material appearance with the NR model. Placement selects before or after upscaling.\nRequires nvngx_dlssnr.dll plus the included nvngx.dll_dlssnr.dll helper.");
+        bool pauseOnFocusLoss = config->DlssNrPauseOnFocusLoss.value_or_default();
+        if (ImGui::Checkbox("Pause NR while game is unfocused", &pauseOnFocusLoss))
+            config->DlssNrPauseOnFocusLoss = pauseOnFocusLoss;
+        HelpMarker("Pauses scene and preview NR while another application is focused. Resumes your existing enabled state with fresh history on return. Does not change your saved NR setting or the game's background FPS limit.");
 
         bool beforeSr = config->DlssNrRunBeforeSr.value_or_default();
         const bool deferredActive = config->DlssNrDeferredDlss.value_or_default();
@@ -441,18 +496,18 @@ void RenderMenu(Config* config, float menuResScale)
         HelpMarker("NR colour strength: 0 = preserve game colours, 1 = model colours, above 1 = stronger saturation.");
 
         // Experimental. 0 off (soft knee), 1 Neutwo + our composition, 2 Neutwo + pure-inverse replace,
-        // 3 hybrid+composed, 4 hybrid+replace (identity midtones + unclipped highlights). Always shown.
+        // 3 hybrid+composed, 4 hybrid+replace, 5 linear+composed. Always shown.
         static const char* reversibleNames[] = { "Off (soft knee)", "Neutwo proxy + composed",
                                                  "Neutwo proxy + replace", "Hybrid proxy + composed",
-                                                 "Hybrid proxy + replace" };
+                                                 "Hybrid proxy + replace", "Linear light + composed" };
         int reversible = (int) config->DlssNrReversibleMode.value_or_default();
-        if (reversible < 0 || reversible > 4)
+        if (reversible < 0 || reversible > 5)
             reversible = 0;
         if (ImGui::Combo("HDR mapping (experimental)", &reversible, reversibleNames,
                          IM_ARRAYSIZE(reversibleNames)))
             config->DlssNrReversibleMode = (uint32_t) reversible;
 
-        HelpMarker("Choose how HDR brightness is mapped for NR.\nSoft knee compresses highlights. Neutwo uses a reversible curve. Hybrid preserves midtones and compresses highlights.\nComposed uses the strength and highlight controls. Replace bypasses them and may flicker.");
+        HelpMarker("Choose how HDR brightness is mapped for NR.\nSoft knee compresses highlights. Neutwo uses a reversible curve. Hybrid preserves midtones and compresses highlights.\nComposed uses the strength and highlight controls. Replace bypasses them and may flicker.\nLinear shows each normalized colour channel directly to NR. It is experimental, applies to linear input, and clips the model input above white; saturated highlights may change hue. Tone-mapped SDR input remains passthrough.");
 
         ImGui::SeparatorText("Model passes");
         ImGui::TextWrapped("Settings apply when you release a slider.");

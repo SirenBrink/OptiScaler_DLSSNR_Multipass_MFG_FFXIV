@@ -1,3 +1,5 @@
+> Retired: the FFXIV Companion integration has been removed. These notes describe historical tests; use REST HUD isolation instead.
+
 # Companion HUD controls — 2026-09-27
 
 The normal FFXIV OptiScaler Companion panel contains:

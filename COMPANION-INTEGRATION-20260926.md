@@ -1,3 +1,5 @@
+> Retired: the FFXIV Companion integration has been removed. These notes describe historical tests; use REST HUD isolation instead.
+
 > Current status (2026-09-27): Companion 0.1.2, native-depth nameplate replacement and lightweight image-region midpoint interpolation have passed local automated checks and user testing. The replacement remains an opt-in 30-second test; interpolation defaults off. See [current test behavior](COMPANION-IMAGE-MIDPOINT-20260927.md) and the [Companion setup guide](https://github.com/SirenBrink/FFXIV-OptiScaler-Companion). The sections below record earlier integration stages; their statements that replacement is not yet implemented are historical.
 # FFXIV OptiScaler Companion integration
 

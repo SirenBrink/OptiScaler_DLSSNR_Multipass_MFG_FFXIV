@@ -1,4 +1,7 @@
 #include "pch.h"
+#include <misc/FramePacingTrace.h>
+#include <misc/FfxivPreviewNR.h>
+#include <dlssnr/NrFocusPolicy.h>
 #include <dlssnr/PassProfiles.h>
 #include <dlssnr/NrModelSize.h>
 #include <dlssnr/PreSrModelHints.h>
@@ -1623,6 +1626,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                            ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output,
                            const DlssNrFrameInfo& frame, ID3D12CommandQueue* timingQueue)
 {
+    FramePacingTrace::Scope cpuTiming(FramePacingTrace::Phase::SceneNR);
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     if (g_bridgeSuspended.load()) return;
     const Config& cfg = *Config::Instance();
@@ -3252,6 +3256,7 @@ void SuspendForBridgeShutdown()
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     if (g_bridgeSuspended.exchange(true)) return;
+    FfxivPreviewNR::Suspend();
     // This runs BEFORE the game's device-specific NGX shutdown, outside DllMain.
     // The NR forwarder's model allocations already have process lifetime. PreSR
     // additionally owns a private SR feature in the driver's NGX runtime.
@@ -3267,6 +3272,7 @@ void ResumeAfterBridgeInit()
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     if (!g_bridgeSuspended.exchange(false)) return;
+    FfxivPreviewNR::Resume();
     // A device reinitialization is allowed to resume. Never persist this stop in
     // the user's NR setting, nor mistake an ordinary NR/quality toggle for exit.
     g_nr.reset = true;
@@ -3296,9 +3302,11 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     if (g_bridgeSuspended.load()) return;
     const Config& cfg = *Config::Instance();
-    NrSceneInput::Collect(cfg.DlssNrEnabled.value_or_default() && SceneNrRequested());
+    const bool focusPaused = DlssNr::FocusPolicy::Paused(cfg.DlssNrPauseOnFocusLoss.value_or_default());
+    const bool nrEnabled = cfg.DlssNrEnabled.value_or_default() && !focusPaused;
+    NrSceneInput::Collect(nrEnabled && SceneNrRequested());
     if(!cfg.FfxivHDRNRSceneInput.value_or_default())Hdr10::nrSceneState=Hdr10::NrSceneState::Off;
-    else if(!cfg.DlssNrEnabled.value_or_default())Hdr10::nrSceneState=Hdr10::NrSceneState::NRDisabled;
+    else if(!nrEnabled)Hdr10::nrSceneState=Hdr10::NrSceneState::NRDisabled;
     else if(!SceneNrRequested())Hdr10::nrSceneState=Hdr10::NrSceneState::HDRInactive;
     else if(!cfg.DlssNrRunBeforeSr.value_or_default() && !cfg.DlssNrDeferredDlss.value_or_default())Hdr10::nrSceneState=Hdr10::NrSceneState::RequiresBeforeSR;
     else if(Hdr10::nrSceneState.load()==Hdr10::NrSceneState::Off || Hdr10::nrSceneState.load()==Hdr10::NrSceneState::HDRInactive ||
@@ -3312,7 +3320,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         DeferredSr::Cancel();
         lastPrecision = precision;
     }
-    if (cfg.DlssNrEnabled.value_or_default() && cmdList && params)
+    if (nrEnabled && cmdList && params)
     {
         Microsoft::WRL::ComPtr<ID3D12Device> device;
         if (SUCCEEDED(cmdList->GetDevice(IID_PPV_ARGS(&device))))
@@ -3332,7 +3340,7 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         }
     }
     DlssNrNative::SetPrecision(precision);
-    if (!cfg.DlssNrEnabled.value_or_default() || !cfg.DlssNrDeferredDlss.value_or_default() || rayReconstruction)
+    if (!nrEnabled || !cfg.DlssNrDeferredDlss.value_or_default() || rayReconstruction)
         DeferredSr::Cancel();
     else
     {
@@ -3349,11 +3357,11 @@ void EvaluateInternal(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* p
         return;
     }
 
-    if (!cfg.DlssNrEnabled.value_or_default())
+    if (!nrEnabled)
     {
         // Features remain allocated across the toggle, but their last image may
         // now belong to another camera/scene. Restart only when they run again.
-        if (State::Instance().gameExe == "ffxiv_dx11.exe")
+        if (State::Instance().gameExe == "ffxiv_dx11.exe" || focusPaused)
         {
             g_nr.reset = true;
             for (auto& pendingReset : g_nr.passNeedsReset) pendingReset = true;
@@ -3852,6 +3860,7 @@ bool CaptureInProgress() { return g_capture.isActive(); }
 
 GpuSubmission BeginGpuSubmission(UINT count, ID3D12CommandList* const* lists)
 {
+    if (!g_nrLifetime.MayHaveRecording(count, lists)) return {};
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     try
     {
@@ -3882,12 +3891,14 @@ GpuSubmission BeginGpuSubmission(UINT count, ID3D12CommandList* const* lists)
 
 void NotifyGpuSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
 {
+    if (!g_nrLifetime.MayHaveRecording(count, lists)) return;
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     g_nrLifetime.Submitted(queue, count, lists);
 }
 
 void NotifyGpuReset(ID3D12CommandList* commands)
 {
+    if (!g_nrLifetime.MayHaveRecording(commands)) return;
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     g_nrLifetime.ResetRecording(commands);
     for (auto* codec : g_nrCodecs) codec->ResetGpuRecording(commands);
@@ -3896,6 +3907,7 @@ void NotifyGpuReset(ID3D12CommandList* commands)
 void Shutdown()
 {
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
+    FfxivPreviewNR::Suspend();
     if (!g_nrLifetime.Idle())
     {
         LOG_WARN("DLSS-NR: retaining GPU ownership at shutdown; recordings or fences remain unresolved");

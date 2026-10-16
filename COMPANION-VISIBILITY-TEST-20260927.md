@@ -1,3 +1,5 @@
+> Retired: the FFXIV Companion integration has been removed. These notes describe historical tests; use REST HUD isolation instead.
+
 # Native-depth nameplate visibility test
 
 This 30-second experiment replaces the reconstruction-based start path. In the

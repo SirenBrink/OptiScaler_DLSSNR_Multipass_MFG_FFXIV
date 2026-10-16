@@ -6,7 +6,6 @@
 #include <shaders/hdr/HdrScreenshot.h>
 #include <framegen/dlssg/AmpereMfgLoader.h>
 #include <misc/FfxivNativeQuality.h>
-#include <misc/companion/Companion.h>
 #include "menu_common.h"
 #include <framegen/dlssg/MfgUnlock.h>
 #include <NVNGX_Parameter.h>
@@ -3115,8 +3114,12 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         const char* screenshotFormats[] = { "SDR PNG (sharing)", "HDR PNG" };
         if (ImGui::Combo("Screenshot format", &screenshotFormat, screenshotFormats, 2)) config->FfxivHDRScreenshotFormat = screenshotFormat;
         resetHdr("FfxivHDRScreenshotFormat", config->FfxivHDRScreenshotFormat);
-        ShowHelpMarker("Saves one PNG to game/OptiScaler/Screenshots while OptiHDR is active. SDR preserves the image before OptiHDR, including ReShade. HDR captures OptiHDR output and needs a compatible viewer.\nThe separate Companion nameplate window is not captured. FFXIV's original screenshot function is unchanged.");
+        ShowHelpMarker("Saves one PNG to game/OptiScaler/Screenshots while OptiHDR is active. SDR preserves the image before OptiHDR, including ReShade. HDR captures OptiHDR output and needs a compatible viewer.\nFFXIV's original screenshot function is unchanged.");
         ImGui::BeginDisabled(screenshotFormat != 1);
+        bool screenshotMenu = config->FfxivHDRScreenshotMenu.value_or_default();
+        if (ImGui::Checkbox("Include OptiScaler menu", &screenshotMenu)) config->FfxivHDRScreenshotMenu = screenshotMenu;
+        resetHdr("FfxivHDRScreenshotMenu", config->FfxivHDRScreenshotMenu);
+        ShowHelpMarker("HDR PNG: capture the presented image after drawing the visible OptiScaler menu, including its HDR colours. Useful for settings comparisons.\nWith the menu hidden, screenshots use the normal clean capture. Requires the overlay menu. SDR PNG captures remain unchanged.");
         bool screenshotIccOnly = config->FfxivHDRScreenshotIccOnly.value_or_default();
         if (ImGui::Checkbox("HDR PNG: ICC only (sharing)", &screenshotIccOnly)) config->FfxivHDRScreenshotIccOnly = screenshotIccOnly;
         resetHdr("FfxivHDRScreenshotIccOnly", config->FfxivHDRScreenshotIccOnly);
@@ -3537,7 +3540,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
             ImGui::BeginDisabled(state.dlssgLastSetMode != sl::DLSSGMode::eDynamic);
             static float fpsTarget = config->FGDLSSGFramerateTargetDMFG.value_or_default();
-            ImGui::SliderFloat("DMFG FPS Target", &fpsTarget, 0, 200, "%.0f");
+            ImGui::SliderFloat("DMFG FPS Target", &fpsTarget, 0, 1000, "%.0f");
 
             ShowHelpMarker("An active limit of 0 means auto-detect the display refresh rate");
 
@@ -4541,7 +4544,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         {
             ImGui::SameLine(0.0f, 16.0f);
 
-            ImGui::BeginDisabled(config->FGDLSSGForceDMFG.value_or_default());
+            ImGui::BeginDisabled(config->FGDLSSGForceDMFG.value_or_default() && fgOutput->GetDMFGSupport());
 
             const char* intModes[] = { "2X", "3X", "4X", "5X", "6X" };
             auto currentSet = fgOutput->GetInterpolatedFrameCount() - 1;
@@ -4589,7 +4592,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                                "May differ from the driver's next selection during transitions. "
                                "This reads cached telemetry and does not change factor selection.");
                 static float fpsTarget = config->FGDLSSGFramerateTargetDMFG.value_or_default();
-                ImGui::SliderFloat("DMFG FPS Target", &fpsTarget, 0, 200, "%.0f");
+                ImGui::SliderFloat("DMFG FPS Target", &fpsTarget, 0, 1000, "%.0f");
 
                 ShowHelpMarker("An active limit of 0 means auto-detect the display refresh rate");
 
@@ -7542,7 +7545,6 @@ void MenuCommon::RenderMainMenuTable(RenderMenuContext& ctx)
 
         // Right column: image quality, initialization, advanced options, appearance, overlay and input settings.
         RenderActiveImageSettings(ctx);
-        FfxivCompanion::DrawSettings();
         DlssNr::RenderMenu(ctx.config, ctx.menuResScale);
         RenderMagnifierSettings(ctx);
         RenderQuirksSettings(ctx);
