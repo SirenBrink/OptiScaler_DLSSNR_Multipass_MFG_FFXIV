@@ -15,14 +15,17 @@ void IFeature::SetHandle(unsigned int InHandleId)
 #include <TlHelp32.h>
 namespace
 {
-// FFXIV executable updated 2026-09-17 (SHA256 5bbc501dd5c7f22f...).
-// Verified against Ghidra: code moved by -0x3a0; the globals and accessed fields stayed put.
+// FFXIV executable updated 2026-10-13 (SHA256 b38840761e267712...).
+// Verified against the installed binary and Ghidra: code moved by different
+// amounts; settings/device globals moved by +0x3000. Accessed fields are unchanged.
 // Keep exact instruction guards, including RIP displacements, before enabling native hooks.
-constexpr uintptr_t kFfxivSettingsInstructionsRva = 0x374387;
-constexpr uintptr_t kFfxivQuerySizeRva = 0x352100;
-constexpr uintptr_t kFfxivRendererUpdateRva = 0x2da3f0;
-constexpr uintptr_t kFfxivResizeCallbacksRva = 0x236900;
-constexpr uintptr_t kFfxivSettingsPointerRva = 0x28f6470;
+constexpr uintptr_t kFfxivSettingsInstructionsRva = 0x374347;
+constexpr uintptr_t kFfxivQuerySizeRva = 0x3520c0;
+constexpr uintptr_t kFfxivRendererUpdateRva = 0x2da290;
+constexpr uintptr_t kFfxivResizeCallbacksRva = 0x236a40;
+constexpr uintptr_t kFfxivSettingsPointerRva = 0x28f9470;
+constexpr uintptr_t kFfxivRenderManagerPointerRva = 0x28f9498;
+constexpr uintptr_t kFfxivDevicePointerRva = 0x28f2d00;
 
 bool ReadFfxivMemory(const void* address, void* output, size_t bytes)
 {
@@ -35,7 +38,7 @@ bool MatchesFfxivSettingsInstructions(uintptr_t base)
     // RIP-relative settings load, then gates +0x54/+0x44/+0x45 and selector +0x55.
     // Includes the displacement to the expected global; fail closed after an incompatible update.
     constexpr unsigned char expected[] = {
-        0x4c, 0x8b, 0x05, 0xe2, 0x20, 0x58, 0x02, 0x45, 0x33, 0xe4,
+        0x4c, 0x8b, 0x05, 0x22, 0x51, 0x58, 0x02, 0x45, 0x33, 0xe4,
         0x41, 0x80, 0x78, 0x54, 0x02, 0x74, 0x06, 0x45, 0x38, 0x60,
         0x44, 0x74, 0x71, 0x45, 0x38, 0x60, 0x45, 0x74, 0x6b,
         0x41, 0x0f, 0xb6, 0x40, 0x55, 0x83, 0xf8, 0x06
@@ -62,13 +65,13 @@ void ProcessFfxivQualityRequest(uintptr_t renderer)
     const auto base = (uintptr_t) GetModuleHandleW(nullptr);
     uintptr_t settings = 0, manager = 0, context = 0, device = 0, callbacks = 0;
     unsigned char type = 0, flags = 0;
-    if (!ReadFfxivMemory((void*) (base + 0x28f6470), &settings, sizeof(settings)) || settings == 0 ||
+    if (!ReadFfxivMemory((void*) (base + kFfxivSettingsPointerRva), &settings, sizeof(settings)) || settings == 0 ||
         !ReadFfxivMemory((void*) (settings + 0x54), &type, sizeof(type)) || type != 2 ||
-        !ReadFfxivMemory((void*) (base + 0x28f6498), &manager, sizeof(manager)) || manager == 0 ||
+        !ReadFfxivMemory((void*) (base + kFfxivRenderManagerPointerRva), &manager, sizeof(manager)) || manager == 0 ||
         !ReadFfxivMemory((void*) (manager + 0x4220), &context, sizeof(context)) || context == 0 ||
         !ReadFfxivMemory((void*) (context + 0x181), &flags, sizeof(flags)) ||
         (flags & 1) == 0 || (flags & 0x30) != 0 ||
-        !ReadFfxivMemory((void*) (base + 0x28efd00), &device, sizeof(device)) || device == 0 ||
+        !ReadFfxivMemory((void*) (base + kFfxivDevicePointerRva), &device, sizeof(device)) || device == 0 ||
         !ReadFfxivMemory((void*) (device + 0x30), &callbacks, sizeof(callbacks)) || callbacks == 0)
         return;
 
@@ -122,7 +125,7 @@ void InstallFfxivNativeQuality(uintptr_t base)
     static std::once_flag once;
     std::call_once(once, [base]() {
         constexpr unsigned char queryBytes[] = {0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,
-            0x48,0x89,0x7c,0x24,0x18,0x41,0x56,0x48,0x83,0xec,0x20,0x48,0x8b,0x05,0x7c,0x43,0x5a,0x02};
+            0x48,0x89,0x7c,0x24,0x18,0x41,0x56,0x48,0x83,0xec,0x20,0x48,0x8b,0x05,0xbc,0x73,0x5a,0x02};
         unsigned char actualQuery[sizeof(queryBytes)] {};
         if (!ReadFfxivMemory((void*) (base + kFfxivQuerySizeRva), actualQuery, sizeof(actualQuery)) ||
             memcmp(actualQuery, queryBytes, sizeof(queryBytes)) != 0)
@@ -130,7 +133,7 @@ void InstallFfxivNativeQuality(uintptr_t base)
             LOG_WARN("FFXIV native quality: instruction mismatch; hooks disabled");
             return;
         }
-        constexpr unsigned char updateBytes[] = {0x4c,0x8b,0xdc,0x57,0x48,0x81,0xec,0xd0,0x00,0x00,0x00,0x48,0x8b,0x05,0x96,0x98,0x5f,0x02};
+        constexpr unsigned char updateBytes[] = {0x4c,0x8b,0xdc,0x57,0x48,0x81,0xec,0xd0,0x00,0x00,0x00,0x48,0x8b,0x05,0xf6,0xc9,0x5f,0x02};
         constexpr unsigned char dispatchBytes[] = {0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x6c,0x24,0x18,0x48,0x89,0x74,0x24,0x20,0x57,0x48,0x83,0xec,0x20};
         unsigned char updateActual[sizeof(updateBytes)] {}, dispatchActual[sizeof(dispatchBytes)] {};
         if (!ReadFfxivMemory((void*) (base + kFfxivRendererUpdateRva), updateActual, sizeof(updateActual)) ||
