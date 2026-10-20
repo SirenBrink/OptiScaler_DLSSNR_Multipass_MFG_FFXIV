@@ -29,6 +29,7 @@ class DLSSFeatureDx12 : public DLSSFeature, public IFeature_Dx12
     bool CallsUpscalerEndByItself() override { return IFeature_Dx12::CallsUpscalerEndByItself(); }
 
     bool IsWithDx12() override { return false; }
+    bool UsesSceneHdrInput() const override { return _sceneHdrInput; }
 
     DLSSFeatureDx12(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters);
     ~DLSSFeatureDx12();

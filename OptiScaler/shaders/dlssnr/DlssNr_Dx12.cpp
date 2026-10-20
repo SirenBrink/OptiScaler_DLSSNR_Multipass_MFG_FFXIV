@@ -387,6 +387,7 @@ struct NrState
     unsigned int height = 0;
     bool beforeUpscale = false;
     bool rayReconstruction = false;
+    int inputDomain = -1; // All scene-NR entry points share these feature histories.
     bool reset = true;
     unsigned previousReuseEvery = 1;
     bool previousReuseOverride = false;
@@ -1747,7 +1748,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         !cfg.DlssNrHoldFrame.value_or_default() && FfxivLightingScan::ConsumeReset(lightingEvent);
     if (lightingReset)
         LOG_INFO("DLSS-NR: native lighting event {} invalidates model history", lightingEvent);
-    if (frame.Reset || lightingReset)
+    const int inputDomain = (frame.ColourIsLinearHdr ? 1 : 0) | (frame.ExposedSceneHdr ? 2 : 0) |
+        (frame.BeforeUpscale ? 4 : 0) | (frame.RayReconstruction ? 8 : 0) |
+        (!frame.BeforeUpscale && DlssSceneInput::bridgeSceneHdr ? 16 : 0) |
+        (!frame.BeforeUpscale && DlssSceneInput::bridgeHdrShoulder ? 32 : 0);
+    const bool domainReset = g_nr.inputDomain != inputDomain;
+    g_nr.inputDomain = inputDomain;
+    if (domainReset) g_nr.heldActive = false; // A held SDR image cannot become a linear HDR input.
+    if (frame.Reset || lightingReset || domainReset)
     {
         g_nr.reset = true;
         // Keep resets pending for passes that cannot evaluate this frame.
@@ -3238,17 +3246,15 @@ bool DispatchSceneNr(ID3D12GraphicsCommandList* cmd,ID3D12Resource* target,ID3D1
         else state=Hdr10::NrSceneState::UnavailableHooks;
     }
     const bool sceneHdr=packet!=nullptr;
-    static bool lastSceneHdr=false;
-    if(lastSceneHdr!=sceneHdr){lastSceneHdr=sceneHdr;frame.Reset=true;
-        LOG_INFO("NR scene HDR input {}; history reset; path {}",sceneHdr?"active":"SDR fallback/off",(int)path);}
     const auto before=g_nr.successfulDispatches;
     if(sceneHdr) {
         auto hdrFrame=frame;hdrFrame.ColourIsLinearHdr=hdrFrame.ExposedSceneHdr=true;
         hdrFrame.PrivateColorCopy=true;hdrFrame.ExposureTexture=nullptr;
         g_compose->Dispatch(cmd,packet->work.Get(),depth,motion,packet->work.Get(),hdrFrame,queue);
         D3D12Hooks::SetRootSignatureTracking(false);
-        NrSceneInput::Finish(*packet,cmd,arrival);
-        state=g_nr.successfulDispatches!=before?path:Hdr10::NrSceneState::WaitingNR;
+        const bool evaluated=g_nr.successfulDispatches!=before;
+        NrSceneInput::Finish(*packet,cmd,arrival,evaluated);
+        state=evaluated?path:Hdr10::NrSceneState::WaitingNR;
     } else g_compose->Dispatch(cmd,target,depth,motion,target,frame,queue);
     if(requested)Hdr10::nrSceneState.store(state,std::memory_order_relaxed);
     return sceneHdr;

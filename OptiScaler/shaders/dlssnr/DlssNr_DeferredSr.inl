@@ -527,7 +527,7 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
     // feature to 1.0 until it is recreated. Matched HDR creation prevents that
     // cross-feature switch, including when the residual feature is later idle.
     // The bounded residual carrier still uses constant unit exposure.
-    if (cfg.FfxivHDRDLSSSceneInput.value_or_default() && FfxivSceneHdr::Requested())
+    if (DlssSceneInput::bridgeSceneHdr)
         flags |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
     const bool splitWork = wantsHalf && !sampleAndHold && State::Instance().gameExe == "ffxiv_dx11.exe" &&
         cfg.DlssNrSplitFrameWork.value_or_default();
@@ -580,8 +580,7 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
     // Capture CURRENT anchor scene only. Skipped frames never borrow a later HDR image.
     auto scene=privateJob?Hdr10::SceneInput{}:OpenNrScene(cmd,color,g.w,g.h);
     const bool sceneAvailable=scene.hdr && scene.reference && inDesc.Format==DXGI_FORMAT_R16G16B16A16_FLOAT;
-    const bool hdrCarrier=!privateJob && cfg.FfxivHDRDLSSSceneInput.value_or_default() &&
-        FfxivSceneHdr::Requested() && bool(FfxivSceneHdr::Open(g.device,g.w,g.h,false).hdr);
+    const bool hdrCarrier=!privateJob && DlssSceneInput::bridgeSceneHdr && bool(FfxivSceneHdr::Open(g.device,g.w,g.h,false).hdr);
     if(g.hdrCarrier!=hdrCarrier) {
         g.hdrCarrier=hdrCarrier;g.reset=true;g.hold.Reset();if(g.half)g.half->Reset();g.privateHistoryResetPending=true;
         LOG_INFO("PreSR HDR relative carrier {}; private residual history reset",hdrCarrier?"enabled":"disabled");
@@ -976,7 +975,7 @@ void After(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, unsigned
     Barrier(cmd, cleanTarget, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     ID3D12Resource* base = cleanTarget;
     Hdr10::SceneInput displayHdr;
-    if (cfg.FfxivHDRDLSSSceneInput.value_or_default() && FfxivSceneHdr::Requested())
+    if (DlssSceneInput::bridgeSceneHdr)
         displayHdr = FfxivSceneHdr::Open(g.device, g.outW, g.outH, true);
     if (half)
     {

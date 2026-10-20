@@ -10,14 +10,23 @@ float half(unsigned short x){unsigned bits=((x&0x8000u)<<16)|(((x>>10)&31u)+112u
 // Match native NGX's separate slots, including successful typed reads of NULL.
 // The OptiScaler parameter map merges these slots and would hide this regression.
 struct SeparateSlots {
- ID3D12Resource* typed=nullptr;void* untyped=nullptr;
+ ID3D12Resource* typed=nullptr;void* untyped=nullptr;float scalar=2.5f;bool haveScalar=true;
+ NVSDK_NGX_Result Get(const char*,float* out){if(!haveScalar)return NVSDK_NGX_Result_FAIL_InvalidParameter;*out=scalar;return NVSDK_NGX_Result_Success;}
+ void Set(const char*,float value){scalar=value;}
  NVSDK_NGX_Result Get(const char*,ID3D12Resource** out){*out=typed;return NVSDK_NGX_Result_Success;}
  NVSDK_NGX_Result Get(const char*,void** out){*out=untyped;return NVSDK_NGX_Result_Success;}
  void Set(const char*,ID3D12Resource* value){typed=value;}
  void Set(const char*,void* value){untyped=value;}
 };
 int main()try{
+ expect(!DlssSceneInput::bridgeSceneHdr,"HDR evaluation domain leaked");
+ {DlssSceneInput::BridgeEvaluationScope active(true);DlssSceneInput::bridgeHdrShoulder=true;expect(DlssSceneInput::bridgeSceneHdr,"effective HDR feature not visible to NR");
+  {DlssSceneInput::BridgeEvaluationScope nested(false);expect(!DlssSceneInput::bridgeSceneHdr&&!DlssSceneInput::bridgeHdrShoulder,"nested SDR feature inherited HDR");}
+  expect(DlssSceneInput::bridgeSceneHdr&&DlssSceneInput::bridgeHdrShoulder,"nested SDR scope lost main HDR domain");}
+ expect(!DlssSceneInput::bridgeSceneHdr,"HDR domain survived evaluation scope");
  expect(!DlssSceneInput::bridgeInitialising,"bridge init flag leaked");{DlssSceneInput::BridgeInitScope scope;expect(DlssSceneInput::bridgeInitialising,"bridge scope inactive");{DlssSceneInput::BridgeInitScope nested;expect(DlssSceneInput::bridgeInitialising,"nested bridge scope inactive");}expect(DlssSceneInput::bridgeInitialising,"nested bridge scope reset parent");}expect(!DlssSceneInput::bridgeInitialising,"bridge init scope not restored");
+ {SeparateSlots p;NgxResourceBinding::FloatBinding pre(&p,"pre");pre.Set(1);expect(p.scalar==1,"scene HDR was exposed twice");pre.Restore();expect(p.scalar==2.5f,"native exposure was not restored for NR");
+  p.haveScalar=false;NgxResourceBinding::FloatBinding absent(&p,"absent");absent.Set(1);absent.Restore();expect(p.scalar==1,"missing exposure did not retain SDK unit default");}
  ComPtr<ID3D12Debug> debug;if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))debug->EnableDebugLayer();
  ComPtr<IDXGIFactory4> f;check(CreateDXGIFactory1(IID_PPV_ARGS(&f)));ComPtr<IDXGIAdapter>a;check(f->EnumWarpAdapter(IID_PPV_ARGS(&a)));ComPtr<ID3D12Device>d;check(D3D12CreateDevice(a.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&d)));
  ComPtr<ID3D12InfoQueue> info;d.As(&info);
@@ -215,6 +224,67 @@ int main()try{
   expect(DlssSceneInput::Pool().size()<=3,"temporal history retained an unbounded packet chain");
  }
  puts("PASS: production HDR temporal resolve reduces stationary noise, preserves thin highlights, rejects motion/depth/reset/lighting and discarded history, validates producer queue, preserves depth in private alpha and bounds history ownership over 96 frames per mode; adaptive toggle discards old-mode history");
+
+
+ // Run the two production adapters together, independently enabled, including
+ // missing captures and NR initialization/failure. NGX itself is an identity
+ // reconstruction here; native model behaviour still requires gameplay testing.
+ {
+ auto nrNative=texture(),nrOutput=texture(),nrHdr=texture(),nrRef=texture();
+ DlssNr::GpuLifetime nrLifetime;UINT sequence=5000;
+ for(bool dlssHdr:{false,true})for(bool nrHdrInput:{false,true})for(bool captured:{false,true}){
+  unsigned short baseline=0;
+  for(unsigned attempt=0;attempt<3;++attempt){
+   check(alloc->Reset());check(Hdr10::ResetCommands(c.Get(),alloc.Get()));nrLifetime.ResetRecording(c.Get());
+   check(upload->Map(0,nullptr,&ptr));auto* bits=(unsigned short*)ptr;
+   for(unsigned x=0;x<4;++x)for(unsigned channel=0;channel<4;++channel){
+    bits[x*4+channel]=0x3800; // native and original reference: 0.5, including alpha
+    bits[128+x*4+channel]=channel==3?0x3c00:0x4000; // encoded HDR = 2
+    bits[256+x*4+channel]=channel==3?0x3800:0; // corrupt/partial NR result
+   }
+   upload->Unmap(0,nullptr);uploadTexture(nrNative.Get(),0);uploadTexture(nrRef.Get(),0);uploadTexture(nrHdr.Get(),256);
+   Hdr10::SceneInput scene;if(captured){scene.hdr=nrHdr;scene.reference=nrRef;}
+   if(nrHdrInput&&captured){
+    auto* packet=NrSceneInput::Prepare(d.Get(),c.Get(),nrNative.Get(),D3D12_RESOURCE_STATE_COMMON,4,1,scene,nrLifetime);
+    expect(packet,"combined NR HDR preparation failed");
+    // attempt 0 = identity, 1 = model failure after touching private work,
+    // 2 = successful model darkening. Only the last may alter the native input.
+    if(attempt){NrSceneInput::Transition(c.Get(),packet->work.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
+     uploadTexture(packet->work.Get(),512);NrSceneInput::Transition(c.Get(),packet->work.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);}
+    NrSceneInput::Finish(*packet,c.Get(),D3D12_RESOURCE_STATE_COMMON,attempt!=1);
+   }
+   if(dlssHdr){
+    DlssSceneInput::bridgeColour=nrNative.Get();DlssSceneInput::bridgeOutput=nrOutput.Get();
+    auto packet=DlssSceneInput::Prepare(d.Get(),c.Get(),nrNative.Get(),nrOutput.Get(),4,1,scene);
+    expect(bool(packet),"combined DLSS HDR preparation failed");
+    DlssSceneInput::Barrier(c.Get(),packet->input.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    DlssSceneInput::Barrier(c.Get(),packet->output.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_DEST);
+    c->CopyResource(packet->output.Get(),packet->input.Get());
+    DlssSceneInput::Barrier(c.Get(),packet->input.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    DlssSceneInput::Barrier(c.Get(),packet->output.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    DlssSceneInput::Finish(packet,c.Get(),true);
+   }else{
+    DlssSceneInput::Barrier(c.Get(),nrNative.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    DlssSceneInput::Barrier(c.Get(),nrOutput.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);c->CopyResource(nrOutput.Get(),nrNative.Get());
+    DlssSceneInput::Barrier(c.Get(),nrNative.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
+    DlssSceneInput::Barrier(c.Get(),nrOutput.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON);
+   }
+   DlssSceneInput::Barrier(c.Get(),nrOutput.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE);
+   D3D12_TEXTURE_COPY_LOCATION to{},from{};to.pResource=read.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;to.PlacedFootprint.Footprint={DXGI_FORMAT_R16G16B16A16_FLOAT,4,1,1,256};from.pResource=nrOutput.Get();from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+   c->CopyTextureRegion(&to,0,0,0,&from,nullptr);DlssSceneInput::Barrier(c.Get(),nrOutput.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
+   submit(sequence++);ID3D12CommandList* lists[]={c.Get()};nrLifetime.Submitted(q.Get(),1,lists);
+   check(read->Map(0,nullptr,&ptr));auto* result=(unsigned short*)ptr;
+   if(!attempt)baseline=result[0];
+   if(attempt<=1||!nrHdrInput||!captured)expect(result[0]==baseline,"disabled, missing or failed NR changed combined HDR output");
+   else {if(!(half(result[0])<half(baseline)))printf("combined case DLSS %u NR %u capture %u: before %04x after %04x\n",dlssHdr,nrHdrInput,captured,baseline,result[0]);expect(half(result[0])<half(baseline),"successful NR edit lost at DLSS HDR boundary");}
+   expect(std::isfinite(half(result[0]))&&result[3]==(dlssHdr?0x3c00:0x3800),"combined pipeline lost finite colour or alpha contract");
+   read->Unmap(0,nullptr);
+  }
+ }
+ check(alloc->Reset());check(Hdr10::ResetCommands(c.Get(),alloc.Get()));nrLifetime.ResetRecording(c.Get());NrSceneInput::Collect(false);check(c->Close());Hdr10::Reset(c.Get());
+ expect(NrSceneInput::Packets().empty(),"combined HDR adapter retained completed work");
+ puts("PASS: DLSS HDR on/off x NR HDR on/off x scene available/missing, with identity, failed and successful NR edits; native alpha and packet retirement retained");
+ }
 
  if(info){for(UINT64 i=0;i<info->GetNumStoredMessages();++i){SIZE_T size=0;info->GetMessage(i,nullptr,&size);std::vector<char>b(size);auto*m=(D3D12_MESSAGE*)b.data();check(info->GetMessage(i,m,&size));if(m->Severity<=D3D12_MESSAGE_SEVERITY_ERROR){puts(m->pDescription);throw std::runtime_error("D3D12 debug validation error");}}}
  expect(DlssSceneInput::Pool().size()<=3,"work buffers not reused");CloseHandle(event);puts("PASS: production HDR-DLSS conversion, typed/typeless FP16 inputs, FP16/RGBA8/RGB10A2/R11G11B10 outputs, SDR tone curve, reconstructed HDR, missing-scene fallback, 128 reset/submission cycles and resource lifetime, opaque output alpha, identity/non-identity PreSR HDR reconciliation and descriptor immutability");return 0;

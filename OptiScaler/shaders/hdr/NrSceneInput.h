@@ -76,7 +76,13 @@ inline Packet* Prepare(ID3D12Device* d,ID3D12GraphicsCommandList* c,ID3D12Resour
  Transition(c,native,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,arrival);
  return chosen;
 }
-inline void Finish(Packet& p,ID3D12GraphicsCommandList* c,D3D12_RESOURCE_STATES arrival) {
+inline void Finish(Packet& p,ID3D12GraphicsCommandList* c,D3D12_RESOURCE_STATES arrival,bool success=true) {
+ if(!success){
+  // Initialization, pool pressure and model errors must leave the SDR input byte-identical.
+  Transition(c,p.scene.hdr.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
+  Transition(c,p.scene.reference.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
+  return;
+ }
  Transition(c,p.native.Get(),arrival,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
  Transition(c,p.answer.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
  Bind(p,c,1);

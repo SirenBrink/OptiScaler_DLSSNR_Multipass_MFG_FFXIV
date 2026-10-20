@@ -34,6 +34,13 @@ int main()try {
  DlssNr::GpuLifetime lifetime;Hdr10::SceneInput scene;scene.hdr=hdr;scene.reference=ref;scene.rect={.25f,0,.5f,1};std::function<bool()> retired;scene.retire=[&](auto probe){retired=probe;};
  for(unsigned frame=1;frame<=96;frame++) {
   if(frame>1){check(alloc->Reset());check(cmd->Reset(alloc.Get(),nullptr));}
+  const bool extreme=frame%4==1; // Above FP16 work limit, including identity NR.
+  check(upload->Map(0,nullptr,&ptr));auto* current=(unsigned short*)ptr;
+  for(unsigned x=2;x<6;++x)for(unsigned k=0;k<3;++k)current[256+x*4+k]=extreme?0x6000:0x4000;
+  current[512+1]=frame%8==0?0x7e00:0x4098; // NaN and infinity in separate model channels.
+  current[512+2]=frame%8==0?0x7c00:0x4098;
+  upload->Unmap(0,nullptr);
+  NrSceneInput::Transition(cmd.Get(),hdr.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);uploadTexture(hdr.Get(),8,1,512);NrSceneInput::Transition(cmd.Get(),hdr.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON);
   uploadTexture(native.Get(),8,2,0);
   expect(!NrSceneInput::Prepare(device.Get(),cmd.Get(),native.Get(),D3D12_RESOURCE_STATE_COPY_DEST,9,1,scene,lifetime),"oversize region accepted");
   expect(!NrSceneInput::Prepare(device.Get(),cmd.Get(),native.Get(),D3D12_RESOURCE_STATE_COPY_DEST,4,1,{},lifetime),"missing scene accepted");
@@ -43,15 +50,17 @@ int main()try {
   D3D12_TEXTURE_COPY_LOCATION a{},b{};a.pResource=read.Get();a.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;a.PlacedFootprint.Footprint={DXGI_FORMAT_R16G16B16A16_FLOAT,4,1,1,256};b.pResource=p->work.Get();b.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;cmd->CopyTextureRegion(&a,0,0,0,&b,nullptr);
   const bool edit=frame%2==0;NrSceneInput::Transition(cmd.Get(),p->work.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,edit?D3D12_RESOURCE_STATE_COPY_DEST:D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   if(edit){uploadTexture(p->work.Get(),4,1,1024);NrSceneInput::Transition(cmd.Get(),p->work.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);}
-  NrSceneInput::Finish(*p,cmd.Get(),D3D12_RESOURCE_STATE_COPY_DEST);
+  const bool evaluated=frame%3!=0; // failed/initializing NR may already have touched its private work image.
+  NrSceneInput::Finish(*p,cmd.Get(),D3D12_RESOURCE_STATE_COPY_DEST,evaluated);
   NrSceneInput::Transition(cmd.Get(),native.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COPY_SOURCE);
   a.PlacedFootprint.Offset=512;a.PlacedFootprint.Footprint={DXGI_FORMAT_R16G16B16A16_FLOAT,8,2,1,256};b.pResource=native.Get();cmd->CopyTextureRegion(&a,0,0,0,&b,nullptr);NrSceneInput::Transition(cmd.Get(),native.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
   check(cmd->Close());ID3D12CommandList* lists[]={cmd.Get()};queue->ExecuteCommandLists(1,lists);lifetime.Submitted(queue.Get(),1,lists);check(queue->Signal(fence.Get(),frame));check(fence->SetEventOnCompletion(frame,event));expect(WaitForSingleObject(event,10000)==WAIT_OBJECT_0,"GPU timeout");
   expect(!retired(),"GPU completion alone allowed overwriting live recording");NrSceneInput::Collect(false);expect(NrSceneInput::Packets().size()==1 && p->native,"cleanup released completed but unreset recording");lifetime.ResetRecording(cmd.Get());expect(retired(),"completed reset recording was retained");
-  check(read->Map(0,nullptr,&ptr));auto* out=(unsigned short*)ptr;expect(std::abs(half(out[0])-std::pow(2.f,2.2f))<.01,"HDR brightness lost or padding sampled");expect(out[8]==0,"black changed in HDR adapter");
+  check(read->Map(0,nullptr,&ptr));auto* out=(unsigned short*)ptr;expect(std::abs(half(out[0])-std::min(std::pow(extreme?512.f:2.f,2.2f),60000.f))<.01,"HDR brightness lost or padding sampled");expect(out[8]==0,"black changed in HDR adapter");
   auto* result=out+256;expect(result[3]==0x3800&&result[11]==0x3800,"alpha lost");expect(result[8]==0,"black lost in SDR restore");
   for(unsigned y=0;y<2;y++)for(unsigned x=0;x<8;x++)if(y||x>=4){auto* pixel=result+y*128+x*4;expect(pixel[0]==0x3400&&pixel[3]==0x3800,"native padding changed");}
-  if(edit)expect(half(result[0])>.73f&&half(result[0])<.74f,"HDR NR edit did not return to SDR");else {if(result[0]!=0x3c00)printf("identity got %04x %.8f; work %04x %.8f\n",result[0],half(result[0]),out[0],half(out[0]));expect(result[0]==0x3c00,"identity NR altered native SDR");}read->Unmap(0,nullptr);
+  if(frame%8==0&&evaluated)expect(result[1]==0x3c00&&result[2]==0x3c00,"invalid NR channels contaminated native output");
+  if(edit&&evaluated)expect(half(result[0])>.73f&&half(result[0])<.74f,"HDR NR edit did not return to SDR");else {if(result[0]!=0x3c00)printf("identity got %04x %.8f; work %04x %.8f\n",result[0],half(result[0]),out[0],half(out[0]));expect(result[0]==0x3c00,"identity NR altered native SDR");}read->Unmap(0,nullptr);
  }
- expect(NrSceneInput::Packets().size()==1,"packet pool grew despite completed recordings");NrSceneInput::Collect(false);expect(NrSceneInput::Packets().empty(),"completed buffers not reclaimed");CloseHandle(event);puts("PASS: NR HDR adapter, 96 identity/edit frames, HDR highlights, cropped padding, alpha/black, safe resource retirement and reuse");return 0;
+ expect(NrSceneInput::Packets().size()==1,"packet pool grew despite completed recordings");NrSceneInput::Collect(false);expect(NrSceneInput::Packets().empty(),"completed buffers not reclaimed");CloseHandle(event);puts("PASS: NR HDR adapter, 96 identity/edit/failure frames, HDR highlights, cropped padding, alpha/black, safe resource retirement and reuse");return 0;
 }catch(const std::exception& e){fprintf(stderr,"FAIL: %s\n",e.what());return 1;}

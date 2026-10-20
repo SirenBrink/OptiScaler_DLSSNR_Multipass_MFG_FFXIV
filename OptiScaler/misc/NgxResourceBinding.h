@@ -7,6 +7,16 @@
 // replacing a texture so NR and NGX see the same resource before and after SR.
 namespace NgxResourceBinding
 {
+template <typename Parameters> struct FloatBinding
+{
+    Parameters* parameters; const char* key; float original;
+    FloatBinding(Parameters* params,const char* name,float fallback=1.0f)
+        : parameters(params),key(name),original(fallback)
+    { if(parameters->Get(key,&original)!=NVSDK_NGX_Result_Success)original=fallback; }
+    void Set(float value) const { parameters->Set(key,value); }
+    void Restore() const { Set(original); }
+};
+
 template <typename Parameters> struct Binding
 {
     Parameters* parameters;

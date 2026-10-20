@@ -18,9 +18,13 @@ float3 Guide(Texture2D<float4> tex,float2 uv) {
  float3 ref=Guide(Reference,uv),hdr=pow(max(Guide(Scene,uv),0),2.2);
  float3 nativeLinear=Linear(saturate(s.rgb));float3 delta=abs(s.rgb-saturate(ref));
  float coverage=1-smoothstep(.08,.25,max(delta.r,max(delta.g,delta.b)));
- float3 base=TransferSceneHdr(nativeLinear,Linear(saturate(ref)),hdr,coverage);
+ // Resolve against exactly the range offered to NR; an identity model must
+ // remain identity even when a bright mod/effect exceeds the FP16 work limit.
+ float3 base=min(TransferSceneHdr(nativeLinear,Linear(saturate(ref)),hdr,coverage),60000);
  if(Mode==0){Target[id.xy]=float4(min(base,60000),s.a);return;}
  float3 edited=Edited.Load(int3(id.xy,0)).rgb;
+ // Invalid model channels keep the native image instead of poisoning DLSS/FG history.
+ edited=isfinite(edited)?max(edited,0):base;
  // Restore only NR's edit to the SDR scene; never feed extended light into SDR DLSS/ReShade.
  // Preserve black and identity exactly, including half-float rounding of the HDR work image.
  float3 ratio=clamp(edited/max(base,1e-4),.25,4);

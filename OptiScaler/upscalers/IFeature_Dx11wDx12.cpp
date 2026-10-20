@@ -590,6 +590,7 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
         if (upscaler == Upscaler::DLSS || upscaler == Upscaler::DLSSD)
             dx12Feature->CorrectRenderSubrect(InParameters);
 
+        DlssSceneInput::BridgeEvaluationScope hdrDomain(dx12Feature->UsesSceneHdrInput());
         DlssNr::EvaluateBeforeUpscale(cmdList, InParameters, Dx12CommandQueue, _frameCount,
                                       upscaler == Upscaler::DLSSD, nrGuideSourceWidth,
                                       nrGuideSourceHeight);

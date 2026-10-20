@@ -8,6 +8,13 @@ using Microsoft::WRL::ComPtr;
 // The bridge establishes the states before NR can replace the colour input.
 inline thread_local bool bridgeInitialising=false;
 struct BridgeInitScope { bool previous=bridgeInitialising;BridgeInitScope(){bridgeInitialising=true;}~BridgeInitScope(){bridgeInitialising=previous;} };
+// Covers both NR seams, including PreSR private feature creation before main SR.
+inline thread_local bool bridgeSceneHdr=false,bridgeHdrShoulder=false;
+struct BridgeEvaluationScope {
+ bool previous=bridgeSceneHdr,previousShoulder=bridgeHdrShoulder;
+ explicit BridgeEvaluationScope(bool enabled){bridgeSceneHdr=enabled;bridgeHdrShoulder=false;}
+ ~BridgeEvaluationScope(){bridgeSceneHdr=previous;bridgeHdrShoulder=previousShoulder;}
+};
 inline thread_local ID3D12Resource* bridgeColour=nullptr;
 inline thread_local ID3D12Resource* bridgeOutput=nullptr;
 inline thread_local ID3D12CommandQueue* bridgeQueue=nullptr;

@@ -3104,7 +3104,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         bool nrSceneInput=config->FfxivHDRNRSceneInput.value_or_default();
         if(ImGui::Checkbox("Use scene HDR input for NR (experimental)",&nrSceneInput))config->FfxivHDRNRSceneInput=nrSceneInput;
         resetHdr("FfxivHDRNRSceneInput",config->FfxivHDRNRSceneInput);
-        ShowHelpMarker("Feeds preserved linear scene brightness through NR's reversible HDR proxy. Supports ordinary NR before upscaling, PreSR and alternating NR anchors.\nThe private DLSS residual carrier and ReShade stay SDR. Exposure is already applied; NR normalization is 1.\nMissing or incompatible scene data uses SDR NR and resets affected history. Save Settings to retain your choice.");
+        ShowHelpMarker("Feeds preserved linear scene brightness through NR's reversible HDR proxy. Supports ordinary NR before upscaling, PreSR and alternating NR anchors.\nThe private residual DLSS matches the main DLSS colour mode; ReShade stays SDR. Exposure is already applied; NR normalization is 1.\nMissing or incompatible scene data uses SDR NR and resets affected history. Save Settings to retain your choice.");
         if(nrSceneInput){
             auto status=Hdr10::nrSceneState.load(std::memory_order_relaxed);
             if(!config->DlssNrEnabled.value_or_default())status=Hdr10::NrSceneState::NRDisabled;

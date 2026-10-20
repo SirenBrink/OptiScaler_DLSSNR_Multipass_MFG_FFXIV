@@ -48,6 +48,8 @@ class IFeature_Dx12 : public virtual IFeature
     bool Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters,
                   ID3D12CommandQueue* timingQueue = nullptr);
 
+    // Actual feature domain, pinned at creation; a pending UI preference is not authoritative.
+    virtual bool UsesSceneHdrInput() const { return false; }
     API Api() const override { return API::DX12; }
     std::optional<double> ReadUpscalerTime(void* commandQueue) override;
     void ReadDetailedGpuTimes(void* commandQueue, std::vector<DetailedGpuTime>& detailedGpuTimes) override;

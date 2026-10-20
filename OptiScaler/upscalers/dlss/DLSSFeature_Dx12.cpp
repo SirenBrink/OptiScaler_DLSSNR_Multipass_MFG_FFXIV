@@ -49,6 +49,7 @@ bool DLSSFeatureDx12::InitDLSS(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
     {
         ProcessInitParams(InParameters);
         _hdrHistory.reset();
+        _sceneHdrAvailable=-1;
         _hdrStabilityState=-1;
         _hdrNrMode=-1;
         auto& cfg=*Config::Instance();
@@ -111,6 +112,8 @@ bool DLSSFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
         NgxResourceBinding::Binding exposureBinding(InParameters, NVSDK_NGX_Parameter_ExposureTexture);
         NgxResourceBinding::Binding depthBinding(InParameters, NVSDK_NGX_Parameter_Depth);
         NgxResourceBinding::Binding motionBinding(InParameters, NVSDK_NGX_Parameter_MotionVectors);
+        NgxResourceBinding::FloatBinding preExposure(InParameters,NVSDK_NGX_Parameter_DLSS_Pre_Exposure);
+        NgxResourceBinding::FloatBinding exposureScale(InParameters,NVSDK_NGX_Parameter_DLSS_Exposure_Scale);
         auto* colour = colourBinding.original;
         auto* output = outputBinding.original;
         unsigned int reset=0;
@@ -121,7 +124,8 @@ bool DLSSFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
             InParameters->Get(NVSDK_NGX_Parameter_Reset,&reset);
             const auto& cfg=*Config::Instance();
             const int nrMode=!cfg.DlssNrEnabled.value_or_default()?0:
-                cfg.DlssNrDeferredDlss.value_or_default()?2:cfg.DlssNrRunBeforeSr.value_or_default()?1:3;
+                (cfg.DlssNrDeferredDlss.value_or_default()?2:cfg.DlssNrRunBeforeSr.value_or_default()?1:3) |
+                (cfg.FfxivHDRNRSceneInput.value_or_default()?4:0);
             if(_hdrNrMode>=0&&_hdrNrMode!=nrMode){
                 InParameters->Set(NVSDK_NGX_Parameter_Reset,1u);hdrHistory.reset();_hdrHistory.reset();
                 LOG_INFO("DLSS HDR stability: NR path changed {} -> {}; resetting DLSS and clean HDR history",_hdrNrMode,nrMode);
@@ -143,6 +147,8 @@ bool DLSSFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
             colourBinding.Set(hdrPacket->input.Get());
             outputBinding.Set(hdrPacket->output.Get());
             exposureBinding.Set(nullptr);
+            // RenoDX captures are already exposed. Native exposure must not be applied a second time.
+            preExposure.Set(1.0f);exposureScale.Set(1.0f);
         }
         nvResult = NVNGXProxy::D3D12_EvaluateFeature()(InCommandList, _p_dlssHandle, InParameters, NULL);
         if(hdrPacket){
@@ -163,10 +169,12 @@ bool DLSSFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
             colourBinding.Restore();
             outputBinding.Restore();
             exposureBinding.Restore();
+            preExposure.Restore();exposureScale.Restore();
             InParameters->Set(NVSDK_NGX_Parameter_Reset,reset);
             DlssSceneInput::Finish(hdrPacket,InCommandList,success);
             if(success){
                 _hdrHistory=hdrPacket;
+                DlssSceneInput::bridgeHdrShoulder=bool(hdrPacket->scene.hdr);
                 FfxivSceneHdr::PublishReconstructed(DlssSceneInput::Image(hdrPacket));
             }else _hdrHistory.reset();
         }
