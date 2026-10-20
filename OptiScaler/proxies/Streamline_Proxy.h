@@ -1,4 +1,6 @@
 #pragma once
+#include <dlssnr/RuntimeSelection.h>
+#include <framegen/dlssg/PresetSelection.h>
 
 #include "SysUtils.h"
 #include "Util.h"
@@ -362,7 +364,8 @@ class StreamlineProxy
         auto nvngxDlssPath = Util::FindFilePath(exePath, "nvngx_dlss.dll");
         auto nvngxDlssDPath = Util::FindFilePath(exePath, "nvngx_dlssd.dll");
         auto nvngxDlssGPath = Util::FindFilePath(exePath, "nvngx_dlssg.dll");
-        auto nvngxDlssNrPath = Util::FindFilePath(exePath, "nvngx_dlssnr.dll");
+        auto nvngxDlssNrPath = DlssNr::RuntimeSelection::Path();
+        (void) DlssgPreset::Startup();
 
         std::vector<std::wstring> pathStorage;
 
@@ -385,7 +388,7 @@ class StreamlineProxy
         // Streamline can initialize NGX before the upscaler does. Include the NR
         // runtime now: later NGX initialization cannot repair the first search list.
         if (nvngxDlssNrPath.has_value())
-            pathStorage.push_back(nvngxDlssNrPath.value().parent_path().wstring());
+            pathStorage.insert(pathStorage.begin(), nvngxDlssNrPath.value().parent_path().wstring());
 
         // Streamline makes a copy of those
         std::vector<const wchar_t*> paths;

@@ -242,12 +242,14 @@ inline std::string FormatIniContent030(int maxFrames, int optimized = 1, const s
         validRouter = "Auto";
 
     std::string validPreset = preset;
-    if (validPreset != "A" && validPreset != "B" && validPreset != "a" && validPreset != "b")
+    if (validPreset != "A" && validPreset != "B" && validPreset != "a" && validPreset != "b" && validPreset != "C" && validPreset != "c")
         validPreset = "Auto";
     else if (validPreset == "a")
         validPreset = "A";
     else if (validPreset == "b")
         validPreset = "B";
+
+    if (validPreset == "c") validPreset = "C";
 
     int validOptimized = (optimized >= 0 && optimized <= 3) ? optimized : 1;
     int validHwBilinear = (hwBilinear == 1) ? 1 : 0;

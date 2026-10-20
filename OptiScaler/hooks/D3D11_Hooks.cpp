@@ -4,6 +4,10 @@
 
 #include <Util.h>
 #include <Config.h>
+#include <misc/SamplerMipBias.h>
+#include <misc/Dx11AutomaticMipBias.h>
+#include <misc/FfxivJitter.h>
+#include <misc/FfxivNativeQuality.h>
 
 #include <proxies/KernelBase_Proxy.h>
 
@@ -87,8 +91,94 @@ static inline D3D11_FILTER UpgradeToAF(D3D11_FILTER f)
     return D3D11_FILTER_ANISOTROPIC;
 }
 
+namespace {
+std::array<Dx11AutomaticMipBias::Set, 6> autoMipSet {};
+std::array<Dx11AutomaticMipBias::Get, 6> autoMipGet {};
+std::atomic<bool> autoMipReady {false};
+ID3D11DeviceContext* autoMipContext = nullptr;
+template<unsigned Stage>
+void STDMETHODCALLTYPE AutoMipSet(ID3D11DeviceContext* c, UINT start, UINT count, ID3D11SamplerState* const* input)
+{
+    if (autoMipReady.load()) Dx11AutomaticMipBias::binder.Bind(Stage, c, start, count, input);
+    else autoMipSet[Stage](c, start, count, input);
+}
+template<unsigned Stage>
+void STDMETHODCALLTYPE AutoMipGet(ID3D11DeviceContext* c, UINT start, UINT count, ID3D11SamplerState** output)
+{
+    if (autoMipReady.load()) Dx11AutomaticMipBias::binder.Read(Stage, c, start, count, output);
+    else autoMipGet[Stage](c, start, count, output);
+}
+constexpr std::array<Dx11AutomaticMipBias::Set, 6> autoMipSetHooks {
+    AutoMipSet<0>, AutoMipSet<1>, AutoMipSet<2>, AutoMipSet<3>, AutoMipSet<4>, AutoMipSet<5>};
+constexpr std::array<Dx11AutomaticMipBias::Get, 6> autoMipGetHooks {
+    AutoMipGet<0>, AutoMipGet<1>, AutoMipGet<2>, AutoMipGet<3>, AutoMipGet<4>, AutoMipGet<5>};
+bool UseAutomaticMipBias()
+{
+    return SamplerMipBias::automaticDx11Active.load();
+}
+void InstallAutomaticMipBias(ID3D11Device* device)
+{
+    if (!device || autoMipReady.load() || State::Instance().gameExe != "ffxiv_dx11.exe") return;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context; device->GetImmediateContext(&context);
+    if (!context) return;
+    const auto vt = *reinterpret_cast<void***>(context.Get());
+    constexpr unsigned sets[] {10,26,32,61,65,70}, gets[] {75,85,88,99,103,108};
+    for (unsigned i=0; i<6; ++i) {
+        autoMipSet[i] = reinterpret_cast<Dx11AutomaticMipBias::Set>(vt[sets[i]]);
+        autoMipGet[i] = reinterpret_cast<Dx11AutomaticMipBias::Get>(vt[gets[i]]);
+    }
+    if (DetourTransactionBegin() != NO_ERROR) return;
+    bool ok = DetourUpdateThread(GetCurrentThread()) == NO_ERROR;
+    for (unsigned i=0; i<6; ++i) {
+        ok &= DetourAttach(reinterpret_cast<PVOID*>(&autoMipSet[i]), autoMipSetHooks[i]) == NO_ERROR;
+        ok &= DetourAttach(reinterpret_cast<PVOID*>(&autoMipGet[i]), autoMipGetHooks[i]) == NO_ERROR;
+    }
+    LONG result = ERROR_INVALID_FUNCTION;
+    if (ok) result = DetourTransactionCommit(); else DetourTransactionAbort();
+    if (result == NO_ERROR) {
+        autoMipContext = context.Get();
+        Dx11AutomaticMipBias::binder.Attach(autoMipContext, autoMipSet, autoMipGet);
+        SamplerMipBias::automaticDx11Active.store(Config::Instance()->FfxivAutomaticMipBias.value_or_default());
+        autoMipReady.store(true);
+        SamplerMipBias::automaticDx11Available.store(true);
+        LOG_INFO("FFXIV automatic texture bias: cached sampler binding hooks ready");
+    } else LOG_ERROR("FFXIV automatic texture bias: hooks unavailable ({})", result);
+}
+void RemoveAutomaticMipBias()
+{
+    if (!autoMipReady.load()) return;
+    Dx11AutomaticMipBias::binder.Clear(autoMipContext);
+    if (DetourTransactionBegin() != NO_ERROR) return;
+    bool ok = DetourUpdateThread(GetCurrentThread()) == NO_ERROR;
+    for (unsigned i=0; i<6; ++i) {
+        ok &= DetourDetach(reinterpret_cast<PVOID*>(&autoMipSet[i]), autoMipSetHooks[i]) == NO_ERROR;
+        ok &= DetourDetach(reinterpret_cast<PVOID*>(&autoMipGet[i]), autoMipGetHooks[i]) == NO_ERROR;
+    }
+    if (ok) {
+        if (DetourTransactionCommit() == NO_ERROR) { autoMipReady.store(false); SamplerMipBias::automaticDx11Available.store(false); SamplerMipBias::automaticDx11Active.store(false); autoMipContext = nullptr; }
+    } else DetourTransactionAbort();
+}
+}
+void D3D11Hooks::UpdateAutomaticMipBias(ID3D11DeviceContext* gameContext, unsigned render, unsigned output)
+{
+    // NGX can receive a ReShade context proxy rather than the native context on
+    // which our sampler detours run. Dimensions belong to this scene; bind on
+    // the native immediate context captured at installation, not proxy identity.
+    if (gameContext && autoMipReady.load() &&
+        Dx11AutomaticMipBias::binder.Update(autoMipContext, UseAutomaticMipBias(), render, output))
+        LOG_INFO("FFXIV automatic texture bias: render {}, output {}, final target {:.4f}",
+                 render, output, Dx11AutomaticMipBias::binder.Target());
+}
+void D3D11Hooks::ResetAutomaticMipBias()
+{
+    if (autoMipReady.load()) Dx11AutomaticMipBias::binder.Clear(autoMipContext);
+}
+
 static void HookToDeviceLocal(ID3D11Device* InDevice)
 {
+    FfxivJitter::Install();
+    FfxivNativeQuality::Install();
+    InstallAutomaticMipBias(InDevice);
     FfxivLightingCapture::Install(InDevice);
     if (o_CreateSamplerState != nullptr || InDevice == nullptr)
         return;
@@ -495,30 +585,8 @@ static HRESULT hkCreateSamplerState(ID3D11Device* This, const D3D11_SAMPLER_DESC
 
     newDesc.MipLODBias = pSamplerDesc->MipLODBias;
 
-    if ((newDesc.MipLODBias < 0.0f && newDesc.MinLOD != newDesc.MaxLOD) ||
-        Config::Instance()->MipmapBiasOverrideAll.value_or_default())
-    {
-        if (Config::Instance()->MipmapBiasOverride.has_value())
-        {
-            LOG_DEBUG("Overriding mipmap bias {0} -> {1}", pSamplerDesc->MipLODBias,
-                      Config::Instance()->MipmapBiasOverride.value());
-
-            if (Config::Instance()->MipmapBiasFixedOverride.value_or_default())
-                newDesc.MipLODBias = Config::Instance()->MipmapBiasOverride.value();
-            else if (Config::Instance()->MipmapBiasScaleOverride.value_or_default())
-                newDesc.MipLODBias = newDesc.MipLODBias * Config::Instance()->MipmapBiasOverride.value();
-            else
-                newDesc.MipLODBias = newDesc.MipLODBias + Config::Instance()->MipmapBiasOverride.value();
-
-            newDesc.MipLODBias = std::clamp(newDesc.MipLODBias, -16.0f, 15.99f);
-        }
-
-        if (State::Instance().lastMipBiasMax < newDesc.MipLODBias)
-            State::Instance().lastMipBiasMax = newDesc.MipLODBias;
-
-        if (State::Instance().lastMipBias > newDesc.MipLODBias)
-            State::Instance().lastMipBias = newDesc.MipLODBias;
-    }
+    // Automatic mode preserves the original game sampler; substitution happens at bind time.
+    if (!UseAutomaticMipBias()) SamplerMipBias::Apply(newDesc);
 
     return o_CreateSamplerState(This, &newDesc, ppSamplerState);
 }
@@ -568,6 +636,8 @@ void D3D11Hooks::Hook(HMODULE dx11Module)
 
 void D3D11Hooks::Unhook()
 {
+    FfxivJitter::Detach();
+    RemoveAutomaticMipBias();
     FfxivLightingCapture::Detach();
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());

@@ -1,5 +1,8 @@
 #include "pch.h"
 #include <misc/FfxivPreviewDLSS.h>
+#include <hooks/D3D11_Hooks.h>
+#include <misc/FfxivJitter.h>
+#include <misc/NgxSynchronization.h>
 
 #include "Config.h"
 #include "Util.h"
@@ -125,6 +128,8 @@ static void UpdateInitPaths(NVSDK_NGX_FeatureCommonInfo* InFeatureInfo)
         if (nvngxDlssGPath.has_value())
             State::Instance().NVNGX_FeatureInfo_Paths.push_back(nvngxDlssGPath.value().parent_path().wstring());
 
+        if (auto nr=DlssNr::RuntimeSelection::Path())
+            State::Instance().NVNGX_FeatureInfo_Paths.insert(State::Instance().NVNGX_FeatureInfo_Paths.begin(),nr->parent_path().wstring());
         // Build pointer array
         paths = new const wchar_t*[State::Instance().NVNGX_FeatureInfo_Paths.size()];
         for (size_t i = 0; i < State::Instance().NVNGX_FeatureInfo_Paths.size(); ++i)
@@ -328,6 +333,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Init_with_ProjectID(
 
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Shutdown()
 {
+    const NgxSynchronization::FeatureGuard featureGuard(NgxSynchronization::dx11Features);
+    D3D11Hooks::ResetAutomaticMipBias();
     FfxivPreviewDLSS::Shutdown();
     shutdown = true;
 
@@ -386,6 +393,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Shutdown()
 
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_Shutdown1(ID3D11Device* InDevice)
 {
+    const NgxSynchronization::FeatureGuard featureGuard(NgxSynchronization::dx11Features);
     // A null Shutdown1 device has the same global effect as legacy Shutdown.
     // Route FFXIV through the guarded path using its recorded DX11 device.
     if (State::Instance().gameExe == "ffxiv_dx11.exe" && WithDx12::IsInited())
@@ -560,6 +568,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_CreateFeature(ID3D11DeviceContext
                                                              NVSDK_NGX_Parameter* InParameters,
                                                              NVSDK_NGX_Handle** OutHandle)
 {
+    const NgxSynchronization::FeatureGuard featureGuard(NgxSynchronization::dx11Features);
     // FeatureId check
     if (InFeatureID != NVSDK_NGX_Feature_SuperSampling && InFeatureID != NVSDK_NGX_Feature_RayReconstruction)
     {
@@ -677,6 +686,7 @@ static bool WaitForFfxivReleaseQueue(ID3D12CommandQueue* queue)
 
 NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_ReleaseFeature(NVSDK_NGX_Handle* InHandle)
 {
+    const NgxSynchronization::FeatureGuard featureGuard(NgxSynchronization::dx11Features);
     if (!InHandle)
         return NVSDK_NGX_Result_Success;
 
@@ -703,6 +713,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_ReleaseFeature(NVSDK_NGX_Handle* 
 
     if (auto deviceContext = Dx11Contexts[handleId].feature.get(); deviceContext != nullptr)
     {
+        bool queuesDrained = false;
         if (State::Instance().gameExe == "ffxiv_dx11.exe" && deviceContext->IsWithDx12())
         {
             auto fg = State::Instance().currentFG;
@@ -719,8 +730,9 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_ReleaseFeature(NVSDK_NGX_Handle* 
             auto upscaleQueue = WithDx12::GetD3D12CommandQueue();
             if (upscaleQueue != fgQueue && !WaitForFfxivReleaseQueue(upscaleQueue))
                 return NVSDK_NGX_Result_FAIL_PlatformError;
+            queuesDrained = upscaleQueue != nullptr;
 
-            // The upscaler is rebuilt from here and the caller then sleeps 500 ms. XeFG keeps
+            // The upscaler is rebuilt from here. XeFG can keep
             // running straight across that hole: CancelPendingUpscalerWork only switches it off
             // and back on, so the provider's presentation timing history survives a large
             // discontinuity. It can then settle onto the display's fixed refresh grid and stay
@@ -742,14 +754,18 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_ReleaseFeature(NVSDK_NGX_Handle* 
             }
         }
 
-        if (!shutdown)
+        // A fixed sleep adds latency after actual GPU completion has already
+        // been established. Preserve the old fallback on unverified paths.
+        if (!shutdown && !queuesDrained)
         {
             LOG_TRACE("sleeping for 500ms before reset()!");
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
 
-        if (deviceContext == State::Instance().currentFeature)
+        if (deviceContext == State::Instance().currentFeature) {
+            D3D11Hooks::ResetAutomaticMipBias();
             State::Instance().currentFeature = nullptr;
+        }
 
         Dx11Contexts[handleId].feature.reset();
         auto it = std::find_if(Dx11Contexts.begin(), Dx11Contexts.end(),
@@ -806,6 +822,7 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_EvaluateFeature(ID3D11DeviceConte
                                                                NVSDK_NGX_Parameter* InParameters,
                                                                PFN_NVSDK_NGX_ProgressCallback InCallback)
 {
+    const NgxSynchronization::FeatureGuard featureGuard(NgxSynchronization::dx11Features);
     if (InFeatureHandle == nullptr)
     {
         LOG_DEBUG("InFeatureHandle is null");
@@ -906,7 +923,12 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D11_EvaluateFeature(ID3D11DeviceConte
         return NVSDK_NGX_Result_Success;
     }
 
+    FfxivJitter::Binding nativeJitter(InParameters);
     auto upscaleResult = deviceContext->Evaluate(InDevCtx, InParameters);
+    if (upscaleResult == NVSDK_NGX_Result_Success)
+        D3D11Hooks::UpdateAutomaticMipBias(InDevCtx, deviceContext->RenderWidth(), deviceContext->TargetWidth());
+    else
+        D3D11Hooks::ResetAutomaticMipBias();
 
     if (State::Instance().activeFgInput == FGInput::Upscaler)
     {

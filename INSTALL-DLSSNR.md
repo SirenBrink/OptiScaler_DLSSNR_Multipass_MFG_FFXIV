@@ -171,3 +171,23 @@ Then launch into a rendered scene and press `Insert` (`Alt+Insert` can help on s
   compatibility `E67DEE...` build rather than the original `E16BC...` build.
 - The menu toggles but does not accept input: try `[Hotfix] ManualInputPolling=true` and test without
   conflicting overlays.
+
+
+## Choosing an NR runtime
+
+Keep versioned runtimes in separate folders, for example:
+
+```
+game/OptiScaler/NR.310.8.0.0/nvngx_dlssnr.dll
+game/OptiScaler/NR.310.9.16.0/nvngx_dlssnr.dll
+```
+
+The **NR runtime** dropdown under Neural Rendering lists installed version folders. Save Settings and restart the game after changing it. `[DlssNr] Runtime=NR.310.9.16.0` selects that folder. `Runtime=auto` retains legacy discovery and excludes version folders from automatic selection. An explicit missing or invalid selection disables NR rather than silently choosing another DLL. The chosen path is shared by scene NR, PreSR, previews, Vulkan and the NGX/Streamline search paths. The session version is displayed in the menu. Keep `nvngx.dll_dlssnr.dll` in its existing location; version folders contain only the model DLL.
+
+Runtime switching is intentionally not live. Features, hooks, library state and queued GPU work can survive turning NR off. This setting does not unload libraries or switch preview and scene models independently. Version folders are user-supplied runtime files, not copies committed into this repository. Runtime version numbers alone do not establish which trained models or visual styles a DLL contains.
+
+## DLSS-G model presets
+
+Under **OptiFG -> DLSS-G**, select Automatic, Preset A, Preset B or Preset C, then Save Settings and restart. `[DLSSG] RenderPreset=0/1/2/3` is the equivalent configuration. Automatic preserves the existing behavior and NVIDIA profile. Explicit selections override driver-settings query results inside this process only; no NVIDIA profile is saved or changed. The SM86 companion configuration receives the same selection.
+
+These are requests, not proof that a particular model is running. The installed DLSS-G runtime and driver must support the preset; an older runtime can ignore a newer preset. The menu warns if no preset query has been observed; the log records a query when intercepted. Preset B additionally needs compatible HUD-less/UI resources. REST UI-free frame generation deliberately keeps HUD processing outside DLSS-G. A and C leave NVIDIA UI recomposition off. Changing a dropdown does not hot-reload FG or rewrite an active feature.

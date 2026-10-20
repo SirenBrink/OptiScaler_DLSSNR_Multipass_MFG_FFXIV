@@ -7,6 +7,10 @@
 #include <framegen/dlssg/AmpereMfgLoader.h>
 #include <misc/FfxivNativeQuality.h>
 #include "menu_common.h"
+#include <misc/MipBiasPolicy.h>
+#include <misc/Dx11AutomaticMipBias.h>
+#include <misc/SamplerMipBias.h>
+#include <framegen/dlssg/PresetSelection.h>
 #include <framegen/dlssg/MfgUnlock.h>
 #include <NVNGX_Parameter.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
@@ -4491,6 +4495,14 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         state.currentFGSwapchain != nullptr && StreamlineProxy::LoadStreamline() && fgOutput)
     {
         ImGui::SeparatorText("Frame Generation (DLSSG)");
+        int fgPreset=config->FGDLSSGRenderPreset.value_or_default();
+        if (ImGui::Combo("DLSS-G model preset",&fgPreset,"Automatic\0Preset A\0Preset B\0Preset C\0"))
+            config->FGDLSSGRenderPreset=fgPreset;
+        ShowHelpMarker("Save Settings and restart. Requests the preset from the installed runtime/driver; does not change your NVIDIA profile. Preset C requires a compatible recent DLSS-G runtime. Older runtimes may ignore it. Preset B requires UI resources; REST UI-free generation keeps UI outside DLSS-G.");
+        if (DlssgPreset::Startup()!=0 && !DlssgPreset::querySeen.load(std::memory_order_relaxed))
+            ImGui::TextDisabled("Preset request unconfirmed: no driver preset query observed.");
+        if (fgPreset!=DlssgPreset::Startup()) ImGui::TextDisabled("Preset change pending: Save Settings and restart.");
+
 
         if (state.activeFgNvngx == FGNvngxReplacement::None && state.isHdrActive)
         {
@@ -7311,23 +7323,58 @@ void MenuCommon::RenderApiAndTextureSettings(RenderMenuContext& ctx)
             }
         }
 
+        // Automatic FFXIV texture bias follows actual rendering dimensions, independent of model letter.
+        if (state.gameExe == "ffxiv_dx11.exe") {
+            bool automatic = config->FfxivAutomaticMipBias.value_or_default();
+            if (ImGui::Checkbox("Automatic texture mip bias", &automatic)) {
+                config->FfxivAutomaticMipBias = automatic;
+                _showMipmapCalcWindow = false;
+            }
+            ShowHelpMarker("Follows the current render/output resolution automatically.\n"
+                           "Uses a conservative final world-texture bias; old manual overrides are ignored.\n"
+                           "Only ordinary mipmapped samplers with negative bias are changed.\n"
+                           "Save Settings and restart after enabling/disabling this mode.\n"
+                           "Quality and resolution changes are automatic within the session.");
+            if (automatic && !SamplerMipBias::automaticDx11Available.load())
+                ImGui::TextDisabled("Automatic texture bias is unavailable on this rendering path.");
+            if (SamplerMipBias::automaticDx11Available.load() &&
+                automatic != SamplerMipBias::automaticDx11Active.load())
+                ImGui::TextDisabled("Save Settings and restart to apply this mode change.");
+            if (SamplerMipBias::automaticDx11Active.load() && currentFeature && currentFeature->IsInited()) {
+                if (Dx11AutomaticMipBias::binder.Ready())
+                {
+                    ImGui::TextDisabled("Automatic texture bias: %.3f", Dx11AutomaticMipBias::binder.Target());
+                    ImGui::TextDisabled("Measured scene: %ux%u -> %ux%u",
+                        currentFeature->RenderWidth(), currentFeature->RenderHeight(),
+                        currentFeature->TargetWidth(), currentFeature->TargetHeight());
+                }
+                else
+                    ImGui::TextDisabled("Automatic texture bias: waiting for scene");
+            }
+            if (currentFeature && currentFeature->IsInited() && !FfxivNativeQuality::Available())
+                ImGui::TextWrapped("Game resolution control unavailable. Selected quality may not change the render size; see log.");
+        }
+        const bool automaticMip = state.gameExe == "ffxiv_dx11.exe" && config->FfxivAutomaticMipBias.value_or_default();
         // MIPMAP BIAS & Anisotropy -----------------------------
         ImGui::Spacing();
-        if (auto ch = ScopedCollapsingHeader("Mipmap Bias", (currentFeature == nullptr || currentFeature->IsFrozen())
+        if (!automaticMip)
+        if (auto ch = ScopedCollapsingHeader("Advanced manual texture bias", (currentFeature == nullptr || currentFeature->IsFrozen())
                                                                 ? ImGuiTreeNodeFlags_DefaultOpen
                                                                 : 0);
             ch.IsHeaderOpen())
         {
             ScopedIndent indent {};
             ImGui::Spacing();
-            if (config->MipmapBiasOverride.has_value() && _mipBias == 0.0f)
-                _mipBias = config->MipmapBiasOverride.value();
+            if (!_mipBiasEditorLoaded) {
+                _mipBias = config->MipmapBiasOverride.value_or(0.0f);
+                _mipBiasEditorLoaded = true;
+            }
 
             ImGui::SliderFloat("Mipmap Bias##2", &_mipBias, -15.0f, 15.0f, "%.6f");
-            ShowHelpMarker("Can help with blurry textures in broken games\n"
-                           "Negative values will make textures sharper\n"
-                           "Positive values will make textures more blurry\n\n"
-                           "Has a small performance impact");
+            ShowHelpMarker("By default this value is added to the game's existing texture bias.\n"
+                           "Negative values sharpen textures but can increase shimmer.\n"
+                           "Fixed override uses a final value; scale override multiplies the game value.\n"
+                           "The calculator selects fixed mode when you press Set.");
 
             ImGui::BeginDisabled(!config->MipmapBiasOverride.has_value());
             {
@@ -7339,9 +7386,10 @@ void MenuCommon::RenderApiAndTextureSettings(RenderMenuContext& ctx)
                     {
                         config->MipmapBiasScaleOverride.reset();
                         config->MipmapBiasFixedOverride = mbFixed;
+                        _mipCalculatedFixedPending=false;
                     }
 
-                    ShowHelpMarker("Apply same override value to all textures");
+                    ShowHelpMarker("Use the value as the final sampler bias, rather than adding it to the game bias.");
                 }
                 ImGui::EndDisabled();
 
@@ -7355,6 +7403,7 @@ void MenuCommon::RenderApiAndTextureSettings(RenderMenuContext& ctx)
                     {
                         config->MipmapBiasFixedOverride.reset();
                         config->MipmapBiasScaleOverride = mbScale;
+                        _mipCalculatedFixedPending=false;
                     }
 
                     ShowHelpMarker("Apply override value as scale multiplier\n"
@@ -7367,18 +7416,23 @@ void MenuCommon::RenderApiAndTextureSettings(RenderMenuContext& ctx)
                 if (ImGui::Checkbox("MB Override All Textures", &mbAll))
                     config->MipmapBiasOverrideAll = mbAll;
 
-                ShowHelpMarker("Override all textures mipmap values\n"
-                               "Normally OptiScaler only overrides\n"
-                               "below zero mipmap values!");
+                ShowHelpMarker("Normally only ordinary mipmapped samplers with negative bias are changed.\n"
+                               "All textures also includes UI and comparison/shadow samplers.");
             }
             ImGui::EndDisabled();
 
-            ImGui::BeginDisabled(config->MipmapBiasOverride.has_value() &&
+            if (_mipCalculatedFixedPending) ImGui::TextDisabled("Calculated final target: Set will select fixed override.");
+            ImGui::TextDisabled("Sampler changes may require Save Settings and a game restart.");
+            ImGui::BeginDisabled(!_mipCalculatedFixedPending && config->MipmapBiasOverride.has_value() &&
                                  config->MipmapBiasOverride.value() == _mipBias);
             {
                 if (ImGui::Button("Set"))
                 {
                     config->MipmapBiasOverride = _mipBias;
+                    if (_mipCalculatedFixedPending) {
+                        config->MipmapBiasFixedOverride=true;config->MipmapBiasScaleOverride=false;
+                        _mipCalculatedFixedPending=false;
+                    }
                     state.lastMipBias = 100.0f;
                     state.lastMipBiasMax = -100.0f;
                 }
@@ -7393,6 +7447,7 @@ void MenuCommon::RenderApiAndTextureSettings(RenderMenuContext& ctx)
                 {
                     config->MipmapBiasOverride.reset();
                     _mipBias = 0.0f;
+                    _mipCalculatedFixedPending=false;
                     state.lastMipBias = 100.0f;
                     state.lastMipBiasMax = -100.0f;
                 }
@@ -7404,7 +7459,10 @@ void MenuCommon::RenderApiAndTextureSettings(RenderMenuContext& ctx)
                 ImGui::SameLine(0.0f, 6.0f);
 
                 if (ImGui::Button("Calculate Mipmap Bias"))
+                {
+                    _displayWidth=0;
                     _showMipmapCalcWindow = true;
+                }
             }
 
             if (config->MipmapBiasOverride.has_value())
@@ -7812,31 +7870,25 @@ void MenuCommon::RenderMipmapBiasWindow(RenderMenuContext& ctx, ImGuiWindowFlags
     // Metrics window (for debug)
     // ImGui::ShowMetricsWindow();
 
+    static float nativeBias=0, stabilityAllowance=1;
     // Mipmap calculation window
     if (_showMipmapCalcWindow && currentFeature != nullptr && !currentFeature->IsFrozen() && currentFeature->IsInited())
     {
         auto posX = (io.DisplaySize.x - 450.0f) / 2.0f;
-        auto posY = (io.DisplaySize.y - 200.0f) / 2.0f;
+        auto posY = (io.DisplaySize.y - 340.0f) / 2.0f;
 
         ImGui::SetNextWindowPos(ImVec2 { posX, posY }, ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2 { 450.0f, 200.0f }, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2 { 450.0f, 340.0f }, ImGuiCond_FirstUseEver);
 
         if (_displayWidth == 0)
         {
-            if (config->OutputScalingEnabled.value_or_default())
-            {
-                _displayWidth = static_cast<uint32_t>(currentFeature->DisplayWidth() *
-                                                      config->OutputScalingMultiplier.value_or_default());
-            }
-            else
-            {
-                _displayWidth = currentFeature->DisplayWidth();
-            }
+            _displayWidth = std::max(1u,currentFeature->TargetWidth());
 
-            _renderWidth = static_cast<uint32_t>(_displayWidth / 3.0f);
-            _mipmapUpscalerQuality = 0;
-            _mipmapUpscalerRatio = 3.0f;
-            _mipBiasCalculated = log2((float) _renderWidth / (float) _displayWidth);
+            _renderWidth = std::max(1u,currentFeature->RenderWidth());
+            _mipmapUpscalerRatio=float(_displayWidth)/float(_renderWidth);
+            constexpr unsigned qualityIndices[]{1,2,3,0,4,5};
+            _mipmapUpscalerQuality=qualityIndices[std::clamp(int(currentFeature->PerfQualityValue()),0,5)];
+            _mipBiasCalculated = MipBiasPolicy::Recommended(_renderWidth,_displayWidth,nativeBias,stabilityAllowance);
         }
 
         if (ImGui::Begin("Mipmap Bias", nullptr, flags))
@@ -7846,25 +7898,14 @@ void MenuCommon::RenderMipmapBiasWindow(RenderMenuContext& ctx, ImGuiWindowFlags
 
             if (ImGui::InputScalar("Display Width", ImGuiDataType_U32, &_displayWidth, NULL, NULL, "%u"))
             {
-                if (_displayWidth <= 0)
-                {
-                    if (config->OutputScalingEnabled.value_or_default())
-                    {
-                        _displayWidth = static_cast<uint32_t>(currentFeature->DisplayWidth() *
-                                                              config->OutputScalingMultiplier.value_or_default());
-                    }
-                    else
-                    {
-                        _displayWidth = currentFeature->DisplayWidth();
-                    }
-                }
+                _displayWidth=std::clamp(_displayWidth,1u,16384u);
 
-                _renderWidth = static_cast<uint32_t>(_displayWidth / _mipmapUpscalerRatio);
-                _mipBiasCalculated = log2((float) _renderWidth / (float) _displayWidth);
+                _renderWidth = std::max(1u,static_cast<uint32_t>(_displayWidth / _mipmapUpscalerRatio));
+                _mipBiasCalculated = MipBiasPolicy::Recommended(_renderWidth,_displayWidth,nativeBias,stabilityAllowance);
             }
 
             const char* q[] = { "Ultra Performance", "Performance", "Balanced", "Quality", "Ultra Quality", "DLAA" };
-            float fr[] = { 3.0f, 2.0f, 1.7f, 1.5f, 1.3f, 1.0f };
+            float fr[] = { 3.0f, 2.0f, (1.0f/0.58f), 1.5f, 1.3f, 1.0f };
             auto configQ = _mipmapUpscalerQuality;
 
             const char* selectedQ = q[configQ];
@@ -7912,8 +7953,8 @@ void MenuCommon::RenderMipmapBiasWindow(RenderMenuContext& ctx, ImGuiWindowFlags
                         else
                             _mipmapUpscalerRatio = fr[n];
 
-                        _renderWidth = static_cast<uint32_t>(_displayWidth / _mipmapUpscalerRatio);
-                        _mipBiasCalculated = log2((float) _renderWidth / (float) _displayWidth);
+                        _renderWidth = std::max(1u,static_cast<uint32_t>(_displayWidth / _mipmapUpscalerRatio));
+                        _mipBiasCalculated = MipBiasPolicy::Recommended(_renderWidth,_displayWidth,nativeBias,stabilityAllowance);
                     }
                 }
 
@@ -7926,14 +7967,25 @@ void MenuCommon::RenderMipmapBiasWindow(RenderMenuContext& ctx, ImGuiWindowFlags
             auto maxLimit = config->ExtendedLimits.value_or_default() ? 6.0f : 3.0f;
             if (ImGui::SliderFloat("Upscaler Ratio", &_mipmapUpscalerRatio, minLimit, maxLimit, "%.2f"))
             {
-                _renderWidth = static_cast<uint32_t>(_displayWidth / _mipmapUpscalerRatio);
-                _mipBiasCalculated = log2((float) _renderWidth / (float) _displayWidth);
+                _renderWidth = std::max(1u,static_cast<uint32_t>(_displayWidth / _mipmapUpscalerRatio));
+                _mipBiasCalculated = MipBiasPolicy::Recommended(_renderWidth,_displayWidth,nativeBias,stabilityAllowance);
             }
 
             if (ImGui::InputScalar("Render Width", ImGuiDataType_U32, &_renderWidth, NULL, NULL, "%u"))
-                _mipBiasCalculated = log2((float) _renderWidth / (float) _displayWidth);
+            {
+                _renderWidth=std::clamp(_renderWidth,1u,16384u);
+                _mipmapUpscalerRatio=float(_displayWidth)/float(_renderWidth);
+                _mipBiasCalculated = MipBiasPolicy::Recommended(_renderWidth,_displayWidth,nativeBias,stabilityAllowance);
 
-            ImGui::SliderFloat("Mipmap Bias", &_mipBiasCalculated, -15.0f, 0.0f, "%.6f");
+            }
+            if (ImGui::SliderFloat("Native texture bias",&nativeBias,-4.0f,4.0f,"%.3f") |
+                ImGui::SliderFloat("Stability allowance",&stabilityAllowance,0.0f,1.0f,"%.3f"))
+                _mipBiasCalculated=MipBiasPolicy::Recommended(_renderWidth,_displayWidth,nativeBias,stabilityAllowance);
+            ImGui::TextWrapped("Lower allowance favors detail; higher allowance reduces texture shimmer.");
+            ImGui::SliderFloat("Final mipmap bias", &_mipBiasCalculated, -15.0f, 15.0f, "%.6f");
+            ShowHelpMarker("NVIDIA target = native bias + log2(render/output) - 1 + allowance.\n"
+                           "Native texture bias is the game's art bias before DLSS adjustment.\n"
+                           "Use Value, then Set, applies this final value in fixed mode.");
 
             // BOTTOM LINE
             ImGui::Spacing();
@@ -7954,6 +8006,7 @@ void MenuCommon::RenderMipmapBiasWindow(RenderMenuContext& ctx, ImGuiWindowFlags
             if (ImGui::Button("Use Value"))
             {
                 _mipBias = _mipBiasCalculated;
+                _mipCalculatedFixedPending=true;
                 _showMipmapCalcWindow = false;
             }
 

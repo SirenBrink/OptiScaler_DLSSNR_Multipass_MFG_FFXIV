@@ -1,4 +1,6 @@
 #pragma once
+#include <dlssnr/RuntimeSelection.h>
+#include <misc/NgxSynchronization.h>
 
 #include "SysUtils.h"
 #include "Util.h"
@@ -419,7 +421,7 @@ class NVNGXProxy
 
     inline static bool _cudaInited = false;
     inline static bool _dx11Inited = false;
-    inline static bool _dx12Inited = false;
+    inline static std::atomic<bool> _dx12Inited {false};
     inline static bool _vulkanInited = false;
 
     inline static void LogCallback(const char* message, NVSDK_NGX_Logging_Level loggingLevel,
@@ -623,6 +625,11 @@ class NVNGXProxy
             State::Instance().NVNGX_FeatureInfo_Paths.push_back(dlssPath.remove_filename().wstring());
         }
 
+        if (auto nr=DlssNr::RuntimeSelection::Path()) {
+            const auto dir=nr->parent_path().wstring();
+            auto& roots=State::Instance().NVNGX_FeatureInfo_Paths;
+            if (std::find(roots.begin(),roots.end(),dir)==roots.end()) roots.insert(roots.begin(),dir);
+        }
         // Allocate memory for the array of const wchar_t*
         wchar_t const** paths = new const wchar_t*[State::Instance().NVNGX_FeatureInfo_Paths.size()];
 
@@ -765,6 +772,7 @@ class NVNGXProxy
     // DirectX12
     static bool InitDx12(ID3D12Device* InDevice)
     {
+        const std::lock_guard lock(NgxSynchronization::dx12Calls);
         if (_dx12Inited)
             return true;
 
@@ -817,19 +825,19 @@ class NVNGXProxy
 
     static PFN_D3D12_GetCapabilityParameters D3D12_GetCapabilityParameters()
     {
-        return _module.D3D12_GetCapabilityParameters;
+        return _module.D3D12_GetCapabilityParameters ? NgxSynchronization::Serialized<&_module.D3D12_GetCapabilityParameters>::Call : nullptr;
     }
 
-    static PFN_D3D12_AllocateParameters D3D12_AllocateParameters() { return _module.D3D12_AllocateParameters; }
+    static PFN_D3D12_AllocateParameters D3D12_AllocateParameters() { return _module.D3D12_AllocateParameters ? NgxSynchronization::Serialized<&_module.D3D12_AllocateParameters>::Call : nullptr; }
 
-    static PFN_D3D12_GetParameters D3D12_GetParameters() { return _module.D3D12_GetParameters; }
+    static PFN_D3D12_GetParameters D3D12_GetParameters() { return _module.D3D12_GetParameters ? NgxSynchronization::Serialized<&_module.D3D12_GetParameters>::Call : nullptr; }
 
     static PFN_D3D12_DestroyParameters D3D12_DestroyParameters()
     {
         if (!_dx12Inited)
             return nullptr;
 
-        return _module.D3D12_DestroyParameters;
+        return _module.D3D12_DestroyParameters ? NgxSynchronization::Serialized<&_module.D3D12_DestroyParameters>::Call : nullptr;
     }
 
     static PFN_D3D12_CreateFeature D3D12_CreateFeature()
@@ -837,7 +845,7 @@ class NVNGXProxy
         if (!_dx12Inited)
             return nullptr;
 
-        return _module.D3D12_CreateFeature;
+        return _module.D3D12_CreateFeature ? NgxSynchronization::Serialized<&_module.D3D12_CreateFeature>::Call : nullptr;
     }
 
     static PFN_D3D12_EvaluateFeature D3D12_EvaluateFeature()
@@ -845,7 +853,7 @@ class NVNGXProxy
         if (!_dx12Inited)
             return nullptr;
 
-        return _module.D3D12_EvaluateFeature;
+        return _module.D3D12_EvaluateFeature ? NgxSynchronization::Serialized<&_module.D3D12_EvaluateFeature>::Call : nullptr;
     }
 
     static PFN_D3D12_ReleaseFeature D3D12_ReleaseFeature()
@@ -853,7 +861,7 @@ class NVNGXProxy
         if (!_dx12Inited)
             return nullptr;
 
-        return _module.D3D12_ReleaseFeature;
+        return _module.D3D12_ReleaseFeature ? NgxSynchronization::Serialized<&_module.D3D12_ReleaseFeature>::Call : nullptr;
     }
 
     static PFN_D3D12_Shutdown D3D12_Shutdown()
@@ -861,7 +869,7 @@ class NVNGXProxy
         if (!_dx12Inited)
             return nullptr;
 
-        return _module.D3D12_Shutdown;
+        return _module.D3D12_Shutdown ? NgxSynchronization::Serialized<&_module.D3D12_Shutdown>::Call : nullptr;
     }
 
     static PFN_D3D12_Shutdown1 D3D12_Shutdown1()
@@ -869,7 +877,7 @@ class NVNGXProxy
         if (!_dx12Inited)
             return nullptr;
 
-        return _module.D3D12_Shutdown1;
+        return _module.D3D12_Shutdown1 ? NgxSynchronization::Serialized<&_module.D3D12_Shutdown1>::Call : nullptr;
     }
 
     // Vulkan

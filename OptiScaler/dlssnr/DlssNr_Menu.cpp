@@ -2,6 +2,7 @@
 #include "DlssNrFeature_Vk.h"
 
 #include "DlssNr.h"
+#include "RuntimeSelection.h"
 #include "amd/AmdBridge.h"
 #include "DlssNr_ExposureScan.h"
 #include "DlssNrNative.h"
@@ -191,6 +192,26 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::TextWrapped("%s", amdPrerequisite.empty() ? amdStatus.c_str() : amdPrerequisite.c_str());
             ImGui::TextWrapped("AMD experimental: enable Run before upscaling. NVIDIA model/style controls do not apply.");
         }
+        const auto& runtime=DlssNr::RuntimeSelection::Startup();
+        static const auto installedRuntimes=DlssNr::RuntimeCatalog::Scan(DlssNr::RuntimeSelection::Roots());
+        const auto requested=config->DlssNrRuntime.value_or_default();
+        if (ImGui::BeginCombo("NR runtime",requested.empty()?"Automatic (legacy location)":requested.c_str())) {
+            if (ImGui::Selectable("Automatic (legacy location)",requested.empty())) config->DlssNrRuntime=std::string{};
+            for (const auto& version:installedRuntimes)
+                if (ImGui::Selectable(version.c_str(),requested==version)) config->DlssNrRuntime=version;
+            ImGui::EndCombo();
+        }
+        HelpMarker("Install each runtime as OptiScaler/NR.<version>/nvngx_dlssnr.dll.\n"
+                   "Save Settings and restart to change versions. Scene and previews share one runtime; a missing explicit choice never falls back silently.");
+        if (requested!=runtime.requested) ImGui::TextDisabled("NR runtime change pending: Save Settings and restart.");
+        static const std::string sessionRuntimeVersion=[&] {
+            version_t v;
+            if (runtime.path && Util::GetFileVersion(runtime.path->wstring(), &v))
+                return std::to_string(v.major)+"."+std::to_string(v.minor)+"."+std::to_string(v.patch)+"."+std::to_string(v.reserved);
+            return std::string("unknown version");
+        }();
+        if (runtime.path) ImGui::TextDisabled("Session NR runtime: %s",sessionRuntimeVersion.c_str());
+        else ImGui::TextWrapped("Selected NR runtime not found; Neural Rendering is unavailable.");
         bool enabled = config->DlssNrEnabled.value_or_default();
         if (ImGui::Checkbox("Enable Neural Rendering", &enabled))
             config->DlssNrEnabled = enabled;

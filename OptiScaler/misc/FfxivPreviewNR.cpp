@@ -3,6 +3,7 @@
 #include "FfxivPreviewNR.h"
 #include "FfxivPreviewInterop.h"
 #include <Config.h>
+#include <dlssnr/RuntimeSelection.h>
 #include <State.h>
 #include <Util.h>
 #include <proxies/NVNGX_Proxy.h>
@@ -69,7 +70,7 @@ struct Instance::Impl {
         if(!Shared(d.Get(),input,width,height,cd.Format) || !Shared(d.Get(),output,width,height,cd.Format) || !Shared(d.Get(),depth,gw,gh,gd.Format) || !Shared(d.Get(),motion,gw,gh,DXGI_FORMAT_R16G16_FLOAT))return false;
         if(FAILED(d->CreateShaderResourceView(input.dx11.Get(),nullptr,&inputView)))return false;
         auto find=[](const char* name){auto path=Util::FindFilePath(Util::DllPath().remove_filename(),name);if(!path)path=Util::FindFilePath(Util::ExePath().remove_filename(),name);return path;};
-        auto forwarder=find("nvngx.dll_dlssnr.dll"),snippet=find("nvngx_dlssnr.dll");if(!forwarder || !snippet)return false;model=*snippet;
+        auto forwarder=find("nvngx.dll_dlssnr.dll"),snippet=DlssNr::RuntimeSelection::Path();if(!forwarder || !snippet)return false;model=*snippet;
         library=LoadLibraryW(forwarder->wstring().c_str());if(!library)return false;
         create=reinterpret_cast<Create>(GetProcAddress(library,"dlssnr_call_create"));evaluate=reinterpret_cast<Evaluate>(GetProcAddress(library,"dlssnr_call_evaluate_v2"));release=reinterpret_cast<Release>(GetProcAddress(library,"dlssnr_call_release"));
         if(!create || !evaluate || !release || !NVNGXProxy::D3D12_GetCapabilityParameters() || NVNGXProxy::D3D12_GetCapabilityParameters()(&params)!=NVSDK_NGX_Result_Success || !params)return false;

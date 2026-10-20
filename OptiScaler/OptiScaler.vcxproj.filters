@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClInclude Include="shaders\hdr\HdrScreenshotIcc.h" />
@@ -803,6 +803,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="shaders\hdr\HdrCompatibility.hlsli">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\hdr\SceneHdrTransfer.hlsli">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="shaders\ui_extract\UE_Common.h">
@@ -1644,6 +1647,17 @@
     <ClInclude Include="misc\FfxivPreviewDLSS.h" />
     <ClInclude Include="misc\FfxivPreviewNR.h" />
     <ClInclude Include="misc\FramePacingTrace.h" />
+    <ClInclude Include="dlssnr\RuntimeCatalog.h" />
+    <ClInclude Include="dlssnr\RuntimeSelection.h" />
+    <ClInclude Include="framegen\dlssg\PresetSelection.h" />
+    <ClInclude Include="misc\TemporalSampling.h" />
+    <ClInclude Include="misc\FfxivJitter.h" />
+    <ClInclude Include="misc\Dx11AutomaticMipBias.h" />
+    <ClInclude Include="misc\MipBiasPolicy.h" />
+    <ClInclude Include="misc\SamplerMipBias.h" />
+    <ClInclude Include="misc\NgxJitterBinding.h" />
+    <ClInclude Include="misc\NgxSynchronization.h" />
+    <ClInclude Include="misc\InteropAuxiliaryPresent.h" />
     <ClInclude Include="dlssnr\NrFocusPolicy.h" />
     <ClInclude Include="framegen\dlssg\DynamicMfgPolicy.h" />
     <ClInclude Include="misc\FfxivPreviewFGMap.h" />
@@ -1654,6 +1668,7 @@
     <ClCompile Include="misc\FfxivPreviewNR.cpp" />
     <ClCompile Include="misc\FfxivPreviewFGMap.cpp" />
     <ClInclude Include="misc\FfxivPreviewCamera.h" />
+    <ClCompile Include="misc\FfxivJitter.cpp" />
     <ClCompile Include="misc\FfxivPreviewDLSS.cpp" />
   </ItemGroup>
 </Project>

@@ -9,6 +9,7 @@
 #include "FfxivPreviewEnhance.h"
 #include "FfxivHdrPreview.h"
 #include <Config.h>
+#include <misc/TemporalSampling.h>
 #include <State.h>
 #include <proxies/NVNGX_Proxy.h>
 #include <d3d11_1.h>
@@ -126,7 +127,7 @@ bool Initialize(Data& s,ID3D11Device* d){
     if(FAILED(d->CreateBuffer(&cb,nullptr,&s.constants)))return false;
     return true;
 }
-float Halton(UINT n,UINT base){float f=1,v=0;for(;n;n/=base){f/=base;v+=f*(n%base);}return v-.5f;}
+
 void Setup(Data& s,ID3D11DeviceContext* c,UINT w,UINT h){
     D3D11_VIEWPORT vp{0,0,float(w),float(h),0,1};c->RSSetViewports(1,&vp);c->RSSetState(nullptr);
     c->OMSetBlendState(nullptr,nullptr,~0u);c->OMSetDepthStencilState(nullptr,0);
@@ -312,7 +313,9 @@ void Draw(ID3D11DeviceContext* c,const std::function<void()>& draw){
             // per portrait can otherwise make each view sample only a subset
             // of the sequence when several portraits are open together.
             const auto phase=s.frame?s.frame:s.serial;
-            s.jitterX=running?Halton(UINT(phase%16)+1,2):0;s.jitterY=running?Halton(UINT(phase%16)+1,3):0;
+            const auto phases=TemporalSampling::PhaseCount(s.width,s.height,s.width*2,s.height*2);
+            s.jitterX=running?TemporalSampling::Halton(phase%phases+1,2):0;
+            s.jitterY=running?TemporalSampling::Halton(phase%phases+1,3):0;
             auto& m=FfxivPreviewMotion::Data();std::lock_guard ml(m.mutex);
             if(s.requested && FfxivPreviewMotion::Ensure(m,c,s.width,s.height)){const FLOAT zero[4]{};c->ClearRenderTargetView(m.target.Get(),zero);}
         }

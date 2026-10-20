@@ -341,19 +341,32 @@ These can be changed from the in-game menu with real-time results.
 
 ![resource barriers](images/rb.png)
 
-### Mipmap LOD Bias Override (Dx12 Only)
-To achieve better texture clarity, `MipmapLodBias` can be overridden with this setting. -15 is the sharpest and +15 is the fuzziest.
+### Automatic texture mip bias (FFXIV DX11)
+`[Mipmap] AutomaticFFXIV=true` is enabled by default. It follows the main scene's actual render/output width and uses `log2(renderWidth/outputWidth)`, the conservative end of NVIDIA's section 3.5 interval with zero additional art bias. It replaces the final bias on ordinary mipmapped colour samplers that originally have negative bias. It does not add the result to an existing bias or manual override. Mipless and comparison/minimum/maximum samplers keep their original settings.
+
+Quality/resolution changes update existing bindings across all six shader stages; the game does not have to recreate its sampler cache. State queries return the original logical objects, so ReShade and other renderer state backups can restore them normally. Sampler variants are reused while dimensions stay unchanged, with a bounded CPU-side cache and native fallback on creation failure. Preview upscaling does not choose the main scene's bias.
+
+The menu replaces the calculator with **Automatic texture mip bias** and a current value. Save Settings and restart when enabling/disabling this mode. This avoids mixing samplers previously created with manual overrides into an automatic session. Changing quality/resolution within an automatic session does not require a restart. A supersampled main scene falls back to the game's native samplers. Automatic mode ignores saved manual bias settings for both the DX11 game and internal DX12 rendering.
+
+### Advanced manual Mipmap LOD Bias Override (DX11 and DX12)
+Disable automatic mode and restart to expose the manual controls and calculator. Other games retain the manual controls.
+Bias normally adds to the game's existing sampler bias. Fixed mode replaces it; scale mode multiplies it. Negative values sharpen textures and can increase shimmer. The default scope includes ordinary mipmapped samplers already using negative bias. UI samplers without mipmaps and comparison/min/max samplers are excluded unless `MipmapBiasOverrideAll` is explicitly enabled.
 
 ```ini
-[Hotfix]
+[Mipmap]
 ; Override mipmap lod bias for textures
 ; -15.0 - 15.0 - Default (auto) is disabled
 MipmapBiasOverride=auto
+MipmapBiasFixedOverride=false
+MipmapBiasScaleOverride=false
+MipmapBiasOverrideAll=false
 ```
 
 **Adjusting MipmapLODBias has an impact on performace!**
 
-It can be changed from the in-game menu, needs resolution change to be effective.
+Changes affect newly created samplers; Save Settings and restart for a reliable comparison. A resolution change may not recreate the game's cached samplers. DX12 static samplers are modified once during root-signature creation; serialized blobs remain unchanged.
+
+The calculator follows NVIDIA's DLSS guide section 3.5: `nativeBias + log2(renderWidth / outputWidth) - 1 + epsilon`. It starts with the active render/output dimensions. Epsilon ranges from 0 for detail to 1 for the less aggressive stability target. Native bias means the game's art bias before any DLSS adjustment, which is not necessarily the currently observed sampler bias. Use Value followed by Set selects a fixed final target to avoid adding that target to an already adjusted bias.
 
 ![mipmap lod bias](images/mipmap.png)
 
@@ -424,3 +437,16 @@ These can be changed from the in-game menu with real-time results.
 ![menu scale](images/ui_scale.png)
 
 
+
+### FFXIV native jitter validation
+On the verified October 13 executable, the native NGX packet producer copies raw Halton offsets while the camera raster path separately scales those offsets and converts them to NDC. Runtime measurements found a native raster strength of 0.6. This shrinks the sampling lattice even when the reported NGX offset is corrected.
+
+OptiScaler compensates for that exact native strength expression at the original generator call, before the game builds its jittered projection and dependent camera buffers. The engine still owns the phase counter, Halton sequence and jitter-enable gates. Unsupported, invalid or near-zero strength leaves generation unchanged. The NGX packet producer immediately copies the actual projected pixel offsets (`x=ndcX*width/2`, `y=-ndcY*height/2`) into its queued packet, keeping alignment independent of render-thread delays. Other getter callers retain their original pointer and jitter-state layout. Engine instruction guards disable both hooks together after incompatible patches.
+
+The native DLSS generator's unbounded phase count is replaced with NVIDIA's recommended repeating Halton pattern: `ceil(8 * output pixel area / render pixel area)`, using native scene and device dimensions. This gives 8 phases at native resolution, 18 at Quality, 24 at Balanced and 32 at Performance. The native frame counter and enable gates remain authoritative; non-DLSS patterns and invalid extents are unchanged.
+
+A scoped boundary check validates the queued scene by offsets and render dimensions and restores any temporary parameter changes after the upscaler/NR/FG handoff. Missing, stale or inconsistent samples leave offsets unchanged. The corrected path has been visually tested across DLSS model presets, including Quality and Performance modes.
+
+Native scene-resize callbacks and the D3D11 NGX create/evaluate/release/shutdown entry points share a recursive lifetime lock. A resize cannot retire the bridge or its parameters while an evaluation is still preparing private PreSR work. Individual D3D12 NGX runtime calls use a separate recursive lock, including delayed feature retirement; this lock never acquires the bridge lifetime lock or NR state lock. No GPU fence waits are added to steady rendering.
+
+The DLSS/NR HDR input adapters normalize native colour and its SDR reference with the same transfer curve before importing scene radiance. Matching samples have a unit SDR edit ratio regardless of brightness. The extended scene itself retains its gamma-2.2 decode. Reference-black channels retain native colour because they cannot establish a meaningful HDR gain. This avoids the former mixed sRGB/gamma-2.2 ratio amplifying dark detail as jitter changes texel coverage; it adds no passes, history buffers or frame delay.

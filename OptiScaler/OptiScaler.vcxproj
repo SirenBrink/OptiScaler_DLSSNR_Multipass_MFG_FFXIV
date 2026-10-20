@@ -406,6 +406,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="misc\UiPaste.h" />
     <ClInclude Include="misc\FfxivHdrPreview.h" />
     <ClInclude Include="shaders\hdr\HdrCompatibility.hlsli" />
+    <ClInclude Include="shaders\hdr\SceneHdrTransfer.hlsli" />
     <ClInclude Include="shaders\ui_extract\UE_Common.h" />
     <ClInclude Include="shaders\ui_extract\UE_Dx12.h" />
     <ClInclude Include="inputs\FSR2_Dx11.h" />
@@ -919,6 +920,17 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="misc\FfxivPreviewDLSS.h" />
     <ClInclude Include="misc\FfxivPreviewNR.h" />
     <ClInclude Include="misc\FramePacingTrace.h" />
+    <ClInclude Include="dlssnr\RuntimeCatalog.h" />
+    <ClInclude Include="dlssnr\RuntimeSelection.h" />
+    <ClInclude Include="framegen\dlssg\PresetSelection.h" />
+    <ClInclude Include="misc\TemporalSampling.h" />
+    <ClInclude Include="misc\FfxivJitter.h" />
+    <ClInclude Include="misc\Dx11AutomaticMipBias.h" />
+    <ClInclude Include="misc\MipBiasPolicy.h" />
+    <ClInclude Include="misc\SamplerMipBias.h" />
+    <ClInclude Include="misc\NgxJitterBinding.h" />
+    <ClInclude Include="misc\NgxSynchronization.h" />
+    <ClInclude Include="misc\InteropAuxiliaryPresent.h" />
     <ClInclude Include="dlssnr\NrFocusPolicy.h" />
     <ClInclude Include="framegen\dlssg\DynamicMfgPolicy.h" />
     <ClInclude Include="misc\FfxivPreviewFGMap.h" />
@@ -929,6 +941,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="misc\FfxivPreviewNR.cpp" />
     <ClCompile Include="misc\FfxivPreviewFGMap.cpp" />
     <ClInclude Include="misc\FfxivPreviewCamera.h" />
+    <ClCompile Include="misc\FfxivJitter.cpp" />
     <ClCompile Include="misc\FfxivPreviewDLSS.cpp" />
   </ItemGroup>
   <ImportGroup Label="ExtensionTargets">

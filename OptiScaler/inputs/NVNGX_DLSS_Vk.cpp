@@ -132,6 +132,8 @@ static void UpdateInitPaths(NVSDK_NGX_FeatureCommonInfo* InFeatureInfo)
         if (nvngxDlssGPath.has_value())
             State::Instance().NVNGX_FeatureInfo_Paths.push_back(nvngxDlssGPath.value().parent_path().wstring());
 
+        if (auto nr=DlssNr::RuntimeSelection::Path())
+            State::Instance().NVNGX_FeatureInfo_Paths.insert(State::Instance().NVNGX_FeatureInfo_Paths.begin(),nr->parent_path().wstring());
         // Build pointer array
         paths = new const wchar_t*[State::Instance().NVNGX_FeatureInfo_Paths.size()];
         for (size_t i = 0; i < State::Instance().NVNGX_FeatureInfo_Paths.size(); ++i)

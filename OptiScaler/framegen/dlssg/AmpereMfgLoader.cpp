@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "AmpereMfgLoader.h"
+#include "PresetSelection.h"
 
 #include <Config.h>
 #include <State.h>
@@ -277,7 +278,9 @@ std::string GenerateIniContent(bool hasSm75Support, bool is3101Runtime, bool has
     std::string router = ResolveRouter(static_cast<uint32_t>(gpu.nvidiaArchInfo.architecture_id), gpu.name,
                                        configuredRouter, hasSm75Support);
     const int optimized = cfg->FGDLSSGAmpereMfgOptimized.value_or(1);
-    const std::string preset = cfg->FGDLSSGAmpereMfgPreset.value_or("Auto");
+    const int requestedPreset=DlssgPreset::Startup();
+    const std::string preset = requestedPreset>=1 && requestedPreset<=3
+        ? std::string(1,char('A'+requestedPreset-1)) : cfg->FGDLSSGAmpereMfgPreset.value_or("Auto");
     const std::string spoofArch = cfg->FGDLSSGAmpereMfgSpoofArchToGame.value_or("Auto");
     int logLevel = cfg->FGDLSSGAmpereMfgLogLevel.value_or(1);
     if (logLevel < 0 || logLevel > 3)

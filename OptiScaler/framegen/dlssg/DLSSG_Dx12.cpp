@@ -3,6 +3,7 @@
 #include <shaders/hdr/Hdr10.h>
 
 #include "DLSSG_Dx12.h"
+#include "PresetSelection.h"
 
 #include <hudfix/Hudfix_Dx12.h>
 #include <menu/menu_overlay_dx.h>
@@ -403,7 +404,8 @@ bool DLSSG_Dx12::Dispatch()
         const auto& recompositionConfig = Config::Instance()->FGDLSSGUIRecomposition;
         const auto external = ExternalHudless::Snapshot();
         const bool addonLoaded = GetModuleHandleW(L"OptiScalerHudless.addon64") != nullptr;
-        const bool recomposition = ExternalHudless::Active() &&
+        const int preset=DlssgPreset::Startup();
+        const bool recomposition = preset != 1 && preset != 3 && ExternalHudless::Active() &&
             !Config::Instance()->FGExternalUIFreeFrameGen.value_or_default() &&
             (recompositionConfig.has_value() ? recompositionConfig.value() : true);
 

@@ -1,4 +1,5 @@
 #include "pch.h"
+#include "RuntimeSelection.h"
 
 #include "DlssNrFeature_Vk.h"
 #include "DlssNrFeature_Dx12.h"
@@ -496,10 +497,7 @@ unsigned int GameCreateFlags(NVSDK_NGX_Parameter* params)
 
 std::optional<std::filesystem::path> FindSnippet()
 {
-    auto snippet = Util::FindFilePath(Util::DllPath().remove_filename(), "nvngx_dlssnr.dll");
-
-    if (!snippet.has_value())
-        snippet = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlssnr.dll");
+    auto snippet = RuntimeSelection::Path();
 
     return snippet;
 }
@@ -757,7 +755,7 @@ static void EvaluateAtSeamVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* par
 
         if (!snippet.has_value())
         {
-            Fail("nvngx_dlssnr.dll was not found beside OptiScaler or the game");
+            Fail("Selected NR runtime not found; check NR runtime selection and restart");
             return;
         }
 

@@ -77,7 +77,7 @@ int main()
             "  [PASS] Case 3: Optimized kernels 4-tier consistency levels (0, 1, 2, 3) and clamping verified\n");
     }
 
-    // Test 4: UI Recomposition Preset validation (Auto, A, B)
+    // Test 4: Preset validation (Auto, A, B, C)
     {
         std::string pAuto = FormatIniContent030(5, 1, "Auto");
         assert(pAuto.find("Preset=Auto\n") != std::string::npos);
@@ -97,7 +97,10 @@ int main()
         std::string pInvalid = FormatIniContent030(5, 1, "invalid");
         assert(pInvalid.find("Preset=Auto\n") != std::string::npos);
 
-        std::printf("  [PASS] Case 4: UI Recomposition Preset validation (Auto, A, B) verified\n");
+        assert(FormatIniContent030(5, 1, "C").find("Preset=C\n") != std::string::npos);
+        assert(FormatIniContent030(5, 1, "c").find("Preset=C\n") != std::string::npos);
+
+        std::printf("  [PASS] Case 4: Preset validation (Auto, A, B, C) verified\n");
     }
 
     // Test 5: ResolveMaxGeneratedFrames with variable runtime ceiling

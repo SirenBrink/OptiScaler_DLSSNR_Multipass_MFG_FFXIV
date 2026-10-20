@@ -19,11 +19,11 @@ def function(signature):
         end += 1
     return source[start:end]
 
-fields = re.findall(r'^\s*(CustomOptional<[^\n]+>\s+(?:FfxivHDR\w*|FfxivPreviewNRTrace|FfxivPreviewAA|FfxivPreviewDLSS|FfxivPreviewNR|FfxivPreviewNRReuse|FfxivPreviewFG|FfxivPreviewUpscale|FfxivPreviewGuideCapture|LowLatencyInput|LowLatencyOutput|VulkanUseCopyForInputs|VulkanUseCopyForOutput|AnisotropyModifyComp|AnisotropyModifyMinMax|DlssNrVitFirstPassOnly|DlssNrPauseOnFocusLoss)\s*\{[^\n]+?;)', header, re.M)
-assert len(fields) == 31
+fields = re.findall(r'^\s*(CustomOptional<[^\n]+>\s+(?:FfxivHDR\w*|FfxivPreviewNRTrace|FfxivPreviewAA|FfxivPreviewDLSS|FfxivPreviewNR|FfxivPreviewNRReuse|FfxivPreviewFG|FfxivPreviewUpscale|FfxivPreviewGuideCapture|LowLatencyInput|LowLatencyOutput|VulkanUseCopyForInputs|VulkanUseCopyForOutput|AnisotropyModifyComp|AnisotropyModifyMinMax|DlssNrVitFirstPassOnly|DlssNrPauseOnFocusLoss|DlssNrRuntime|FGDLSSGRenderPreset|FfxivAutomaticMipBias)\s*\{[^\n]+?;)', header, re.M)
+assert len(fields) == 34
 load_start = source.index('            if (auto v = readUInt("LowLatency", "Input")')
 load = source[load_start:source.index('            ForceHDR.set_from_config', load_start)]
-for field in ['AnisotropyModifyComp', 'AnisotropyModifyMinMax', 'DlssNrVitFirstPassOnly', 'DlssNrPauseOnFocusLoss']:
+for field in ['AnisotropyModifyComp', 'AnisotropyModifyMinMax', 'DlssNrVitFirstPassOnly', 'DlssNrPauseOnFocusLoss', 'DlssNrRuntime', 'FGDLSSGRenderPreset', 'FfxivAutomaticMipBias']:
     start = source.index(field + '.set_from_config')
     load += source[start:source.index(';', start) + 1] + '\n'
 
@@ -36,6 +36,10 @@ for key in ['ModifyComparison', 'ModifyMinMax']:
 for key in ['VitFirstPassOnly', 'PauseOnFocusLoss']:
     start = source.index('ini.SetValue("DlssNr", "' + key + '",')
     save += source[start:source.index(';', start) + 1] + '\n'
+
+for section,key in [('DlssNr','Runtime'),('DLSSG','RenderPreset'),('Mipmap','AutomaticFFXIV')]:
+    start = source.index('ini.SetValue("'+section+'", "'+key+'",')
+    save += source[start:source.index(';',start)+1]+'\n'
 
 tail_start = source.index('    auto pathWStr = absoluteFileName.wstring();', source.index('bool Config::SaveIni()'))
 save += source[tail_start:source.index('\n}', tail_start)]
@@ -73,6 +77,7 @@ int main(int argc,char**argv) {
  assert(argc==2);
  const std::filesystem::path path=argv[1];
  Config c; c.absoluteFileName=path;
+ c.DlssNrRuntime="NR.310.9.16.0";c.FGDLSSGRenderPreset=3;c.FfxivAutomaticMipBias=false;
  c.DlssNrVitFirstPassOnly=false;c.DlssNrPauseOnFocusLoss=true;
  c.FfxivPreviewDLSS=true;c.FfxivPreviewNR=true;c.FfxivPreviewNRReuse=true;c.FfxivPreviewFG=true;c.FfxivPreviewAA=true;c.FfxivPreviewUpscale=false;c.FfxivPreviewNRTrace=true;
  c.FfxivPreviewGuideCapture=true;
@@ -98,7 +103,7 @@ int main(int argc,char**argv) {
  assert(!twice.FfxivHDRReShadeHighlights.value_or_default());
  assert(twice.FfxivHDRScreenshotKey.value_or_default()==UnboundKey);
  loaded.absoluteFileName=path/"missing"/"OptiScaler.ini";assert(!loaded.Save());
- std::cout<<"PASS: 31 settings round-trip including preview controls; independent HDR resets persist; failed writes report failure\n";
+ std::cout<<"PASS: 34 settings round-trip including preview controls; independent HDR resets persist; failed writes report failure\n";
 }
 '''
 simpleini = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else repo / 'external/simpleini'

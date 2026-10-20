@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <dlssnr/RuntimeSelection.h>
 #include <misc/FramePacingTrace.h>
 #include <misc/FfxivPreviewNR.h>
 #include <dlssnr/NrFocusPolicy.h>
@@ -524,17 +525,9 @@ float WhitePointForMean(float meanLuma)
 
 std::filesystem::path g_dllDir;
 
-const char* SelectedModelFile()
-{
-    return "nvngx_dlssnr.dll";
-}
-
 std::optional<std::filesystem::path> FindSelectedModel()
 {
-    auto path = Util::FindFilePath(g_dllDir, SelectedModelFile());
-    if (!path.has_value())
-        path = Util::FindFilePath(Util::ExePath().remove_filename(), SelectedModelFile());
-    return path;
+    return DlssNr::RuntimeSelection::Path();
 }
 
 // Loads the forwarder that owns the calls into the snippet.
@@ -653,10 +646,7 @@ void ReportScalingRatios()
     if (g_nr.queryRatio == nullptr || g_nr.capabilityParams == nullptr)
         return;
 
-    auto snippet = Util::FindFilePath(g_dllDir, "nvngx_dlssnr.dll");
-
-    if (!snippet.has_value())
-        snippet = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlssnr.dll");
+    auto snippet = DlssNr::RuntimeSelection::Path();
 
     if (!snippet.has_value())
         return;
@@ -2056,7 +2046,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (!snippet.has_value())
         {
             g_nr.failed = true;
-            g_nr.reason = "nvngx_dlssnr.dll was not found beside OptiScaler or the game";
+            g_nr.reason = "Selected NR runtime not found; check NR runtime selection and restart";
             LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
             device->Release();
             return;
@@ -2199,8 +2189,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             if (!snippet.has_value())
             {
                 g_nr.passCreateFailed[pass] = true;
-                LOG_ERROR("DLSS-NR: pass {} feature not built because {} disappeared",
-                          pass + 1, SelectedModelFile());
+                LOG_ERROR("DLSS-NR: pass {} feature not built because the selected runtime is unavailable",
+                          pass + 1);
             }
             else
             {
@@ -3722,10 +3712,7 @@ void ProbeD3D11(void* d3d11Device)
         return;
     }
 
-    auto snippet = Util::FindFilePath(g_dllDir, "nvngx_dlssnr.dll");
-
-    if (!snippet.has_value())
-        snippet = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlssnr.dll");
+    auto snippet = DlssNr::RuntimeSelection::Path();
 
     if (!snippet.has_value())
         return;

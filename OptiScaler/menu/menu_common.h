@@ -87,6 +87,8 @@ class MenuCommon
 
     // mipmap calculations
     inline static bool _showMipmapCalcWindow = false;
+    inline static bool _mipCalculatedFixedPending = false;
+    inline static bool _mipBiasEditorLoaded = false;
     inline static bool _showHudlessWindow = false;
     inline static float _mipBias = 0.0f;
     inline static float _mipBiasCalculated = 0.0f;

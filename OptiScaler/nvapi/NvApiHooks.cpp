@@ -5,6 +5,7 @@
 
 #include "State.h"
 #include <Config.h>
+#include <framegen/dlssg/PresetSelection.h>
 
 #include <proxies/KernelBase_Proxy.h>
 
@@ -67,6 +68,17 @@ NvAPI_Status __stdcall NvApiHooks::hkNvAPI_DRS_GetSetting(NvDRSSessionHandle hSe
     auto result = o_NvAPI_DRS_GetSetting(hSession, hProfile, settingId, pSetting);
     if (pSetting && result == NVAPI_OK)
     {
+        const auto fgPreset=(settingId==NGX_DLSS_FG_OVERRIDE_ID || settingId==NGX_DLSS_FG_OVERRIDE_RENDER_PRESET_SELECTION_ID) ? DlssgPreset::Startup() : 0;
+        if (fgPreset>=1 && fgPreset<=3 && pSetting->settingType==NVDRS_DWORD_TYPE) {
+            if (settingId==NGX_DLSS_FG_OVERRIDE_ID)
+                pSetting->u32CurrentValue=NGX_DLSS_FG_OVERRIDE_ON;
+            else if (settingId==NGX_DLSS_FG_OVERRIDE_RENDER_PRESET_SELECTION_ID) {
+                pSetting->u32CurrentValue=static_cast<NvU32>(fgPreset);
+                DlssgPreset::querySeen.store(true,std::memory_order_relaxed);
+                static std::atomic<bool> reported{false};
+                if (!reported.exchange(true)) LOG_INFO("DLSS-G preset override query: {} (runtime/driver support required)", DlssgPreset::Name(fgPreset));
+            }
+        }
         constexpr NvU32 streamlineOverrideId = 0x10E41E06;
         if (settingId == streamlineOverrideId && State::Instance().gameName == "KCD2" &&
             State::Instance().activeFgOutput == FGOutput::DLSSG && !State::Instance().externalFrameGeneration)

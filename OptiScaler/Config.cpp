@@ -278,6 +278,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGDLSSGFramerateTargetDMFG.set_from_config(readFloat("DLSSG", "FramerateTargetDMFG"));
             FGDLSSGOverrideForceDMFG.set_from_config(readBool("DLSSG", "OverrideForceDMFG"));
             FGDLSSGForceDMFG.set_from_config(readBool("DLSSG", "ForceDMFG"));
+            FGDLSSGRenderPreset.set_from_config(readInt("DLSSG", "RenderPreset"));
+            if (FGDLSSGRenderPreset.value_or_default() < 0 || FGDLSSGRenderPreset.value_or_default() > 3)
+                FGDLSSGRenderPreset.reset();
             FGDLSSGUIRecomposition.set_from_config(readBool("DLSSG", "UIRecomposition"));
         }
 
@@ -353,6 +356,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DLSSEnabled.set_from_config(readBool("DLSS", "Enabled"));
 
             // --- DLSS 5 Neural Rendering (OptiScaler/dlssnr) ---
+            DlssNrRuntime.set_from_config(readString("DlssNr", "Runtime"));
             DlssNrEnabled.set_from_config(readBool("DlssNr", "Enabled"));
             DlssNrPauseOnFocusLoss.set_from_config(readBool("DlssNr", "PauseOnFocusLoss"));
             DlssNrRunBeforeSr.set_from_config(readBool("DlssNr", "RunBeforeSR"));
@@ -772,6 +776,7 @@ bool Config::Reload(std::filesystem::path iniPath)
 
         // Mipmap
         {
+            FfxivAutomaticMipBias.set_from_config(readBool("Mipmap", "AutomaticFFXIV"));
             if (auto setting = readFloat("Mipmap", "MipmapBiasOverride");
                 setting.has_value() && setting.value() <= 15.0 && setting.value() >= -15.0)
                 MipmapBiasOverride.set_from_config(setting);
@@ -1235,6 +1240,7 @@ bool Config::SaveIni()
         ini.SetValue("DLSSG", "OverrideForceDMFG",
                      GetBoolValue(Instance()->FGDLSSGOverrideForceDMFG.value_for_config()).c_str());
         ini.SetValue("DLSSG", "ForceDMFG", GetBoolValue(Instance()->FGDLSSGForceDMFG.value_for_config()).c_str());
+        ini.SetValue("DLSSG", "RenderPreset", GetIntValue(Instance()->FGDLSSGRenderPreset.value_for_config()).c_str());
         ini.SetValue("DLSSG", "UIRecomposition",
                      GetBoolValue(Instance()->FGDLSSGUIRecomposition.value_for_config()).c_str());
     }
@@ -1363,6 +1369,7 @@ bool Config::SaveIni()
         ini.SetValue("DLSS", "Enabled", GetBoolValue(Instance()->DLSSEnabled.value_for_config()).c_str());
 
     // --- DLSS 5 Neural Rendering (OptiScaler/dlssnr) ---
+    ini.SetValue("DlssNr", "Runtime", Instance()->DlssNrRuntime.value_for_config().value_or("").c_str());
     ini.SetValue("DlssNr", "Enabled", GetBoolValue(Instance()->DlssNrEnabled.value_for_config()).c_str());
     ini.SetValue("DlssNr", "RunBeforeSR",
                  GetBoolValue(Instance()->DlssNrRunBeforeSr.value_for_config()).c_str());
@@ -1731,6 +1738,8 @@ bool Config::SaveIni()
 
     // Mipmap
     {
+        ini.SetValue("Mipmap", "AutomaticFFXIV",
+                     GetBoolValue(Instance()->FfxivAutomaticMipBias.value_for_config()).c_str());
         ini.SetValue("Mipmap", "MipmapBiasOverride",
                      GetFloatValue(Instance()->MipmapBiasOverride.value_for_config()).c_str());
         ini.SetValue("Mipmap", "MipmapBiasOverrideAll",
