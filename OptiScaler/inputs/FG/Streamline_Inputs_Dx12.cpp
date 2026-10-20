@@ -8,6 +8,25 @@ void Sl_Inputs_Dx12::CheckForFrame(IFGFeature_Dx12* fg, uint32_t frameId)
 {
     std::scoped_lock lock(_frameBoundaryMutex);
 
+    // A new presentation epoch must also release the input boundary latch.
+    // Ignore ordinary queued/out-of-order tags and zero-as-unknown IDs; require
+    // the completed presentation counter to have restarted as well.
+    const bool restarted = _isFrameFinished && _lastPresentFrameId < _currentFrameId &&
+        _currentFrameId - _lastPresentFrameId > BUFFER_COUNT &&
+        (frameId == 0 || (frameId >= _lastPresentFrameId && frameId < _currentFrameId));
+    if (restarted)
+    {
+        _isFrameFinished = false;
+        _currentFrameId = frameId != 0 ? frameId : _lastPresentFrameId + 1;
+        fg->SetFrameCount(_currentFrameId - 1);
+        fg->StartNewFrame();
+        _currentIndex = fg->GetIndex();
+        for (auto& id : _frameIdIndex) id = UINT32_MAX;
+        _frameIdIndex[_currentIndex] = _currentFrameId;
+        LOG_INFO("Streamline FG input frame IDs restarted at {}", _currentFrameId);
+        return;
+    }
+
     if (_isFrameFinished && _lastPresentFrameId == _currentFrameId && frameId == 0 && frameId != _currentFrameId)
     {
         LOG_DEBUG("1> CheckForFrame: frameId={}, currentFrameId={}, lastPresentFrameId={}, isFrameFinished={}", frameId,

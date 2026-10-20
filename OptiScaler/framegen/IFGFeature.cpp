@@ -182,18 +182,20 @@ bool IFGFeature::IsInfiniteDepth() { return _constants.flags[FG_Flags::InfiniteD
 
 void IFGFeature::SetFrameCount(UINT64 frameId)
 {
-    // Only change frame count, if it's lower than current one
-    // Or higher than allowed frame ahead
-    // if (frameId < _frameCount || (frameId - _frameCount) >
-    // Config::Instance()->FGAllowedFrameAhead.value_or_default())
-    //{
-    //    LOG_DEBUG("Old: {}, New: {}", _frameCount, frameId);
-    //    _frameCount = frameId;
-    //}
-    // else if (frameId != _frameCount)
-    //{
-    //    LOG_TRACE("Prevented setting frame count! Old: {}, New: {}", _frameCount, frameId);
-    //}
+    if (frameId < _frameCount && _frameCount - frameId > BUFFER_COUNT)
+    {
+        // Input frame IDs can restart after loading, feature recreation or a
+        // 32-bit wrap. Small backward steps are normal for queued inputs and
+        // SL1's pre-increment convention. Carry only the remaining warm-up, not the old epoch's
+        // absolute target; otherwise FG stays paused until the old ID returns.
+        const auto remaining = IsPaused() ? _targetFrame - _frameCount : 0;
+        _targetFrame = remaining ? frameId + std::min(remaining, ~UINT64(0) - frameId) : 0;
+        _lastDispatchedFrame = 0;
+        _lastFGFrame = 0;
+        _resourceFrame.clear();
+        for (auto& ready : _resourceReady) ready.clear();
+        LOG_INFO("{} input frame IDs restarted: {} -> {}, remaining warm-up {}", Name(), _frameCount, frameId, remaining);
+    }
 
     _frameCount = frameId;
 }

@@ -361,10 +361,15 @@ void IFGFeature_Dx12::NewFrame()
 {
     if (_waitingNewFrameData)
     {
-        LOG_DEBUG("Re-activating FG");
-        UpdateTarget();
-        Activate();
+        // Consume the pending recovery even when disabled. It must not turn
+        // FG back on behind the user's checkbox or during shutdown.
         _waitingNewFrameData = false;
+        if (Config::Instance()->FGEnabled.value_or_default() && !State::Instance().isShuttingDown)
+        {
+            LOG_DEBUG("Re-activating FG");
+            UpdateTarget();
+            Activate();
+        }
     }
 
     auto fIndex = GetIndex();

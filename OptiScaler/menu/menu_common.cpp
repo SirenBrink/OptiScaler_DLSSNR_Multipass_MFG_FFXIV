@@ -4185,7 +4185,9 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
         if (!correctMVs || state.realExclusiveFullscreen)
         {
-            config->FGEnabled.reset();
+            // Rendering a warning must not erase the saved enable request.
+            // Activation checks still reject unsupported inputs; they can
+            // recover automatically when valid input/display state arrives.
             config->FGXeFGDebugView.reset();
         }
 

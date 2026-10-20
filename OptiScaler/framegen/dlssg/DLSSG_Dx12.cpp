@@ -282,6 +282,10 @@ void DLSSG_Dx12::CreateContext(ID3D12Device* device, FG_Constants& fgConstants)
 
 void DLSSG_Dx12::Activate()
 {
+    if (!Config::Instance()->FGEnabled.value_or_default() || State::Instance().isShuttingDown ||
+        _device == nullptr || _gameCommandQueue == nullptr || _swapChain == nullptr)
+        return;
+
     LOG_DEBUG("");
 
     if (!_isActive)
@@ -294,6 +298,7 @@ void DLSSG_Dx12::Activate()
 
 void DLSSG_Dx12::Deactivate()
 {
+    _waitingNewFrameData = false;
     _ownsFramePacing.store(false, std::memory_order_release);
     _historyFrames.Invalidate();
     _sceneHistory.Invalidate();
@@ -353,7 +358,7 @@ bool DLSSG_Dx12::Dispatch()
     if (fIndex < 0)
         return false;
 
-    if (!IsActive() || IsPaused())
+    if (!_isActive || IsPaused())
         return false;
 
     LOG_DEBUG("_frameCount: {}, willDispatchFrame: {}, fIndex: {}", _frameCount, willDispatchFrame, fIndex);
@@ -726,6 +731,10 @@ void DLSSG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
     }
 
     _constants = fgConstants;
+
+    // A missing device is transient during startup/provider handoff. Keep the
+    // enable request; the next input with a device retries initialization.
+    if (device == nullptr && Config::Instance()->FGEnabled.value_or_default()) return;
 
     // If FG Enabled from menu
     if (Config::Instance()->FGEnabled.value_or_default())
