@@ -1,4 +1,5 @@
 Texture2D<float4> Native : register(t0);
+#include "SceneHdrTransfer.hlsli"
 Texture2D<float4> Scene : register(t1);
 Texture2D<float4> Reference : register(t2);
 Texture2D<float4> Edited : register(t3);
@@ -17,7 +18,7 @@ float3 Guide(Texture2D<float4> tex,float2 uv) {
  float3 ref=Guide(Reference,uv),hdr=pow(max(Guide(Scene,uv),0),2.2);
  float3 nativeLinear=Linear(saturate(s.rgb));float3 delta=abs(s.rgb-saturate(ref));
  float coverage=1-smoothstep(.08,.25,max(delta.r,max(delta.g,delta.b)));
- float3 base=nativeLinear*lerp(1,max(hdr/max(pow(saturate(ref),2.2),1e-4),1),coverage);
+ float3 base=TransferSceneHdr(nativeLinear,Linear(saturate(ref)),hdr,coverage);
  if(Mode==0){Target[id.xy]=float4(min(base,60000),s.a);return;}
  float3 edited=Edited.Load(int3(id.xy,0)).rgb;
  // Restore only NR's edit to the SDR scene; never feed extended light into SDR DLSS/ReShade.

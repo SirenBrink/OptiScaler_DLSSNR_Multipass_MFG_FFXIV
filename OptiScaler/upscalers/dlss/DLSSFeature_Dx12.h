@@ -3,6 +3,8 @@
 #include <upscalers/IFeature_Dx12.h>
 #include <shaders/rcas/RCAS_Dx12.h>
 #include <string>
+#include <memory>
+namespace DlssSceneInput { struct Packet; }
 
 class DLSSFeatureDx12 : public DLSSFeature, public IFeature_Dx12
 {
@@ -10,6 +12,9 @@ class DLSSFeatureDx12 : public DLSSFeature, public IFeature_Dx12
   protected:
     bool _sceneHdrInput=false;
     int _sceneHdrAvailable=-1;
+    int _hdrStabilityState=-1;
+    int _hdrNrMode=-1;
+    std::weak_ptr<DlssSceneInput::Packet> _hdrHistory;
     bool InitDLSS(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters);
 
   public:

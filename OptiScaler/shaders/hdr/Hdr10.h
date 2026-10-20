@@ -18,4 +18,5 @@ DlssNr::GpuSubmission BeginSubmission(UINT,ID3D12CommandList*const*);
 void Submitted(ID3D12CommandQueue*,UINT,ID3D12CommandList*const*);
 void Reset(ID3D12CommandList*);
 std::function<bool()> TrackCommands(ID3D12GraphicsCommandList*);
+std::function<bool()> HistorySubmission(ID3D12GraphicsCommandList*,ID3D12CommandQueue*);
 }

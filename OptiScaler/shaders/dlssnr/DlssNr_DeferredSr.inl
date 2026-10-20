@@ -521,6 +521,13 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
          NVSDK_NGX_DLSS_Feature_Flags_MVJittered);
     if (sampleAndHold)
         flags = (flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
+    // DLSS 310.9.16.0 L/M share reconstruction colour-domain state between
+    // features: creating an SDR residual feature clamps an existing HDR main
+    // feature to 1.0 until it is recreated. Matched HDR creation prevents that
+    // cross-feature switch, including when the residual feature is later idle.
+    // The bounded residual carrier still uses constant unit exposure.
+    if (cfg.FfxivHDRDLSSSceneInput.value_or_default() && FfxivSceneHdr::Requested())
+        flags |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
     const bool splitWork = wantsHalf && !sampleAndHold && State::Instance().gameExe == "ffxiv_dx11.exe" &&
         cfg.DlssNrSplitFrameWork.value_or_default();
     static constexpr std::array<const char*,6> presetKeys {
@@ -626,9 +633,10 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
         LOG_INFO("PreSR private DLSS hints: quality={}, DLAA={}, UltraQuality={}, Quality={}, Balanced={}, Performance={}, UltraPerformance={}",
             g.modelHints.quality,g.modelHints.presets[0],g.modelHints.presets[1],g.modelHints.presets[2],
             g.modelHints.presets[3],g.modelHints.presets[4],g.modelHints.presets[5]);
-        // LDR biased carrier, constant unit exposure, no auto-exposure/sharpening. No main-game presets
+        // Bounded biased carrier, constant unit exposure, no requested auto-exposure/sharpening. No main-game presets
         // or feature handle are overwritten. NGX is called directly, bypassing OptiScaler's NR hooks.
         p->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, g.flags);
+        LOG_INFO("PreSR private DLSS colour domain: {} (flags {}); main HDR mode preserved",(g.flags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR)?"HDR":"SDR",g.flags);
         const auto result = NVNGXProxy::D3D12_CreateFeature()(cmd, NVSDK_NGX_Feature_SuperSampling, p, &g.feature);
         if (result != NVSDK_NGX_Result_Success || !g.feature)
         { g.failed = true; Say("private DLSS creation failed: " + std::to_string((unsigned)result)); return; }
@@ -1045,8 +1053,12 @@ void After(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, unsigned
         cmd->CopyResource(pair.output, g.composed);
         Barrier(cmd, pair.output, D3D12_RESOURCE_STATE_COPY_DEST, arrival);
         Barrier(cmd, g.composed, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        if (DlssSceneInput::Reconcile(displayHdr, cmd, pair.output, arrival))
+        // g.composed is no longer read after the copy to pair.output. Keep a
+        // clean HDR history here before reconciliation applies the NR edit.
+        if (DlssSceneInput::PreserveHistory(displayHdr, cmd, g.composed, D3D12_RESOURCE_STATE_UNORDERED_ACCESS) &&
+            DlssSceneInput::Reconcile(displayHdr, cmd, pair.output, arrival)){
             FfxivSceneHdr::PublishReconstructed(std::move(displayHdr));
+        }
         presentationGuideDelay = half ? (split ? int(g.half->split.schedule.captured) : (g.half->havePrevious ? 1 : 0)) : -1;
         Say(g.sampleAndHold ? "running: sample-and-hold (motion unavailable); each NR residual applied to 2 current frames; no residual FG or SR delay" :
             half ? (split ? "running: SPLIT work; NR on A, private SR/FG on B; scene delayed 2 frames; APPROXIMATE camera guides" :

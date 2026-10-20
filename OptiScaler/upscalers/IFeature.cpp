@@ -12,6 +12,7 @@ void IFeature::SetHandle(unsigned int InHandleId)
 #include <detours/detours.h>
 #include <atomic>
 #include <misc/FfxivNativeQuality.h>
+#include <misc/NgxSynchronization.h>
 #include <TlHelp32.h>
 namespace
 {
@@ -62,6 +63,7 @@ void ProcessFfxivQualityRequest(uintptr_t renderer)
     static unsigned int handled = 0;
     const auto sequence = nativeRequestSequence.load();
     if (sequence == handled) return;
+    const NgxSynchronization::FeatureGuard featureGuard(NgxSynchronization::dx11Features);
     const auto base = (uintptr_t) GetModuleHandleW(nullptr);
     uintptr_t settings = 0, manager = 0, context = 0, device = 0, callbacks = 0;
     unsigned char type = 0, flags = 0;
@@ -122,8 +124,15 @@ uintptr_t ObserveFfxivQuery(const unsigned int* display, unsigned int* optimal,
 
 void InstallFfxivNativeQuality(uintptr_t base)
 {
-    static std::once_flag once;
-    std::call_once(once, [base]() {
+    // A transient Detours/thread-enlistment failure must not permanently disable
+    // quality selection. Try early at device creation, then at most twice more
+    // when NGX initializes; never retry from a per-frame rendering path.
+    static std::mutex installMutex;
+    const std::lock_guard<std::mutex> installLock(installMutex);
+    static unsigned attempts = 0;
+    if (nativeQualityAvailable.load() || attempts >= 3) return;
+    ++attempts;
+    [&]() {
         constexpr unsigned char queryBytes[] = {0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,
             0x48,0x89,0x7c,0x24,0x18,0x41,0x56,0x48,0x83,0xec,0x20,0x48,0x8b,0x05,0xbc,0x73,0x5a,0x02};
         unsigned char actualQuery[sizeof(queryBytes)] {};
@@ -159,8 +168,12 @@ void InstallFfxivNativeQuality(uintptr_t base)
         {
             if (entry.th32OwnerProcessID == GetCurrentProcessId() && entry.th32ThreadID != GetCurrentThreadId())
             {
-                HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, entry.th32ThreadID);
-                if (thread != nullptr) threads.push_back(thread);
+                HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT |
+                                           THREAD_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ThreadID);
+                DWORD exitCode = 0;
+                if (thread != nullptr && GetExitCodeThread(thread, &exitCode) && exitCode != STILL_ACTIVE)
+                    CloseHandle(thread);
+                else if (thread != nullptr) threads.push_back(thread);
                 else if (GetLastError() != ERROR_INVALID_PARAMETER) threadsReady = false;
             }
             readable = Thread32Next(snapshot, &entry) != FALSE;
@@ -172,21 +185,35 @@ void InstallFfxivNativeQuality(uintptr_t base)
             LOG_WARN("FFXIV native quality: unable to enlist game threads; hooks disabled");
             return;
         }
+        const char* stage = "begin transaction";
+        DWORD failedThread = 0;
         LONG result = DetourTransactionBegin();
         if (result == NO_ERROR)
         {
+            stage = "enlist current thread";
             result = DetourUpdateThread(GetCurrentThread());
             for (auto thread : threads)
             {
                 if (result != NO_ERROR) break;
+                stage = "enlist game thread";
+                failedThread = GetThreadId(thread);
                 result = DetourUpdateThread(thread);
             }
             if (result == NO_ERROR)
+            {
+                stage = "attach size query";
                 result = DetourAttach(&(PVOID&) originalQuerySize, ObserveFfxivQuery);
+            }
             if (result == NO_ERROR)
+            {
+                stage = "attach renderer update";
                 result = DetourAttach(&(PVOID&) originalRendererUpdate, ObserveFfxivRendererUpdate);
+            }
             if (result == NO_ERROR)
+            {
+                stage = "commit transaction";
                 result = DetourTransactionCommit();
+            }
             else
                 DetourTransactionAbort();
         }
@@ -197,8 +224,12 @@ void InstallFfxivNativeQuality(uintptr_t base)
             const int forced = Config::Instance()->ForcePerfQuality.value_or_default();
             if (forced >= 0 && forced <= 5) FfxivNativeQuality::Request(forced);
         }
-        LOG_INFO("FFXIV native quality v2: hook transaction result={} (0=installed); native scene updates enabled", result);
-    });
+        if (result == NO_ERROR)
+            LOG_INFO("FFXIV native quality v2: native scene updates enabled (attempt {})", attempts);
+        else
+            LOG_WARN("FFXIV native quality v2: unavailable; attempt {} failed at {}, error {}, thread {}",
+                     attempts, stage, result, failedThread);
+    }();
 }
 
 void EnsureFfxivNativeQuality()
@@ -228,6 +259,7 @@ void EnsureFfxivNativeQuality()
 } // namespace
 
 bool FfxivNativeQuality::Available() { return nativeQualityAvailable.load(); }
+void FfxivNativeQuality::Install() { EnsureFfxivNativeQuality(); }
 bool FfxivNativeQuality::NativeDlaaRequired()
 {
     if (State::Instance().gameExe != "ffxiv_dx11.exe") return false;

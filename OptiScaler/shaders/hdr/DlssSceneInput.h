@@ -10,12 +10,19 @@ inline thread_local bool bridgeInitialising=false;
 struct BridgeInitScope { bool previous=bridgeInitialising;BridgeInitScope(){bridgeInitialising=true;}~BridgeInitScope(){bridgeInitialising=previous;} };
 inline thread_local ID3D12Resource* bridgeColour=nullptr;
 inline thread_local ID3D12Resource* bridgeOutput=nullptr;
+inline thread_local ID3D12CommandQueue* bridgeQueue=nullptr;
 inline thread_local D3D12_RESOURCE_STATES bridgeColourState=D3D12_RESOURCE_STATE_COMMON;
 struct Packet {
  ComPtr<ID3D12Device> device;ComPtr<ID3D12Resource> input,output,reference,encoded,nativeColour,nativeOutput;
  ComPtr<ID3D12DescriptorHeap> heap;ComPtr<ID3D12RootSignature> root;ComPtr<ID3D12PipelineState> pso;
  Hdr10::SceneInput scene;std::function<bool()> done;UINT w=0,h=0,ow=0,oh=0;DXGI_FORMAT referenceFormat=DXGI_FORMAT_UNKNOWN;bool recorded=false;
  ULONGLONG lastUse=0;bool reconciled=false;
+ ComPtr<ID3D12Resource> depth,motion,cleanHistory;
+ D3D12_RESOURCE_STATES cleanHistoryState=D3D12_RESOURCE_STATE_COMMON;
+ ComPtr<ID3D12CommandQueue> historyQueue;
+ std::function<bool()> historySubmitted;
+ std::shared_ptr<Packet> previous;
+ float motionScale[2]{},rasterJitter[2]{};bool hasDepth=false;
 };
 inline std::mutex& Mutex(){static auto* m=new std::mutex;return *m;}
 inline auto& Pool(){static auto* p=new std::vector<std::shared_ptr<Packet>>;return *p;}
@@ -23,11 +30,11 @@ inline void Barrier(ID3D12GraphicsCommandList*c,ID3D12Resource*r,D3D12_RESOURCE_
 inline DXGI_FORMAT Typed(DXGI_FORMAT f){switch(f){case DXGI_FORMAT_R16G16B16A16_TYPELESS:return DXGI_FORMAT_R16G16B16A16_FLOAT;case DXGI_FORMAT_R8G8B8A8_TYPELESS:return DXGI_FORMAT_R8G8B8A8_UNORM;case DXGI_FORMAT_R10G10B10A2_TYPELESS:return DXGI_FORMAT_R10G10B10A2_UNORM;default:return f;}}
 inline bool Init(Packet& p,ID3D12Device*d,UINT w,UINT h,UINT ow,UINT oh,DXGI_FORMAT referenceFormat){
  p.device=d;p.w=w;p.h=h;p.ow=ow;p.oh=oh;p.referenceFormat=referenceFormat;
- D3D12_DESCRIPTOR_HEAP_DESC hd{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,20,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,0};
+ D3D12_DESCRIPTOR_HEAP_DESC hd{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,25,D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,0};
  if(FAILED(d->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&p.heap))))return false;
  D3D12_DESCRIPTOR_RANGE ranges[2]={{D3D12_DESCRIPTOR_RANGE_TYPE_SRV,4,0,0,0},{D3D12_DESCRIPTOR_RANGE_TYPE_UAV,1,0,0,4}};
  D3D12_ROOT_PARAMETER params[2]{};params[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[0].DescriptorTable={2,ranges};
- params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[1].Constants={0,0,8};
+ params[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[1].Constants={0,0,16};
  D3D12_ROOT_SIGNATURE_DESC rd{2,params,0,nullptr,D3D12_ROOT_SIGNATURE_FLAG_NONE};ComPtr<ID3DBlob> blob,error;
  if(FAILED(D3D12SerializeRootSignature(&rd,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&error)))return false;
  if(FAILED(d->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&p.root))))return false;
@@ -39,11 +46,12 @@ inline bool Init(Packet& p,ID3D12Device*d,UINT w,UINT h,UINT ow,UINT oh,DXGI_FOR
  p.encoded=p.output;return true;
 }
 inline void Bind(Packet& p,ID3D12GraphicsCommandList*c,UINT mode){
- struct Constants{UINT w,h,mode,scene;float rect[4];} k{mode?p.ow:p.w,mode?p.oh:p.h,mode,UINT(p.scene.hdr&&p.scene.reference)};
+ struct Constants{UINT w,h,mode,scene;float rect[4];UINT render[2];float motion[2],jitter[2];UINT depth,reserved;} k{mode?p.ow:p.w,mode?p.oh:p.h,mode,UINT(p.scene.hdr&&p.scene.reference)};
  std::copy(p.scene.rect.begin(),p.scene.rect.end(),k.rect);
+ k.render[0]=p.w;k.render[1]=p.h;std::copy(p.motionScale,p.motionScale+2,k.motion);std::copy(p.rasterJitter,p.rasterJitter+2,k.jitter);k.depth=p.hasDepth;
  ID3D12DescriptorHeap* heaps[]={p.heap.Get()};c->SetDescriptorHeaps(1,heaps);c->SetComputeRootSignature(p.root.Get());c->SetPipelineState(p.pso.Get());
  auto gpu=p.heap->GetGPUDescriptorHandleForHeapStart();gpu.ptr+=mode*5*p.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
- c->SetComputeRootDescriptorTable(0,gpu);c->SetComputeRoot32BitConstants(1,8,&k,0);c->Dispatch((k.w+7)/8,(k.h+7)/8,1);
+ c->SetComputeRootDescriptorTable(0,gpu);c->SetComputeRoot32BitConstants(1,16,&k,0);c->Dispatch((k.w+7)/8,(k.h+7)/8,1);
 }
 inline std::shared_ptr<Packet> Prepare(ID3D12Device*d,ID3D12GraphicsCommandList*c,ID3D12Resource*colour,ID3D12Resource*output,UINT w,UINT h,Hdr10::SceneInput scene,const char** failure=nullptr){
  auto fail=[&](const char* reason)->std::shared_ptr<Packet>{if(failure)*failure=reason;return {};};
@@ -56,16 +64,22 @@ inline std::shared_ptr<Packet> Prepare(ID3D12Device*d,ID3D12GraphicsCommandList*
  if(outputFormat!=DXGI_FORMAT_R16G16B16A16_FLOAT&&outputFormat!=DXGI_FORMAT_R8G8B8A8_UNORM&&outputFormat!=DXGI_FORMAT_R10G10B10A2_UNORM&&outputFormat!=DXGI_FORMAT_R11G11B10_FLOAT)return fail("unsupported SDR output format");
  if(w>a.Width||h>a.Height)return fail("render extent exceeds colour allocation");
  std::lock_guard lock(Mutex());auto& pool=Pool();const auto now=GetTickCount64();
- for(auto& p:pool)if(p.use_count()==1&&Hdr10::ReusableRecordedWork(p->recorded,p->done)){p->scene={};p->nativeColour.Reset();p->nativeOutput.Reset();}
+ for(auto& p:pool)if(Hdr10::ReusableRecordedWork(p->recorded,p->done)){
+  // A newer packet may retain this image as history. Its older history is no
+  // longer used once its own recording retires; do not build a retained chain.
+  p->previous.reset();
+  if(p.use_count()==1){p->scene={};p->nativeColour.Reset();p->nativeOutput.Reset();p->depth.Reset();p->motion.Reset();p->cleanHistory.Reset();}
+ }
  std::erase_if(pool,[&](auto& p){return p.use_count()==1&&Hdr10::ReusableRecordedWork(p->recorded,p->done)&&now-p->lastUse>2000;});
  std::shared_ptr<Packet> chosen;
  for(auto& p:pool)if(p.use_count()==1&&Hdr10::ReusableRecordedWork(p->recorded,p->done)){chosen=p;break;}
  if(!chosen){if(pool.size()>=6)return fail("HDR work buffers still in flight");chosen=std::make_shared<Packet>();pool.push_back(chosen);}
  auto& p=*chosen;if(p.device.Get()!=d||p.w!=w||p.h!=h||p.ow!=b.Width||p.oh!=b.Height||p.referenceFormat!=outputFormat||!p.encoded){p=Packet{};if(!Init(p,d,w,h,UINT(b.Width),b.Height,outputFormat))return fail("HDR buffer or pipeline allocation failed");}
- p.lastUse=now;p.reconciled=false;p.nativeColour=colour;p.nativeOutput=output;p.scene=std::move(scene);
+ p.cleanHistory.Reset();p.cleanHistoryState=D3D12_RESOURCE_STATE_COMMON;
+ p.lastUse=now;p.reconciled=false;p.hasDepth=false;p.depth.Reset();p.motion.Reset();p.previous.reset();p.nativeColour=colour;p.nativeOutput=output;p.scene=std::move(scene);
  auto cpu=p.heap->GetCPUDescriptorHandleForHeapStart();auto stride=d->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
  for(UINT mode=0;mode<3;++mode){for(auto* res:{mode==2?(ID3D12Resource*)nullptr:mode?p.output.Get():colour,p.scene.hdr.Get(),p.scene.reference.Get(),(ID3D12Resource*)nullptr}){D3D12_SHADER_RESOURCE_VIEW_DESC s{};s.Format=res?Typed(res->GetDesc().Format):DXGI_FORMAT_R16G16B16A16_FLOAT;s.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;s.Texture2D.MipLevels=1;s.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;d->CreateShaderResourceView(res,&s,cpu);cpu.ptr+=stride;}D3D12_UNORDERED_ACCESS_VIEW_DESC u{};u.Format=mode==1?p.referenceFormat:DXGI_FORMAT_R16G16B16A16_FLOAT;u.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;d->CreateUnorderedAccessView(mode==0?p.input.Get():mode==1?p.reference.Get():p.encoded.Get(),nullptr,&u,cpu);cpu.ptr+=stride;}
- p.done=Hdr10::TrackCommands(c);p.recorded=true;if(p.scene.retire)p.scene.retire(p.done);
+ p.done=Hdr10::TrackCommands(c);p.historyQueue=bridgeQueue;p.historySubmitted=Hdr10::HistorySubmission(c,p.historyQueue.Get());p.recorded=true;if(p.scene.retire)p.scene.retire(p.done);
  auto arrival=colour==bridgeColour?bridgeColourState:D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
  Barrier(c,colour,arrival,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
  if(p.scene.hdr){Barrier(c,p.scene.hdr.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);Barrier(c,p.scene.reference.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);}
@@ -74,6 +88,54 @@ inline std::shared_ptr<Packet> Prepare(ID3D12Device*d,ID3D12GraphicsCommandList*
  if(p.scene.hdr){Barrier(c,p.scene.hdr.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);Barrier(c,p.scene.reference.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);}
  Barrier(c,p.output.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
  return chosen;
+}
+// Resolve only the low-motion temporal noise identified in HDR SR replay. The
+// existing FP16 compatibility image is scratch until Finish constructs SDR;
+// no additional colour/history texture or neural evaluation is allocated.
+inline bool Stabilize(const std::shared_ptr<Packet>& packet,ID3D12GraphicsCommandList*c,
+                      std::shared_ptr<Packet> previous,ID3D12Resource*depth,ID3D12Resource*motion,
+                      float scaleX,float scaleY,float jitterX,float jitterY,bool compatibleMotion=true){
+ auto& p=*packet;
+ if(!compatibleMotion||p.referenceFormat!=DXGI_FORMAT_R16G16B16A16_FLOAT||!depth||!motion||!scaleX||!scaleY||!std::isfinite(scaleX)||!std::isfinite(scaleY)||!std::isfinite(jitterX)||!std::isfinite(jitterY))return false;
+ auto d=depth->GetDesc(),m=motion->GetDesc();
+ if(d.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D||m.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D||d.SampleDesc.Count!=1||m.SampleDesc.Count!=1||d.DepthOrArraySize!=1||m.DepthOrArraySize!=1||d.Width<p.w||d.Height<p.h||m.Width<p.w||m.Height<p.h||(d.Flags&D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)||(m.Flags&D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE))return false;
+ DXGI_FORMAT df=d.Format;
+ switch(df){case DXGI_FORMAT_R32_TYPELESS:case DXGI_FORMAT_D32_FLOAT:df=DXGI_FORMAT_R32_FLOAT;break;
+ case DXGI_FORMAT_R24G8_TYPELESS:case DXGI_FORMAT_D24_UNORM_S8_UINT:df=DXGI_FORMAT_R24_UNORM_X8_TYPELESS;break;
+ case DXGI_FORMAT_R16_TYPELESS:case DXGI_FORMAT_D16_UNORM:df=DXGI_FORMAT_R16_UNORM;break;
+ case DXGI_FORMAT_R32_FLOAT:case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:case DXGI_FORMAT_R16_UNORM:break;default:return false;}
+ if(m.Format!=DXGI_FORMAT_R16G16_FLOAT&&m.Format!=DXGI_FORMAT_R32G32_FLOAT&&m.Format!=DXGI_FORMAT_R16G16B16A16_FLOAT&&m.Format!=DXGI_FORMAT_R32G32B32A32_FLOAT)return false;
+ // NGX low-resolution vectors are in render pixels after MV.Scale. History
+ // is at output resolution, including output scaling / supersampling.
+ p.depth=depth;p.motion=motion;p.motionScale[0]=scaleX*float(p.ow)/p.w;p.motionScale[1]=scaleY*float(p.oh)/p.h;p.rasterJitter[0]=jitterX;p.rasterJitter[1]=jitterY;p.hasDepth=true;
+ auto stride=p.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+ auto srv=[&](UINT index,ID3D12Resource*r,DXGI_FORMAT format){auto cpu=p.heap->GetCPUDescriptorHandleForHeapStart();cpu.ptr+=index*stride;D3D12_SHADER_RESOURCE_VIEW_DESC s{};s.Format=format;s.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;s.Texture2D.MipLevels=1;s.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;p.device->CreateShaderResourceView(r,&s,cpu);};
+ // Private HDR alpha carries depth. The native SDR output remains opaque.
+ srv(12,depth,df);
+ if(!previous)return false;
+ if(previous.get()==packet.get())return false;
+ if(!previous->hasDepth)return false;
+ if(!previous->historySubmitted||!previous->historySubmitted())return false;
+ if(previous->historyQueue!=p.historyQueue)return false;
+ if(previous->device!=p.device||previous->w!=p.w||previous->h!=p.h||previous->ow!=p.ow||previous->oh!=p.oh)return false;
+ p.previous=std::move(previous);
+ srv(20,p.output.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);srv(21,p.previous->cleanHistory?p.previous->cleanHistory.Get():p.previous->encoded.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);srv(22,depth,df);srv(23,motion,m.Format);
+ auto cpu=p.heap->GetCPUDescriptorHandleForHeapStart();cpu.ptr+=24*stride;D3D12_UNORDERED_ACCESS_VIEW_DESC u{};u.Format=p.referenceFormat;u.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;p.device->CreateUnorderedAccessView(p.reference.Get(),nullptr,&u,cpu);
+ Barrier(c,p.output.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+ auto* history=p.previous->cleanHistory?p.previous->cleanHistory.Get():p.previous->encoded.Get();
+ const auto historyState=p.previous->cleanHistory?p.previous->cleanHistoryState:D3D12_RESOURCE_STATE_COMMON;
+ Barrier(c,history,historyState,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+ Barrier(c,p.reference.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);Bind(p,c,4);
+ Barrier(c,history,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,historyState);
+ Barrier(c,p.output.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
+ // The two FP16 images have identical layouts. Swap their roles instead of
+ // copying an entire 4K image back; these descriptor ranges are not used by
+ // any earlier dispatch in this recording.
+ std::swap(p.output,p.reference);p.encoded=p.output;
+ srv(5,p.output.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);
+ cpu=p.heap->GetCPUDescriptorHandleForHeapStart();cpu.ptr+=9*stride;p.device->CreateUnorderedAccessView(p.reference.Get(),nullptr,&u,cpu);
+ cpu=p.heap->GetCPUDescriptorHandleForHeapStart();cpu.ptr+=14*stride;p.device->CreateUnorderedAccessView(p.output.Get(),nullptr,&u,cpu);
+ return true;
 }
 inline void Finish(const std::shared_ptr<Packet>& packet,ID3D12GraphicsCommandList*c,bool success){
  auto& p=*packet;
@@ -91,6 +153,27 @@ inline void Finish(const std::shared_ptr<Packet>& packet,ID3D12GraphicsCommandLi
  if(!success)Barrier(c,p.output.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
 }
 inline Hdr10::SceneInput Image(const std::shared_ptr<Packet>& p){Hdr10::SceneInput image;image.hdr=p->encoded;image.reference=p->reference;image.owner=p;image.referenceSrgb=true;image.referenceHdrShoulder=bool(p->scene.hdr);return image;}
+// PreSR has finished consuming its composed scratch before reconciliation.
+// Reuse that allocation to keep the clean SR image/depth out of the NR feedback
+// loop. The next main SR consumes it before PreSR writes this scratch again,
+// in order on the same queue (validated by Stabilize's submission probe).
+inline bool PreserveHistory(const Hdr10::SceneInput& image,ID3D12GraphicsCommandList*c,ID3D12Resource*scratch,D3D12_RESOURCE_STATES state){
+ if(!c||!scratch)return false;
+ std::lock_guard lock(Mutex());
+ for(auto& candidate:Pool())if(candidate->encoded==image.hdr&&candidate->reference==image.reference){
+  auto& p=*candidate;if(p.reconciled)return false;
+  if(!p.hasDepth||p.cleanHistory)return true;
+  auto a=p.encoded->GetDesc(),b=scratch->GetDesc();
+  if(scratch==p.encoded.Get()||scratch==p.reference.Get()||a.Width!=b.Width||a.Height!=b.Height||a.Format!=b.Format||a.MipLevels!=b.MipLevels||a.DepthOrArraySize!=b.DepthOrArraySize||a.SampleDesc.Count!=b.SampleDesc.Count)return false;
+  ComPtr<ID3D12Device> device;if(FAILED(scratch->GetDevice(IID_PPV_ARGS(&device)))||device!=p.device)return false;
+  Barrier(c,p.encoded.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE);
+  Barrier(c,scratch,state,D3D12_RESOURCE_STATE_COPY_DEST);c->CopyResource(scratch,p.encoded.Get());
+  Barrier(c,scratch,D3D12_RESOURCE_STATE_COPY_DEST,state);
+  Barrier(c,p.encoded.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
+  p.cleanHistory=scratch;p.cleanHistoryState=state;return true;
+ }
+ return false;
+}
 // Only reconstructed DLSS packets can be reconciled. Native DX11 captures
 // belong to a different stage and must never be modified as a presentation.
 inline bool Reconcile(const Hdr10::SceneInput& image,ID3D12GraphicsCommandList*c,ID3D12Resource*edited,D3D12_RESOURCE_STATES arrival){
@@ -105,7 +188,7 @@ inline bool Reconcile(const Hdr10::SceneInput& image,ID3D12GraphicsCommandList*c
   D3D12_SHADER_RESOURCE_VIEW_DESC s{};s.Format=res?Typed(res->GetDesc().Format):DXGI_FORMAT_R16G16B16A16_FLOAT;s.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;s.Texture2D.MipLevels=1;s.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;p.device->CreateShaderResourceView(res,&s,cpu);cpu.ptr+=stride;
  }
  D3D12_UNORDERED_ACCESS_VIEW_DESC u{};u.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;u.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;p.device->CreateUnorderedAccessView(p.encoded.Get(),nullptr,&u,cpu);
- p.done=Hdr10::TrackCommands(c);p.recorded=true;p.reconciled=true;
+ p.done=Hdr10::TrackCommands(c);p.historySubmitted=Hdr10::HistorySubmission(c,p.historyQueue.Get());p.recorded=true;p.reconciled=true;
  Barrier(c,edited,arrival,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
  Barrier(c,p.reference.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
  Barrier(c,p.encoded.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);Bind(p,c,3);

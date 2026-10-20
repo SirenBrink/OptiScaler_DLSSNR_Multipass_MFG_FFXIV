@@ -22,7 +22,7 @@ int main()try{
  ComPtr<IDXGIFactory4> f;check(CreateDXGIFactory1(IID_PPV_ARGS(&f)));ComPtr<IDXGIAdapter>a;check(f->EnumWarpAdapter(IID_PPV_ARGS(&a)));ComPtr<ID3D12Device>d;check(D3D12CreateDevice(a.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&d)));
  ComPtr<ID3D12InfoQueue> info;d.As(&info);
  D3D12_COMMAND_QUEUE_DESC qd{};ComPtr<ID3D12CommandQueue>q;check(d->CreateCommandQueue(&qd,IID_PPV_ARGS(&q)));ComPtr<ID3D12CommandAllocator>alloc;check(d->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&alloc)));ComPtr<ID3D12GraphicsCommandList>c;check(d->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,alloc.Get(),nullptr,IID_PPV_ARGS(&c)));
- auto texture=[&](DXGI_FORMAT format=DXGI_FORMAT_R16G16B16A16_FLOAT){D3D12_RESOURCE_DESC t{};t.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;t.Width=4;t.Height=t.DepthOrArraySize=t.MipLevels=t.SampleDesc.Count=1;t.Format=format;D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;ComPtr<ID3D12Resource>r;check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&t,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&r)));return r;};
+ auto texture=[&](DXGI_FORMAT format=DXGI_FORMAT_R16G16B16A16_FLOAT,D3D12_RESOURCE_FLAGS flags=D3D12_RESOURCE_FLAG_NONE){D3D12_RESOURCE_DESC t{};t.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;t.Width=4;t.Height=t.DepthOrArraySize=t.MipLevels=t.SampleDesc.Count=1;t.Format=format;t.Flags=flags;D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;ComPtr<ID3D12Resource>r;check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&t,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&r)));return r;};
  auto buffer=[&](D3D12_HEAP_TYPE type,UINT64 size){D3D12_RESOURCE_DESC t{};t.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;t.Width=size;t.Height=t.DepthOrArraySize=t.MipLevels=t.SampleDesc.Count=1;t.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;D3D12_HEAP_PROPERTIES hp{};hp.Type=type;ComPtr<ID3D12Resource>r;check(d->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&t,type==D3D12_HEAP_TYPE_UPLOAD?D3D12_RESOURCE_STATE_GENERIC_READ:D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&r)));return r;};
  auto native=texture(),typelessNative=texture(DXGI_FORMAT_R16G16B16A16_TYPELESS),dest=texture(),dest8=texture(DXGI_FORMAT_R8G8B8A8_UNORM),dest10=texture(DXGI_FORMAT_R10G10B10A2_UNORM),dest11=texture(DXGI_FORMAT_R11G11B10_FLOAT),hdr=texture(),ref=texture(),edit=texture();auto upload=buffer(D3D12_HEAP_TYPE_UPLOAD,768),read=buffer(D3D12_HEAP_TYPE_READBACK,768);
  for(bool bridge:{false,true}){
@@ -93,6 +93,124 @@ int main()try{
   if(!variant)compatibility=value;else expect(value==compatibility,"unfiltered guide reintroduced edges into reconstructed SDR");
  }
  puts("PASS: fixed HDR reconstruction produces identical SDR despite changing unfiltered guides; no second DLSS evaluation");
+
+ // Matching colour/reference values must reconstruct the captured HDR exactly,
+ // independent of which dark texel a jittered raster samples this frame.
+ auto linearValue=[](float v){return v<=.04045f?v/12.92f:std::pow((v+.055f)/1.055f,2.4f);};
+ auto toHalf=[](float v){unsigned bits=0;memcpy(&bits,&v,4);unsigned exponent=(bits>>23)&255;
+  if(v==0)return (unsigned short)0;
+  expect(exponent>=113&&exponent<143,"test upload outside normal half range");
+  unsigned rounded=(bits+0x1000u)>>13;return (unsigned short)((rounded&0x3ffu)|(((rounded>>10)-112u)<<10));};
+ for(unsigned phase=0;phase<9;++phase){
+  check(alloc->Reset());check(Hdr10::ResetCommands(c.Get(),alloc.Get()));
+  check(upload->Map(0,nullptr,&ptr));auto* data=(unsigned char*)ptr;
+  const float levels[]={.01f,.03f,.1f,.5f};float expected[4]{};
+  for(unsigned x=0;x<4;++x){
+   float encodedNative=half(toHalf(levels[(x+phase)%4]));
+   float encodedReference=encodedNative;
+   float encodedHdr=half(toHalf(std::pow(linearValue(encodedNative)*8,1.f/2.2f)));
+   if(phase==8&&x==0){encodedNative=encodedReference=0;encodedHdr=2;}
+   if(phase==8&&x==1){encodedReference=0;encodedHdr=2;}
+   expected[x]=encodedNative==0?0:encodedReference==0?linearValue(encodedNative):std::pow(encodedHdr,2.2f);
+   for(unsigned ch=0;ch<4;++ch){
+    ((unsigned short*)(data+0))[x*4+ch]=ch==3?0x3800:encodedNative==0?0:toHalf(encodedNative);
+    ((unsigned short*)(data+256))[x*4+ch]=ch==3?0x3800:encodedReference==0?0:toHalf(encodedReference);
+    ((unsigned short*)(data+512))[x*4+ch]=ch==3?0x3800:toHalf(encodedHdr);
+   }
+  }
+  upload->Unmap(0,nullptr);uploadTexture(native.Get(),0);uploadTexture(ref.Get(),256);uploadTexture(hdr.Get(),512);
+  Hdr10::SceneInput scene;scene.hdr=hdr;scene.reference=ref;
+  auto packet=DlssSceneInput::Prepare(d.Get(),c.Get(),native.Get(),dest.Get(),4,1,scene);expect(bool(packet),"dark detail prepare failed");
+  DlssSceneInput::Barrier(c.Get(),packet->input.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE);
+  D3D12_TEXTURE_COPY_LOCATION to{},from{};to.pResource=read.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;to.PlacedFootprint.Footprint={DXGI_FORMAT_R16G16B16A16_FLOAT,4,1,1,256};from.pResource=packet->input.Get();from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;c->CopyTextureRegion(&to,0,0,0,&from,nullptr);
+  DlssSceneInput::Barrier(c.Get(),packet->input.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_COMMON);
+  DlssSceneInput::Barrier(c.Get(),packet->output.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COMMON);
+  submit(200+phase);Hdr10::Reset(c.Get());check(read->Map(0,nullptr,&ptr));auto* output=(unsigned short*)ptr;
+  for(unsigned x=0;x<4;++x){float actual=half(output[x*4]);
+   if(std::abs(actual-expected[x])>std::max(1e-6f,expected[x]*.003f)){
+    printf("dark reconstruction phase %u texel %u: got %.8f expected %.8f\n",phase,x,actual,expected[x]);
+    throw std::runtime_error("HDR gain depends on reference brightness / amplifies reference-black noise");
+   }
+  }
+  read->Unmap(0,nullptr);
+ }
+ puts("PASS: 8 shifted dark-detail phases recover matched HDR; reference-black noise and true black remain stable");
+
+ // Feed noisy, stationary HDR reconstructions through the production resolve.
+ // Verify motion/disocclusion/reset rejection and bounded packet ownership,
+ // rather than accepting a lower temporal metric from unconditional blending.
+ {
+  auto depthGuide=texture(DXGI_FORMAT_R32_FLOAT),motionGuide=texture(),nrScratch=texture(DXGI_FORMAT_R16G16B16A16_FLOAT,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  ComPtr<ID3D12CommandQueue> otherQueue;check(d->CreateCommandQueue(&qd,IID_PPV_ARGS(&otherQueue)));
+  std::shared_ptr<DlssSceneInput::Packet> history;
+  for(unsigned n=0;n<96;++n){
+   check(alloc->Reset());check(Hdr10::ResetCommands(c.Get(),alloc.Get()));
+   auto data=buffer(D3D12_HEAP_TYPE_UPLOAD,1536);check(data->Map(0,nullptr,&ptr));memset(ptr,0,1536);
+   auto* bits=(unsigned short*)ptr;
+   const bool moving=n<80&&n%8==3,disoccluded=n<80&&n%8==4,reset=n<80&&n%8==5,flash=n<80&&n%8==6;
+   for(unsigned x=0;x<4;++x){
+    for(unsigned channel=0;channel<3;++channel)bits[x*4+channel]=n>=80?(x==1?0x4000:0x3800):!n?0x3800:flash?0x3b33:((n>=16&&n<50?(x+n+1)%2:x%2)?0x3829:0x37ae); // thin 2.0 highlight, .5, .900, .520/.480
+    bits[x*4+3]=0x3c00;
+    ((float*)((char*)ptr+512))[x]=disoccluded?.25f:.5f;
+    bits[512+x*4]=moving?0x3c00:0; // normalized motion -> four output pixels
+   }
+   data->Unmap(0,nullptr);
+   auto copy=[&](ID3D12Resource*t,DXGI_FORMAT format,UINT64 offset,D3D12_RESOURCE_STATES before){
+    DlssSceneInput::Barrier(c.Get(),t,before,D3D12_RESOURCE_STATE_COPY_DEST);
+    D3D12_TEXTURE_COPY_LOCATION from{},to{};from.pResource=data.Get();from.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;from.PlacedFootprint.Offset=offset;from.PlacedFootprint.Footprint={format,4,1,1,256};to.pResource=t;to.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;c->CopyTextureRegion(&to,0,0,0,&from,nullptr);
+    DlssSceneInput::Barrier(c.Get(),t,D3D12_RESOURCE_STATE_COPY_DEST,before);
+   };
+   copy(depthGuide.Get(),DXGI_FORMAT_R32_FLOAT,512,D3D12_RESOURCE_STATE_COMMON);
+   copy(motionGuide.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,1024,D3D12_RESOURCE_STATE_COMMON);
+   auto packet=DlssSceneInput::Prepare(d.Get(),c.Get(),native.Get(),dest.Get(),4,1,{});expect(bool(packet),"temporal prepare failed");
+   copy(packet->output.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,0,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+   const bool used=DlssSceneInput::Stabilize(packet,c.Get(),reset?nullptr:history,depthGuide.Get(),motionGuide.Get(),4,1,0,0);
+   expect(used==bool(n&&!reset),"temporal history reset/prime failed");
+   DlssSceneInput::Finish(packet,c.Get(),true);
+   // Real PreSR uses its just-consumed composed texture as scratch. Reconcile
+   // makes a deliberately large edit, which must never enter clean SR history.
+   const bool nrActive=n>=16&&n<48;
+   if(n==0)DlssSceneInput::Barrier(c.Get(),nrScratch.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+   if(nrActive){
+    auto image=DlssSceneInput::Image(packet);
+    expect(DlssSceneInput::PreserveHistory(image,c.Get(),nrScratch.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS),"PreSR clean history snapshot failed");
+    copy(edit.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,0,D3D12_RESOURCE_STATE_COMMON);
+    expect(DlssSceneInput::Reconcile(image,c.Get(),edit.Get(),D3D12_RESOURCE_STATE_COMMON),"NR temporal reconciliation failed");
+   }
+   auto* readableHistory=nrActive?packet->cleanHistory.Get():packet->encoded.Get();
+   const auto historyState=nrActive?D3D12_RESOURCE_STATE_UNORDERED_ACCESS:D3D12_RESOURCE_STATE_COMMON;
+   DlssSceneInput::Barrier(c.Get(),readableHistory,historyState,D3D12_RESOURCE_STATE_COPY_SOURCE);
+   D3D12_TEXTURE_COPY_LOCATION from{},to{};from.pResource=readableHistory;from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;to.pResource=read.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;to.PlacedFootprint.Footprint={DXGI_FORMAT_R16G16B16A16_FLOAT,4,1,1,256};c->CopyTextureRegion(&to,0,0,0,&from,nullptr);
+   DlssSceneInput::Barrier(c.Get(),readableHistory,D3D12_RESOURCE_STATE_COPY_SOURCE,historyState);
+   auto submitted=Hdr10::HistorySubmission(c.Get(),q.Get()),wrongQueue=Hdr10::HistorySubmission(c.Get(),otherQueue.Get());
+   expect(!submitted(),"unsubmitted HDR history was marked readable");
+   submit(500+n);expect(submitted()&&!wrongQueue(),"HDR history submission did not respect its producer queue");Hdr10::Reset(c.Get());check(read->Map(0,nullptr,&ptr));bits=(unsigned short*)ptr;
+   const float result=std::pow(half(bits[4]),2.2f),current=n>=80?2.f:!n?.5f:flash?half(0x3b33):half(n>=16&&n<50&&n%2==0?0x37ae:0x3829);
+   expect(std::abs(half(bits[7])-(disoccluded?.25f:.5f))<.0001f,"private history lost depth");
+   if(moving||disoccluded||reset||flash||!n)expect(std::abs(result-current)<.0015f,"stale HDR history survived motion/depth/reset/lighting rejection");
+   if(n==1)expect(result<current-.005f&&result>.495f,"stationary HDR noise was not stabilized");
+   if(n==17||n==49){printf("NR toggle history frame %u: current %.6f resolved %.6f\n",n,current,result);expect(result<current-.003f,"NR edits contaminated clean history across enable/disable");}
+   if(n>=80&&std::abs(result-2.f)>=.004f){printf("thin highlight frame %u: %.9f (encoded %04x)\n",n,result,bits[4]);throw std::runtime_error("temporal clipping dimmed a stable thin HDR highlight");}
+   read->Unmap(0,nullptr);history=packet;
+  }
+  history.reset();check(alloc->Reset());check(Hdr10::ResetCommands(c.Get(),alloc.Get()));
+  auto discarded=DlssSceneInput::Prepare(d.Get(),c.Get(),native.Get(),dest.Get(),4,1,{});
+  DlssSceneInput::Stabilize(discarded,c.Get(),nullptr,depthGuide.Get(),motionGuide.Get(),4,1,0,0);
+  DlssSceneInput::Finish(discarded,c.Get(),true);check(c->Close());check(alloc->Reset());check(Hdr10::ResetCommands(c.Get(),alloc.Get()));
+  expect(!discarded->historySubmitted(),"discarded HDR recording became readable history");
+  auto next=DlssSceneInput::Prepare(d.Get(),c.Get(),native.Get(),dest.Get(),4,1,{});
+  expect(!DlssSceneInput::Stabilize(next,c.Get(),discarded,depthGuide.Get(),motionGuide.Get(),4,1,0,0),"resolve used discarded HDR history");
+  DlssSceneInput::Finish(next,c.Get(),false);check(c->Close());Hdr10::Reset(c.Get());
+  next.reset();discarded.reset();check(alloc->Reset());check(Hdr10::ResetCommands(c.Get(),alloc.Get()));
+  auto scaled=DlssSceneInput::Prepare(d.Get(),c.Get(),native.Get(),dest.Get(),2,1,{});
+  expect(!DlssSceneInput::Stabilize(scaled,c.Get(),nullptr,depthGuide.Get(),motionGuide.Get(),4,1,0,0,false)&&!scaled->hasDepth,"incompatible motion layout did not fail closed");
+  DlssSceneInput::Stabilize(scaled,c.Get(),nullptr,depthGuide.Get(),motionGuide.Get(),4,1,0,0);
+  expect(scaled->motionScale[0]==8&&scaled->motionScale[1]==1,"render-space motion was not scaled to output-space history");
+  DlssSceneInput::Finish(scaled,c.Get(),false);check(c->Close());Hdr10::Reset(c.Get());
+  expect(DlssSceneInput::Pool().size()<=3,"temporal history retained an unbounded packet chain");
+ }
+ puts("PASS: production HDR temporal resolve reduces stationary noise, preserves thin highlights, rejects motion/depth/reset/lighting and discarded history, validates producer queue, preserves depth in private alpha and bounds history ownership over 96 frames");
+
  if(info){for(UINT64 i=0;i<info->GetNumStoredMessages();++i){SIZE_T size=0;info->GetMessage(i,nullptr,&size);std::vector<char>b(size);auto*m=(D3D12_MESSAGE*)b.data();check(info->GetMessage(i,m,&size));if(m->Severity<=D3D12_MESSAGE_SEVERITY_ERROR){puts(m->pDescription);throw std::runtime_error("D3D12 debug validation error");}}}
- expect(DlssSceneInput::Pool().size()<=2,"work buffers not reused");CloseHandle(event);puts("PASS: production HDR-DLSS conversion, typed/typeless FP16 inputs, FP16/RGBA8/RGB10A2/R11G11B10 outputs, SDR tone curve, reconstructed HDR, missing-scene fallback, 128 reset/submission cycles and resource lifetime, opaque output alpha, identity/non-identity PreSR HDR reconciliation and descriptor immutability");return 0;
+ expect(DlssSceneInput::Pool().size()<=3,"work buffers not reused");CloseHandle(event);puts("PASS: production HDR-DLSS conversion, typed/typeless FP16 inputs, FP16/RGBA8/RGB10A2/R11G11B10 outputs, SDR tone curve, reconstructed HDR, missing-scene fallback, 128 reset/submission cycles and resource lifetime, opaque output alpha, identity/non-identity PreSR HDR reconciliation and descriptor immutability");return 0;
 }catch(const std::exception&e){puts(e.what());return 1;}

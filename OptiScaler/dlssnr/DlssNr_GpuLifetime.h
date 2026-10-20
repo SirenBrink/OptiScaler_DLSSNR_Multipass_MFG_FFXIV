@@ -26,6 +26,9 @@ class GpuLifetime
     bool MayHaveRecording(UINT count, ID3D12CommandList* const* lists) const;
     // The probe retains the captured tracker state; discarded work never satisfies it.
     std::function<bool()> CompletionProbe(ID3D12GraphicsCommandList* commands);
+    // A same-queue consumer may read submitted history before its fence retires.
+    // Discarded or unsuccessfully submitted recordings must never qualify.
+    std::function<bool()> SubmissionProbe(ID3D12GraphicsCommandList* commands, ID3D12CommandQueue* queue = nullptr);
     // Completion plus recording closure: retained for HDR/FFXIV texture pools.
     std::function<bool()> ReuseProbe(ID3D12GraphicsCommandList* commands);
     // One reusable monotonic fence per queue; aliases are normalized at every notification.

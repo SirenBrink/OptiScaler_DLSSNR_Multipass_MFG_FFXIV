@@ -1,4 +1,5 @@
 #include <pch.h>
+#include <misc/NgxJitterBinding.h>
 #include <misc/FfxivNativeQuality.h>
 #include <misc/FfxivLightingCapture.h>
 #include "IFeature_Dx11wDx12.h"
@@ -569,6 +570,9 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
             break;
         }
 
+        const auto compactDesc=upscalerColor->GetDesc();
+        NgxJitterBinding::Resampled compactJitter(InParameters,nrGuideSourceWidth,nrGuideSourceHeight,
+                                                 unsigned(compactDesc.Width),compactDesc.Height);
         InParameters->Set(NVSDK_NGX_Parameter_Color, (void*) upscalerColor);
         InParameters->Set(NVSDK_NGX_Parameter_MotionVectors, (void*) dx11Mv.Dx12Resource);
         InParameters->Set(NVSDK_NGX_Parameter_Output, (void*) dx11Out.Dx12Resource);
@@ -592,7 +596,9 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
         DlssSceneInput::bridgeColour=upscalerColor;
         DlssSceneInput::bridgeOutput=dx11Out.Dx12Resource;
         DlssSceneInput::bridgeColourState=upscalerColor==dx11Color.Dx12Resource?D3D12_RESOURCE_STATE_COMMON:D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        DlssSceneInput::bridgeQueue=Dx12CommandQueue;
         dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters, Dx12CommandQueue);
+        DlssSceneInput::bridgeQueue=nullptr;
         DlssSceneInput::bridgeColour=nullptr;DlssSceneInput::bridgeOutput=nullptr;
 
         // DLSS 5 Neural Rendering rides the bridge: at this moment the block carries the D3D12 copies
