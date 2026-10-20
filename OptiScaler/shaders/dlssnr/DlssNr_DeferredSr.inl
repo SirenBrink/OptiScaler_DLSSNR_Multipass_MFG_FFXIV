@@ -44,6 +44,7 @@ struct HalfRate
 struct Generation
 {
     DlssModelHints::Settings modelHints;
+    uint64_t runtimeRevision=0;
     ID3D12Device* device = nullptr;
     ID3D12CommandQueue* queue = nullptr; // identity/reference only; no private submissions
     unsigned w = 0, h = 0, outW = 0, outH = 0, flags = 0;
@@ -547,7 +548,8 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
         sourcePresets,cfg.RenderPresetOverride.value_or_default(),option(cfg.RenderPresetForAll),
         {option(cfg.RenderPresetDLAA),option(cfg.RenderPresetUltraQuality),option(cfg.RenderPresetQuality),
          option(cfg.RenderPresetBalanced),option(cfg.RenderPresetPerformance),option(cfg.RenderPresetUltraPerformance)});
-    if (current && (current->device != device || current->queue != ownerQueue || current->w != active->width ||
+    const auto runtimeRevision=RuntimeSelection::D3D12()->revision;
+    if (current && (current->runtimeRevision!=runtimeRevision || current->device != device || current->queue != ownerQueue || current->w != active->width ||
         current->h != active->height || current->outW != outDesc.Width || current->outH != outDesc.Height ||
         current->inputFormat != inDesc.Format || current->outputFormat != outDesc.Format || current->flags != flags ||
         current->modelHints != modelHints || current->halfRequested != wantsHalf ||
@@ -565,7 +567,7 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
         current->w = active->width; current->h = active->height;
         current->outW = (unsigned)outDesc.Width; current->outH = outDesc.Height;
         current->inputFormat = inDesc.Format; current->outputFormat = outDesc.Format; current->flags = flags;
-        current->modelHints = modelHints;
+        current->modelHints = modelHints;current->runtimeRevision=runtimeRevision;
         current->halfRequested = wantsHalf;
         current->splitWork = splitWork;
         current->sampleAndHold = sampleAndHold;

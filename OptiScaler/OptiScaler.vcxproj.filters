@@ -1650,6 +1650,8 @@
     <ClInclude Include="dlssnr\RuntimeCatalog.h" />
     <ClInclude Include="dlssnr\RuntimeSelection.h" />
     <ClInclude Include="framegen\dlssg\PresetSelection.h" />
+    <ClInclude Include="framegen\dlssg\PresetCache.h" />
+    <ClCompile Include="framegen\dlssg\PresetCache.cpp" />
     <ClInclude Include="misc\TemporalSampling.h" />
     <ClInclude Include="misc\FfxivJitter.h" />
     <ClInclude Include="misc\Dx11AutomaticMipBias.h" />

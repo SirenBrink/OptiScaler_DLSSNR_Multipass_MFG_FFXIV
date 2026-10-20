@@ -453,3 +453,9 @@ The DLSS/NR HDR input adapters normalize native colour and its SDR reference wit
 
 ### Adaptive HDR stabilizer (experimental)
 `[HDR] AdaptiveStabilizer=false` preserves the original stabilizer. Enable the live checkbox under OptiHDR to increase history blending from 80% toward 90% only for nearly unchanged pixels; the existing motion, depth, neighbourhood and lighting-change guards remain active. Requires scene HDR input for DLSS. Switching modes discards the previous mode's history. No extra image allocation or DLSS pass is added. Visual motion quality remains subject to gameplay testing.
+
+Direct D3D12 NR version selection is live: scene, PreSR and previews retire their old GPU-owned features and start fresh history. Loaded DLLs remain resident until exit. Native Vulkan, hybrid FP4, driver-proxy NR and initial NGX/Streamline search paths remain pinned until restart.
+
+Native OptiFG DLSS-G model-preset requests switch live by stopping FG and releasing viewport resources before recreation. A failed stop/release retains the old request and requires restart rather than retrying every frame. SM86 compatibility and externally owned FG still require restart. The guarded live path was confirmed in-game with native 310.9.16.0, including matching NVIDIA requested/effective reports for A, B and C. Other runtime builds require independent verification.
+
+Live DLSS-G preset changes require a supported runtime fingerprint and cached-reader/endpoint-lifecycle instruction guards. NVIDIA caches its startup configuration separately from viewport resources; the guarded path reconstructs each new endpoint's private configuration using NVIDIA's own defaults and settings reader before model creation, leaving existing endpoints and the shared startup configuration unchanged. Unknown builds remain restart-only. The process-local override changes only the FG preset entry and preserves the original driver value for Automatic; it does not write NVIDIA profiles.

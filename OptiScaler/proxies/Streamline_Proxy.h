@@ -364,7 +364,7 @@ class StreamlineProxy
         auto nvngxDlssPath = Util::FindFilePath(exePath, "nvngx_dlss.dll");
         auto nvngxDlssDPath = Util::FindFilePath(exePath, "nvngx_dlssd.dll");
         auto nvngxDlssGPath = Util::FindFilePath(exePath, "nvngx_dlssg.dll");
-        auto nvngxDlssNrPath = DlssNr::RuntimeSelection::Path();
+        auto nvngxDlssNrPath = DlssNr::RuntimeSelection::Startup().path;
         (void) DlssgPreset::Startup();
 
         std::vector<std::wstring> pathStorage;

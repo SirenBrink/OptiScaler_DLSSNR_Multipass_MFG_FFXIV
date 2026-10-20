@@ -261,7 +261,7 @@ class Config
     // DLSS Neural Rendering: a detail-synthesis pass over the upscaler's output. Off by default -- it is
     // an undocumented feature driven directly through its snippet, not something NVIDIA exposes.
     CustomOptional<bool> DlssNrEnabled { false };
-    CustomOptional<std::string> DlssNrRuntime { "" }; // Empty retains legacy runtime discovery; restart required.
+    CustomOptional<std::string> DlssNrRuntime { "" }; // Empty retains legacy discovery; D3D12 direct features switch live.
     // Run the NR pass on the upscaler's colour input, at render resolution, immediately before SR.
     // Off preserves the v0.2.0 post-upscale placement.
     CustomOptional<bool> DlssNrRunBeforeSr { false };
@@ -1024,7 +1024,7 @@ class Config
     CustomOptional<bool> FGXeFGForceBorderless { false };
 
     // DLSSG
-    CustomOptional<int> FGDLSSGRenderPreset { 0 }; // 0 automatic, 1 A, 2 B, 3 C; restart required
+    CustomOptional<int> FGDLSSGRenderPreset { 0 }; // 0 automatic, 1 A, 2 B, 3 C; native OptiFG switches live
     CustomOptional<int> FGDLSSGInterpolationCount { 1 }; // For Opti's own SL instance
     CustomOptional<bool> FGDLSSGUseGamesReflexMarkers { true };
     CustomOptional<int, NoDefault>

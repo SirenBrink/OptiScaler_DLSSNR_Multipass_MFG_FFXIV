@@ -35,6 +35,7 @@ struct Instance::Impl {
     unsigned width=0,height=0,gw=0,gh=0,preset=0,style=0;
     DlssNr::Profiles::NrPassTuning tuning;std::filesystem::path model;
     bool failed=false,counted=false,stopped=false;
+    uint64_t runtimeRevision=0;
     unsigned previousReuseEvery=1;
     bool previousReuseOverride=false;
     ~Impl(){
@@ -109,8 +110,11 @@ bool Instance::Process(ID3D11DeviceContext* c,ID3D11Texture2D* colour,ID3D11Text
     if(DlssNr::FocusPolicy::Paused(Config::Instance()->DlssNrPauseOnFocusLoss.value_or_default())){
         p->lastEval=0; ++skipped;return false;
     }
+    const auto runtime=DlssNr::RuntimeSelection::D3D12();
+    if(p->runtimeRevision && p->runtimeRevision!=runtime->revision)Stop(0);
     reset|=!p->lastEval || frameId!=p->lastFrame+1;
     if(p->stopped){if(!p->Ready()){++skipped;return false;}delete p;p=new Impl;}
+    p->runtimeRevision=runtime->revision;
     if(p->failed){++skipped;return false;}
     if(!p->device){
         if(!State::Instance().currentD3D12Device){++skipped;return false;}

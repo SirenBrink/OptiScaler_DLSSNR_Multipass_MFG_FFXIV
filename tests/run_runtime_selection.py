@@ -7,7 +7,7 @@ with tempfile.TemporaryDirectory(prefix='runtime-selection-',dir=r/'tests') as t
 #include <filesystem>
 #include <string>
 template<class T>struct Value{T data{};Value& operator=(T v){data=v;return *this;}bool has_value()const{return !data.empty();}T value_or_default()const{return data;}T value()const{return data;}};
-struct Config{Value<std::filesystem::path> MainDllPath;Value<std::string> DlssNrRuntime;struct Int{int data=0;Int& operator=(int v){data=v;return *this;}int value_or_default()const{return data;}}FGDLSSGRenderPreset;static Config* Instance(){static Config c;return &c;}};
+struct Config{Value<std::filesystem::path> MainDllPath;Value<std::string> DlssNrRuntime;struct Int{int data=0;Int& operator=(int v){data=v;return *this;}int value_or_default()const{return data;}}FGDLSSGRenderPreset;struct Setting{int value=0;int value_or_default()const{return value;}}DlssNrUseProxy,DlssNrPrecision;static Config* Instance(){static Config c;return &c;}};
 """)
  (b/'Util.h').write_text("""#pragma once
 #include <filesystem>

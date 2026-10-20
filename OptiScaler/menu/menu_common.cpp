@@ -11,6 +11,7 @@
 #include <misc/Dx11AutomaticMipBias.h>
 #include <misc/SamplerMipBias.h>
 #include <framegen/dlssg/PresetSelection.h>
+#include <framegen/dlssg/PresetCache.h>
 #include <framegen/dlssg/MfgUnlock.h>
 #include <NVNGX_Parameter.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
@@ -4504,10 +4505,17 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         int fgPreset=config->FGDLSSGRenderPreset.value_or_default();
         if (ImGui::Combo("DLSS-G model preset",&fgPreset,"Automatic\0Preset A\0Preset B\0Preset C\0"))
             config->FGDLSSGRenderPreset=fgPreset;
-        ShowHelpMarker("Save Settings and restart. Requests the preset from the installed runtime/driver; does not change your NVIDIA profile. Preset C requires a compatible recent DLSS-G runtime. Older runtimes may ignore it. Preset B requires UI resources; REST UI-free generation keeps UI outside DLSS-G.");
-        if (DlssgPreset::Startup()!=0 && !DlssgPreset::querySeen.load(std::memory_order_relaxed))
+        ShowHelpMarker("Verified native OptiFG DLSS-G runtimes can change preset live, with a brief pause to recreate FG resources. A blocked live change shows its reason below. Unverified runtimes, SM86 compatibility and externally owned FG require a restart. Save Settings to keep your choice. Requests the preset from the installed runtime/driver; does not change your NVIDIA profile. Preset C requires a compatible recent DLSS-G runtime. Older runtimes may ignore it. Preset B requires UI resources; REST UI-free generation keeps UI outside DLSS-G.");
+        if (DlssgPreset::Current()!=0 && !DlssgPreset::querySeen.load(std::memory_order_relaxed))
             ImGui::TextDisabled("Preset request unconfirmed: no driver preset query observed.");
-        if (fgPreset!=DlssgPreset::Startup()) ImGui::TextDisabled("Preset change pending: Save Settings and restart.");
+        if(fgPreset!=DlssgPreset::Current()){
+            if(config->FGDLSSGAmpereMfgUnlock.value_or_default() || state.activeFgNvngx!=FGNvngxReplacement::None)
+                ImGui::TextDisabled("This FG provider requires a restart to change model preset.");
+            else if(DlssgPreset::failedRequest.load()==fgPreset){
+                ImGui::TextWrapped("Live change blocked: %s.",DlssgPresetCache::UnavailableReason());
+                ImGui::TextDisabled("Current request remains %s. Save and restart to try the selected preset.",DlssgPreset::Name(DlssgPreset::Current()));
+            }else ImGui::TextDisabled("Preset change queued for the next FG dispatch.");
+        }
 
 
         if (state.activeFgNvngx == FGNvngxReplacement::None && state.isHdrActive)

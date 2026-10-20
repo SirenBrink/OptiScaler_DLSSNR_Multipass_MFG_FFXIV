@@ -625,7 +625,7 @@ class NVNGXProxy
             State::Instance().NVNGX_FeatureInfo_Paths.push_back(dlssPath.remove_filename().wstring());
         }
 
-        if (auto nr=DlssNr::RuntimeSelection::Path()) {
+        if (auto nr=DlssNr::RuntimeSelection::Startup().path) {
             const auto dir=nr->parent_path().wstring();
             auto& roots=State::Instance().NVNGX_FeatureInfo_Paths;
             if (std::find(roots.begin(),roots.end(),dir)==roots.end()) roots.insert(roots.begin(),dir);

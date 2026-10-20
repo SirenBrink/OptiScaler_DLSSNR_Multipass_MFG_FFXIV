@@ -497,7 +497,7 @@ unsigned int GameCreateFlags(NVSDK_NGX_Parameter* params)
 
 std::optional<std::filesystem::path> FindSnippet()
 {
-    auto snippet = RuntimeSelection::Path();
+    auto snippet = RuntimeSelection::Startup().path;
 
     return snippet;
 }

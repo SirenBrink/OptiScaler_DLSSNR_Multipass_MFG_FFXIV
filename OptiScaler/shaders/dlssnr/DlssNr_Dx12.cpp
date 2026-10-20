@@ -203,6 +203,7 @@ using DlssNr::Profiles::PassTuning;
 
 struct NrState
 {
+    uint64_t runtimeRevision=0;
     unsigned long long successfulDispatches = 0;
     HMODULE forwarder = nullptr;
     PFN_NrCreate create = nullptr;
@@ -1620,6 +1621,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     std::lock_guard<std::recursive_mutex> nrLock(g_nrMutex);
     if (g_bridgeSuspended.load()) return;
     const Config& cfg = *Config::Instance();
+    const auto runtime=DlssNr::RuntimeSelection::D3D12();
+    if(g_nr.runtimeRevision!=runtime->revision){
+        // No unload or blocking fence wait. The forwarder retains each module
+        // and dispatches late release calls to the feature's original owner.
+        ParkNrFeature(g_nr.feature);g_nr.featurePendingSubmission=false;g_nr.featureReady={};
+        for(unsigned i=1;i<DlssNr::MaxPassCount;++i){
+            ParkNrFeature(g_nr.passFeature[i]);g_nr.passNeedsReset[i]=true;
+            g_nr.passCreateFailed[i]=false;g_nr.passPendingSubmission[i]=false;g_nr.passReady[i]={};
+        }
+        g_nr.runtimeRevision=runtime->revision;g_nr.failed=false;g_nr.reason="";
+        g_nr.reset=true;g_nr.modelError.clear();ForgetCalibration();
+        LOG_INFO("DLSS-NR: runtime generation {}; scene features retired safely",runtime->revision);
+    }
 
     if (g_nr.failed || cmdList == nullptr || colour == nullptr || depth == nullptr ||
         motion == nullptr || output == nullptr)
@@ -2046,7 +2060,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (!snippet.has_value())
         {
             g_nr.failed = true;
-            g_nr.reason = "Selected NR runtime not found; check NR runtime selection and restart";
+            g_nr.reason = "Selected NR runtime not found; choose an installed NR runtime";
             LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
             device->Release();
             return;
@@ -3712,7 +3726,7 @@ void ProbeD3D11(void* d3d11Device)
         return;
     }
 
-    auto snippet = DlssNr::RuntimeSelection::Path();
+    auto snippet = DlssNr::RuntimeSelection::Startup().path;
 
     if (!snippet.has_value())
         return;

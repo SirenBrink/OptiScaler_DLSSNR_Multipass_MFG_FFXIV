@@ -4,6 +4,7 @@
 
 #include "DLSSG_Dx12.h"
 #include "PresetSelection.h"
+#include "PresetCache.h"
 
 #include <hudfix/Hudfix_Dx12.h>
 #include <menu/menu_overlay_dx.h>
@@ -367,6 +368,29 @@ bool DLSSG_Dx12::Dispatch()
     }
 
     auto& state = State::Instance();
+    // Compatibility runtimes consume their own startup INI; their preset cannot
+    // be changed by recreating a native NGX feature. Never unload SL modules.
+    if(!Config::Instance()->FGDLSSGAmpereMfgUnlock.value_or_default() &&
+       state.activeFgNvngx==FGNvngxReplacement::None){
+        const int requested=Config::Instance()->FGDLSSGRenderPreset.value_or_default();
+        const int previousFailure=DlssgPreset::failedRequest.load();
+        const auto changed=DlssgPreset::Apply(requested,[&]{
+            if(!StreamlineProxy::DLSSGSetOptions() || !StreamlineProxy::FreeResources() || !DlssgPresetCache::Ensure())return false;
+            sl::DLSSGOptions off{};off.mode=sl::DLSSGMode::eOff;
+            off.queueParallelismMode=sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
+            return StreamlineProxy::DLSSGSetOptions()(viewport,off)==sl::Result::eOk;
+        },[&]{return StreamlineProxy::FreeResources()(sl::kFeatureDLSS_G,viewport)==sl::Result::eOk;});
+        if(changed==DlssgPreset::Change::RestartRequired && previousFailure!=requested &&
+           DlssgPreset::failedRequest.load()==requested)
+            LOG_WARN("DLSS-G: live {} reset failed; original preset request retained, restart required",DlssgPreset::Name(requested));
+        if(changed==DlssgPreset::Change::Recreated){
+            _historyFrames.Invalidate();_sceneHistory.Invalidate();
+            for(auto& slot:_guideSnapshots)for(auto& guide:slot)guide.valid=false;
+            _observedMultiplier.store(0,std::memory_order_relaxed);_sampleMode=-1;
+            LOG_INFO("DLSS-G: resources released for live {}; fresh FG resumes on the next dispatch",DlssgPreset::Name(requested));
+            return false;
+        }
+    }
 
     if (Config::Instance()->FGDLSSGInterpolationCount.value_or_default() < 1 ||
         Config::Instance()->FGDLSSGInterpolationCount.value_or_default() > _maxInterpolationCount)
@@ -404,7 +428,7 @@ bool DLSSG_Dx12::Dispatch()
         const auto& recompositionConfig = Config::Instance()->FGDLSSGUIRecomposition;
         const auto external = ExternalHudless::Snapshot();
         const bool addonLoaded = GetModuleHandleW(L"OptiScalerHudless.addon64") != nullptr;
-        const int preset=DlssgPreset::Startup();
+        const int preset=DlssgPreset::Current();
         const bool recomposition = preset != 1 && preset != 3 && ExternalHudless::Active() &&
             !Config::Instance()->FGExternalUIFreeFrameGen.value_or_default() &&
             (recompositionConfig.has_value() ? recompositionConfig.value() : true);
@@ -435,7 +459,7 @@ bool DLSSG_Dx12::Dispatch()
         {
             LOG_INFO("DLSSG UI recomposition: {} (add-on loaded {}, hudless format {}, ui format {}){}",
                      recomposition, addonLoaded, options.hudLessBufferFormat, options.uiBufferFormat,
-                     lastLogged == -1 ? "" : " -- changed after start, only applies after a game restart");
+                     lastLogged == -1 ? "" : " -- takes effect at the next DLSS-G feature creation");
             lastLogged = (int) recomposition;
         }
     }

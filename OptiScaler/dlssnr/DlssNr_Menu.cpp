@@ -192,7 +192,7 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::TextWrapped("%s", amdPrerequisite.empty() ? amdStatus.c_str() : amdPrerequisite.c_str());
             ImGui::TextWrapped("AMD experimental: enable Run before upscaling. NVIDIA model/style controls do not apply.");
         }
-        const auto& runtime=DlssNr::RuntimeSelection::Startup();
+        const auto runtime=DlssNr::RuntimeSelection::Current();
         static const auto installedRuntimes=DlssNr::RuntimeCatalog::Scan(DlssNr::RuntimeSelection::Roots());
         const auto requested=config->DlssNrRuntime.value_or_default();
         if (ImGui::BeginCombo("NR runtime",requested.empty()?"Automatic (legacy location)":requested.c_str())) {
@@ -202,16 +202,21 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::EndCombo();
         }
         HelpMarker("Install each runtime as OptiScaler/NR.<version>/nvngx_dlssnr.dll.\n"
-                   "Save Settings and restart to change versions. Scene and previews share one runtime; a missing explicit choice never falls back silently.");
-        if (requested!=runtime.requested) ImGui::TextDisabled("NR runtime change pending: Save Settings and restart.");
-        static const std::string sessionRuntimeVersion=[&] {
-            version_t v;
-            if (runtime.path && Util::GetFileVersion(runtime.path->wstring(), &v))
-                return std::to_string(v.major)+"."+std::to_string(v.minor)+"."+std::to_string(v.patch)+"."+std::to_string(v.reserved);
-            return std::string("unknown version");
-        }();
-        if (runtime.path) ImGui::TextDisabled("Session NR runtime: %s",sessionRuntimeVersion.c_str());
+                   "D3D12 scene and preview features switch live after their own GPU work retires. Native Vulkan, the driver-proxy backend and hybrid FP4 still require a restart.\nLoaded model DLLs stay resident until exit; old GPU features are released safely. A missing explicit choice never falls back silently.");
+        static uint64_t displayedRuntime=0;
+        static std::string sessionRuntimeVersion;
+        if(displayedRuntime!=runtime->revision){
+            displayedRuntime=runtime->revision;version_t v;
+            sessionRuntimeVersion=runtime->path && Util::GetFileVersion(runtime->path->wstring(),&v)
+                ? std::to_string(v.major)+"."+std::to_string(v.minor)+"."+std::to_string(v.patch)+"."+std::to_string(v.reserved)
+                : "unknown version";
+        }
+        if (runtime->path) ImGui::TextDisabled("Selected NR runtime: %s",sessionRuntimeVersion.c_str());
         else ImGui::TextWrapped("Selected NR runtime not found; Neural Rendering is unavailable.");
+        if(config->DlssNrUseProxy.value_or_default() || config->DlssNrPrecision.value_or_default()==4){
+            if(runtime->requested!=DlssNr::RuntimeSelection::Startup().requested)
+                ImGui::TextDisabled("This NR backend requires Save Settings and restart to change runtime.");
+        }
         bool enabled = config->DlssNrEnabled.value_or_default();
         if (ImGui::Checkbox("Enable Neural Rendering", &enabled))
             config->DlssNrEnabled = enabled;
