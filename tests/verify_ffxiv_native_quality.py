@@ -80,3 +80,31 @@ manager = accessor + 7 + struct.unpack('<i', read(accessor + 3, 4))[0]
 # Globals may be in a zero-initialized tail, beyond SizeOfRawData on disk.
 assert any(name in (b'.data', b'.rdata') and start <= manager and manager + 8 <= start + max(size, u32(nt + 24 + u16(nt+20) + i*40 + 8)) for i,(name,start,size,raw) in enumerate(sections)), 'CharaView manager is outside data sections'
 print(f'PASS: unique CharaView accessor {accessor:#x}, manager global {manager:#x}')
+
+# Jitter is a second native hook family and must be audited after every patch.
+jitter = (Path(__file__).resolve().parents[1] / 'OptiScaler/misc/FfxivJitter.cpp').read_text()
+jitter_addresses = {}
+for name, slot in [('getter','a'),('call','b'),('camera','c'),('rendererLoad','d'),('generator','e'),('generatorCall','f')]:
+    match = re.search(r'constexpr unsigned char '+name+r'\[\]\{([^}]+)\}', jitter)
+    expected = bytes(int(token,0) for token in match.group(1).split(','))
+    address = int(re.search(r'Read\(base\+(0x[0-9a-f]+),'+slot+r',sizeof\('+slot+r'\)\)',jitter).group(1),16)
+    assert read(address,len(expected)) == expected, f'Jitter {name}: instruction mismatch'
+    jitter_addresses[name] = address
+    print(f'PASS: jitter {name} {address:#x} matches executable')
+# The eight-byte leaf getter has no unwind record; its exact body and caller are checked above.
+for name in ['camera','generator']:
+    assert any(begin==jitter_addresses[name] for begin,end,unwind in entries), f'Jitter {name}: not a function boundary'
+def relative(address, operand=1, length=5):
+    return address+length+struct.unpack('<i',read(address+operand,4))[0]
+assert relative(jitter_addresses['call']) == jitter_addresses['getter'], 'NGX packet does not call camera getter'
+assert relative(jitter_addresses['generatorCall']) == jitter_addresses['generator'], 'Camera does not call jitter generator'
+return_guards = [int(value,16) for value in re.findall(r'_ReturnAddress\(\)\)!=(?:executable)\+(0x[0-9a-f]+)',jitter)]
+assert set(return_guards)=={jitter_addresses['call']+5,jitter_addresses['generatorCall']+5}, 'Jitter return-address filters are stale'
+settings_read = int(re.search(r'Read\(executable\+(0x[0-9a-f]+),&settings',jitter).group(1),16)
+renderer_read = int(re.search(r'Read\(executable\+(0x[0-9a-f]+),&renderer',jitter).group(1),16)
+device_read = int(re.search(r'Read\(executable\+(0x[0-9a-f]+),&device',jitter).group(1),16)
+assert settings_read == constant('kFfxivSettingsPointerRva')
+assert device_read == constant('kFfxivDevicePointerRva')
+assert relative(jitter_addresses['rendererLoad'],3,7)==renderer_read==manager
+assert relative(jitter_addresses['generatorCall']+5,3,7)==renderer_read
+print('PASS: native jitter function boundaries, caller filters and shared renderer/settings/device globals')

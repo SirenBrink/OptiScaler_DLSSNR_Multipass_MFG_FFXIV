@@ -7,7 +7,7 @@
 // Read-only discovery. Layout reference: aers/FFXIVClientStructs,
 // Graphics/Render/RenderTargetManager.cs and Graphics/Kernel/Texture.cs.
 // GetCharaViewTexture's accessor and +0x2C8 were also verified in the installed
-// executable with Ghidra (MD5 f0a05f5192b876705b45a99022fa33cd).
+// executable with Ghidra (2026-10-20 MD5 6363cbeb6ca97e87a37da0a8e737a5a0).
 // Never call methods through engine-owned pointers or hold their COM objects.
 namespace FfxivCharaViewTrace {
 inline bool Read(UINT_PTR address,void* out,size_t size) {
