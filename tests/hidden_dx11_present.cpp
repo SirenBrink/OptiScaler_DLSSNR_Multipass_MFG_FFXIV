@@ -3,6 +3,7 @@
 #include <dxgi.h>
 #include <cstdio>
 #include <stdexcept>
+#include "../OptiScaler/misc/InteropAuxiliaryPresent.h"
 static unsigned warnings=0;
 #define LOG_WARN(...) (++warnings)
 namespace FramePacingTrace {
@@ -14,6 +15,7 @@ struct Swapchain {
     HRESULT result=S_OK;
     bool busy=false;
     HRESULT Present(UINT sync,UINT presentFlags) {
+        if(!InteropAuxiliaryPresent::Active())throw std::runtime_error("hidden-present scope missing");
         ++calls;interval=sync;flags=presentFlags;
         if(busy){
             if(flags & DXGI_PRESENT_DO_NOT_WAIT)return DXGI_ERROR_WAS_STILL_DRAWING;
@@ -29,6 +31,7 @@ static void check(bool value,const char* msg){if(!value)throw std::runtime_error
 int main()try {
     Swapchain chain;
     HiddenPresent(&chain,DXGI_PRESENT_RESTART);
+    check(!InteropAuxiliaryPresent::Active(),"hidden-present scope leaked");
     check(chain.calls==1 && chain.interval==0,"hidden present changed synchronization/call count");
     check(chain.flags==(DXGI_PRESENT_RESTART|DXGI_PRESENT_DO_NOT_WAIT),"hidden present can block or lost caller flags");
     chain.busy=true;

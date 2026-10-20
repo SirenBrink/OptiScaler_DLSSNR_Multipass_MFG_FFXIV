@@ -1,5 +1,6 @@
 #include "pch.h"
 #include <misc/FramePacingTrace.h>
+#include <misc/InteropAuxiliaryPresent.h>
 #include <shaders/hdr/Hdr10.h>
 #include <shaders/hdr/HdrScreenshot.h>
 #include <misc/FfxivLightingCapture.h>
@@ -396,7 +397,10 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
         // output. Its producer commands were already flushed above. If DXGI
         // would block, skip this hidden presentation without retrying or waiting.
         const UINT realFlags = Flags | DXGI_PRESENT_DO_NOT_WAIT;
-        const auto realPresentResult = _real->Present(0, realFlags);
+        const auto realPresentResult = [&] {
+            InteropAuxiliaryPresent::Scope auxiliaryPresent;
+            return _real->Present(0, realFlags);
+        }();
 
         if (FAILED(realPresentResult) && realPresentResult != DXGI_ERROR_WAS_STILL_DRAWING)
             LOG_WARN("hidden real DX11 Present failed: {:X}", (UINT) realPresentResult);

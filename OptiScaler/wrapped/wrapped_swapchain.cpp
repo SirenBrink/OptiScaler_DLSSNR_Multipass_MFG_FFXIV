@@ -1,5 +1,6 @@
 #include "pch.h"
 #include <misc/FramePacingTrace.h>
+#include <misc/InteropAuxiliaryPresent.h>
 #include "wrapped_swapchain.h"
 #include <hooks/DxgiSwapchainSizing.h>
 
@@ -152,6 +153,14 @@ void ReportD3D12LiveObjects(ID3D12Device* device)
 static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags,
                             const DXGI_PRESENT_PARAMETERS* pPresentParameters, IUnknown* pDevice, HWND hWnd, bool isUWP)
 {
+    if (InteropAuxiliaryPresent::Active())
+    {
+        // Forward the original call, including ReShade's work, without treating
+        // the hidden DX11 swapchain as another visible FG/menu output.
+        if (pPresentParameters == nullptr)
+            return pSwapChain->Present(SyncInterval, Flags);
+        return static_cast<IDXGISwapChain1*>(pSwapChain)->Present1(SyncInterval, Flags, pPresentParameters);
+    }
     FramePacingTrace::Scope cpuTiming(FramePacingTrace::Phase::OutputPresent);
     if (State::Instance().isShuttingDown)
     {
