@@ -1082,6 +1082,7 @@ class Config
     CustomOptional<bool> FfxivPreviewUpscale { true };
     CustomOptional<bool> FfxivPreviewGuideCapture { false }; // Temporary, bounded shader/binding capture.
     CustomOptional<bool> FfxivHDRDLSSSceneInput { false };
+    CustomOptional<bool> FfxivHDRAdaptiveStabilizer { false };
     CustomOptional<int> FfxivHDRMode { 0 }; // 0: SDR expansion, 1: RenoDX scene HDR
     CustomOptional<float> FfxivHDRPeak { 1100.0f };
     CustomOptional<float> FfxivHDRPaper { 203.0f };

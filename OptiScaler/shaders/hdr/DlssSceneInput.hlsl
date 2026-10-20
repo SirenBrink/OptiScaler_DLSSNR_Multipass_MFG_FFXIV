@@ -7,7 +7,7 @@ Texture2D<float4> Edited : register(t3);
 RWTexture2D<float4> Target : register(u0);
 cbuffer Settings : register(b0) {
  uint Width; uint Height; uint Mode; uint Padding; float4 Rect;
- uint2 RenderSize; float2 MotionScale; float2 RasterJitter; uint HasDepth; uint Reserved;
+ uint2 RenderSize; float2 MotionScale; float2 RasterJitter; uint HasDepth; uint Adaptive;
 };
 float3 Linear(float3 x) { return float3(x.r<=.04045?x.r/12.92:pow((x.r+.055)/1.055,2.4),x.g<=.04045?x.g/12.92:pow((x.g+.055)/1.055,2.4),x.b<=.04045?x.b/12.92:pow((x.b+.055)/1.055,2.4)); }
 float3 Encode(float3 x) { x=max(x,0);return float3(x.r<=.0031308?12.92*x.r:1.055*pow(x.r,1/2.4)-.055,x.g<=.0031308?12.92*x.g:1.055*pow(x.g,1/2.4)-.055,x.b<=.0031308?12.92*x.b:1.055*pow(x.b,1/2.4)-.055); }
@@ -61,6 +61,9 @@ float4 History(float2 uv) {
   // thin highlight is repeatedly clipped toward its darker neighbours.
   lo=min(current.rgb,max(lo,mean-1.5*sigma));hi=max(current.rgb,min(hi,mean+1.5*sigma));
   float relative=max(abs(previous.r-current.r),max(abs(previous.g-current.g),abs(previous.b-current.b)))/max(.1,max(current.r,max(current.g,current.b)));
+  // Extra history only for very small changes; above 5% use the original blend.
+  // Keep motion attenuation and all clipping/disocclusion/lighting guards.
+  if(Adaptive)weight+=(.1*(1-saturate(relative/.05)))*(1-smoothstep(.25,2,length(motion)));
   weight*=1-saturate((relative-.05)/.1);
   Target[id.xy]=float4(HistoryHalf(lerp(current.rgb,clamp(previous.rgb,lo,hi),weight)),current.a);return;
  }

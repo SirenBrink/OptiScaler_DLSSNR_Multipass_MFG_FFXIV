@@ -937,6 +937,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             FfxivPreviewUpscale.set_from_config(readBool("FFXIV", "PreviewUpscale"));
             FfxivPreviewGuideCapture.set_from_config(readBool("FFXIV", "PreviewGuideCapture"));
             FfxivHDRDLSSSceneInput.set_from_config(readBool("HDR", "DLSSSceneInput"));
+            FfxivHDRAdaptiveStabilizer.set_from_config(readBool("HDR", "AdaptiveStabilizer"));
             FfxivHDRPeak.set_from_config(readFloat("HDR", "PeakNits"));
             FfxivHDRPaper.set_from_config(readFloat("HDR", "PaperWhiteNits"));
             FfxivHDRExpansion.set_from_config(readFloat("HDR", "HighlightExpansion"));
@@ -1423,6 +1424,7 @@ bool Config::SaveIni()
     ini.SetValue("FFXIV", "PreviewUpscale", GetBoolValue(Instance()->FfxivPreviewUpscale.value_for_config()).c_str());
     ini.SetValue("FFXIV", "PreviewGuideCapture", GetBoolValue(Instance()->FfxivPreviewGuideCapture.value_for_config()).c_str());
     ini.SetValue("HDR", "DLSSSceneInput", GetBoolValue(Instance()->FfxivHDRDLSSSceneInput.value_for_config()).c_str());
+    ini.SetValue("HDR", "AdaptiveStabilizer", GetBoolValue(Instance()->FfxivHDRAdaptiveStabilizer.value_for_config()).c_str());
     ini.SetValue("HDR", "ReShadeHighlights", GetBoolValue(Instance()->FfxivHDRReShadeHighlights.value_for_config()).c_str());
     ini.SetValue("HDR", "Mode", GetIntValue(Instance()->FfxivHDRMode.value_for_config()).c_str());
     ini.SetValue("HDR", "PeakNits", GetFloatValue(Instance()->FfxivHDRPeak.value_for_config()).c_str());

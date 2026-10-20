@@ -3094,6 +3094,12 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         if(ImGui::Checkbox("Use scene HDR input for DLSS (experimental, restart)",&dlssSceneInput))config->FfxivHDRDLSSSceneInput=dlssSceneInput;
         resetHdr("FfxivHDRDLSSSceneInput",config->FfxivHDRDLSSSceneInput);
         ShowHelpMarker("Feeds linear FP16 scene highlights through DLSS w/Dx12, then restores SDR for ReShade.\nChanges take effect when the DLSS feature is recreated; restart for a consistent comparison.\nMissing same-frame captures use linear SDR. Existing SDR expansion and NR input controls remain independent.");
+        ImGui::BeginDisabled(!dlssSceneInput);
+        bool adaptiveStabilizer=config->FfxivHDRAdaptiveStabilizer.value_or_default();
+        if(ImGui::Checkbox("Adaptive HDR stabilizer (experimental)",&adaptiveStabilizer))config->FfxivHDRAdaptiveStabilizer=adaptiveStabilizer;
+        resetHdr("FfxivHDRAdaptiveStabilizer",config->FfxivHDRAdaptiveStabilizer);
+        ShowHelpMarker("Adds smoothing only where HDR pixels change very little. Motion, depth and lighting-change rejection remain active.\nRequires scene HDR input for DLSS. Applies immediately and starts fresh history; save settings to keep your choice.\nDisable to compare with the original stabilizer. Check moving fine detail for trails or softness.");
+        ImGui::EndDisabled();
         bool nrSceneInput=config->FfxivHDRNRSceneInput.value_or_default();
         if(ImGui::Checkbox("Use scene HDR input for NR (experimental)",&nrSceneInput))config->FfxivHDRNRSceneInput=nrSceneInput;
         resetHdr("FfxivHDRNRSceneInput",config->FfxivHDRNRSceneInput);

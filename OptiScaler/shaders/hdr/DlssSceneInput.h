@@ -22,7 +22,7 @@ struct Packet {
  ComPtr<ID3D12CommandQueue> historyQueue;
  std::function<bool()> historySubmitted;
  std::shared_ptr<Packet> previous;
- float motionScale[2]{},rasterJitter[2]{};bool hasDepth=false;
+ float motionScale[2]{},rasterJitter[2]{};bool hasDepth=false,adaptive=false;
 };
 inline std::mutex& Mutex(){static auto* m=new std::mutex;return *m;}
 inline auto& Pool(){static auto* p=new std::vector<std::shared_ptr<Packet>>;return *p;}
@@ -46,9 +46,9 @@ inline bool Init(Packet& p,ID3D12Device*d,UINT w,UINT h,UINT ow,UINT oh,DXGI_FOR
  p.encoded=p.output;return true;
 }
 inline void Bind(Packet& p,ID3D12GraphicsCommandList*c,UINT mode){
- struct Constants{UINT w,h,mode,scene;float rect[4];UINT render[2];float motion[2],jitter[2];UINT depth,reserved;} k{mode?p.ow:p.w,mode?p.oh:p.h,mode,UINT(p.scene.hdr&&p.scene.reference)};
+ struct Constants{UINT w,h,mode,scene;float rect[4];UINT render[2];float motion[2],jitter[2];UINT depth,adaptive;} k{mode?p.ow:p.w,mode?p.oh:p.h,mode,UINT(p.scene.hdr&&p.scene.reference)};
  std::copy(p.scene.rect.begin(),p.scene.rect.end(),k.rect);
- k.render[0]=p.w;k.render[1]=p.h;std::copy(p.motionScale,p.motionScale+2,k.motion);std::copy(p.rasterJitter,p.rasterJitter+2,k.jitter);k.depth=p.hasDepth;
+ k.render[0]=p.w;k.render[1]=p.h;std::copy(p.motionScale,p.motionScale+2,k.motion);std::copy(p.rasterJitter,p.rasterJitter+2,k.jitter);k.depth=p.hasDepth;k.adaptive=p.adaptive;
  ID3D12DescriptorHeap* heaps[]={p.heap.Get()};c->SetDescriptorHeaps(1,heaps);c->SetComputeRootSignature(p.root.Get());c->SetPipelineState(p.pso.Get());
  auto gpu=p.heap->GetGPUDescriptorHandleForHeapStart();gpu.ptr+=mode*5*p.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
  c->SetComputeRootDescriptorTable(0,gpu);c->SetComputeRoot32BitConstants(1,16,&k,0);c->Dispatch((k.w+7)/8,(k.h+7)/8,1);
@@ -94,7 +94,7 @@ inline std::shared_ptr<Packet> Prepare(ID3D12Device*d,ID3D12GraphicsCommandList*
 // no additional colour/history texture or neural evaluation is allocated.
 inline bool Stabilize(const std::shared_ptr<Packet>& packet,ID3D12GraphicsCommandList*c,
                       std::shared_ptr<Packet> previous,ID3D12Resource*depth,ID3D12Resource*motion,
-                      float scaleX,float scaleY,float jitterX,float jitterY,bool compatibleMotion=true){
+                      float scaleX,float scaleY,float jitterX,float jitterY,bool compatibleMotion=true,bool adaptive=false){
  auto& p=*packet;
  if(!compatibleMotion||p.referenceFormat!=DXGI_FORMAT_R16G16B16A16_FLOAT||!depth||!motion||!scaleX||!scaleY||!std::isfinite(scaleX)||!std::isfinite(scaleY)||!std::isfinite(jitterX)||!std::isfinite(jitterY))return false;
  auto d=depth->GetDesc(),m=motion->GetDesc();
@@ -107,12 +107,12 @@ inline bool Stabilize(const std::shared_ptr<Packet>& packet,ID3D12GraphicsComman
  if(m.Format!=DXGI_FORMAT_R16G16_FLOAT&&m.Format!=DXGI_FORMAT_R32G32_FLOAT&&m.Format!=DXGI_FORMAT_R16G16B16A16_FLOAT&&m.Format!=DXGI_FORMAT_R32G32B32A32_FLOAT)return false;
  // NGX low-resolution vectors are in render pixels after MV.Scale. History
  // is at output resolution, including output scaling / supersampling.
- p.depth=depth;p.motion=motion;p.motionScale[0]=scaleX*float(p.ow)/p.w;p.motionScale[1]=scaleY*float(p.oh)/p.h;p.rasterJitter[0]=jitterX;p.rasterJitter[1]=jitterY;p.hasDepth=true;
+ p.depth=depth;p.motion=motion;p.motionScale[0]=scaleX*float(p.ow)/p.w;p.motionScale[1]=scaleY*float(p.oh)/p.h;p.rasterJitter[0]=jitterX;p.rasterJitter[1]=jitterY;p.hasDepth=true;p.adaptive=adaptive;
  auto stride=p.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
  auto srv=[&](UINT index,ID3D12Resource*r,DXGI_FORMAT format){auto cpu=p.heap->GetCPUDescriptorHandleForHeapStart();cpu.ptr+=index*stride;D3D12_SHADER_RESOURCE_VIEW_DESC s{};s.Format=format;s.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;s.Texture2D.MipLevels=1;s.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;p.device->CreateShaderResourceView(r,&s,cpu);};
  // Private HDR alpha carries depth. The native SDR output remains opaque.
  srv(12,depth,df);
- if(!previous)return false;
+ if(!previous||previous->adaptive!=p.adaptive)return false;
  if(previous.get()==packet.get())return false;
  if(!previous->hasDepth)return false;
  if(!previous->historySubmitted||!previous->historySubmitted())return false;

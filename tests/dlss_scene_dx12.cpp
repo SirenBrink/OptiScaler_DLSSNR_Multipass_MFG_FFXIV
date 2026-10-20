@@ -139,7 +139,8 @@ int main()try{
  // Feed noisy, stationary HDR reconstructions through the production resolve.
  // Verify motion/disocclusion/reset rejection and bounded packet ownership,
  // rather than accepting a lower temporal metric from unconditional blending.
- {
+ float baselineToggle[2]{};
+ for(bool adaptive:{false,true}) {
   auto depthGuide=texture(DXGI_FORMAT_R32_FLOAT),motionGuide=texture(),nrScratch=texture(DXGI_FORMAT_R16G16B16A16_FLOAT,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
   ComPtr<ID3D12CommandQueue> otherQueue;check(d->CreateCommandQueue(&qd,IID_PPV_ARGS(&otherQueue)));
   std::shared_ptr<DlssSceneInput::Packet> history;
@@ -164,7 +165,7 @@ int main()try{
    copy(motionGuide.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,1024,D3D12_RESOURCE_STATE_COMMON);
    auto packet=DlssSceneInput::Prepare(d.Get(),c.Get(),native.Get(),dest.Get(),4,1,{});expect(bool(packet),"temporal prepare failed");
    copy(packet->output.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,0,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-   const bool used=DlssSceneInput::Stabilize(packet,c.Get(),reset?nullptr:history,depthGuide.Get(),motionGuide.Get(),4,1,0,0);
+   const bool used=DlssSceneInput::Stabilize(packet,c.Get(),reset?nullptr:history,depthGuide.Get(),motionGuide.Get(),4,1,0,0,true,adaptive);
    expect(used==bool(n&&!reset),"temporal history reset/prime failed");
    DlssSceneInput::Finish(packet,c.Get(),true);
    // Real PreSR uses its just-consumed composed texture as scratch. Reconcile
@@ -184,15 +185,19 @@ int main()try{
    DlssSceneInput::Barrier(c.Get(),readableHistory,D3D12_RESOURCE_STATE_COPY_SOURCE,historyState);
    auto submitted=Hdr10::HistorySubmission(c.Get(),q.Get()),wrongQueue=Hdr10::HistorySubmission(c.Get(),otherQueue.Get());
    expect(!submitted(),"unsubmitted HDR history was marked readable");
-   submit(500+n);expect(submitted()&&!wrongQueue(),"HDR history submission did not respect its producer queue");Hdr10::Reset(c.Get());check(read->Map(0,nullptr,&ptr));bits=(unsigned short*)ptr;
+   submit(500+n+unsigned(adaptive)*1000);expect(submitted()&&!wrongQueue(),"HDR history submission did not respect its producer queue");Hdr10::Reset(c.Get());check(read->Map(0,nullptr,&ptr));bits=(unsigned short*)ptr;
    const float result=std::pow(half(bits[4]),2.2f),current=n>=80?2.f:!n?.5f:flash?half(0x3b33):half(n>=16&&n<50&&n%2==0?0x37ae:0x3829);
    expect(std::abs(half(bits[7])-(disoccluded?.25f:.5f))<.0001f,"private history lost depth");
-   if(moving||disoccluded||reset||flash||!n)expect(std::abs(result-current)<.0015f,"stale HDR history survived motion/depth/reset/lighting rejection");
+   if((moving||disoccluded||reset||flash||!n)&&std::abs(result-current)>=.0015f){printf("mode %d frame %u result %.6f current %.6f\n",adaptive,n,result,current);throw std::runtime_error("stale HDR history survived motion/depth/reset/lighting rejection");}
    if(n==1)expect(result<current-.005f&&result>.495f,"stationary HDR noise was not stabilized");
-   if(n==17||n==49){printf("NR toggle history frame %u: current %.6f resolved %.6f\n",n,current,result);expect(result<current-.003f,"NR edits contaminated clean history across enable/disable");}
+   if(n==17||n==49){const unsigned index=n==17?0:1;if(!adaptive)baselineToggle[index]=result;else expect(std::abs(result-.5f)<std::abs(baselineToggle[index]-.5f)-.0001f,"adaptive history did not reduce the controlled stationary residual");printf("NR toggle history frame %u: current %.6f resolved %.6f\n",n,current,result);expect(result<current-.003f,"NR edits contaminated clean history across enable/disable");}
    if(n>=80&&std::abs(result-2.f)>=.004f){printf("thin highlight frame %u: %.9f (encoded %04x)\n",n,result,bits[4]);throw std::runtime_error("temporal clipping dimmed a stable thin HDR highlight");}
    read->Unmap(0,nullptr);history=packet;
   }
+  check(alloc->Reset());check(Hdr10::ResetCommands(c.Get(),alloc.Get()));
+  auto switched=DlssSceneInput::Prepare(d.Get(),c.Get(),native.Get(),dest.Get(),4,1,{});
+  expect(!DlssSceneInput::Stabilize(switched,c.Get(),history,depthGuide.Get(),motionGuide.Get(),4,1,0,0,true,!adaptive),"live stabilizer toggle reused old-mode history");
+  DlssSceneInput::Finish(switched,c.Get(),false);check(c->Close());Hdr10::Reset(c.Get());switched.reset();
   history.reset();check(alloc->Reset());check(Hdr10::ResetCommands(c.Get(),alloc.Get()));
   auto discarded=DlssSceneInput::Prepare(d.Get(),c.Get(),native.Get(),dest.Get(),4,1,{});
   DlssSceneInput::Stabilize(discarded,c.Get(),nullptr,depthGuide.Get(),motionGuide.Get(),4,1,0,0);
@@ -209,7 +214,7 @@ int main()try{
   DlssSceneInput::Finish(scaled,c.Get(),false);check(c->Close());Hdr10::Reset(c.Get());
   expect(DlssSceneInput::Pool().size()<=3,"temporal history retained an unbounded packet chain");
  }
- puts("PASS: production HDR temporal resolve reduces stationary noise, preserves thin highlights, rejects motion/depth/reset/lighting and discarded history, validates producer queue, preserves depth in private alpha and bounds history ownership over 96 frames");
+ puts("PASS: production HDR temporal resolve reduces stationary noise, preserves thin highlights, rejects motion/depth/reset/lighting and discarded history, validates producer queue, preserves depth in private alpha and bounds history ownership over 96 frames per mode; adaptive toggle discards old-mode history");
 
  if(info){for(UINT64 i=0;i<info->GetNumStoredMessages();++i){SIZE_T size=0;info->GetMessage(i,nullptr,&size);std::vector<char>b(size);auto*m=(D3D12_MESSAGE*)b.data();check(info->GetMessage(i,m,&size));if(m->Severity<=D3D12_MESSAGE_SEVERITY_ERROR){puts(m->pDescription);throw std::runtime_error("D3D12 debug validation error");}}}
  expect(DlssSceneInput::Pool().size()<=3,"work buffers not reused");CloseHandle(event);puts("PASS: production HDR-DLSS conversion, typed/typeless FP16 inputs, FP16/RGBA8/RGB10A2/R11G11B10 outputs, SDR tone curve, reconstructed HDR, missing-scene fallback, 128 reset/submission cycles and resource lifetime, opaque output alpha, identity/non-identity PreSR HDR reconciliation and descriptor immutability");return 0;

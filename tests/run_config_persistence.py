@@ -20,7 +20,7 @@ def function(signature):
     return source[start:end]
 
 fields = re.findall(r'^\s*(CustomOptional<[^\n]+>\s+(?:FfxivHDR\w*|FfxivPreviewNRTrace|FfxivPreviewAA|FfxivPreviewDLSS|FfxivPreviewNR|FfxivPreviewNRReuse|FfxivPreviewFG|FfxivPreviewUpscale|FfxivPreviewGuideCapture|LowLatencyInput|LowLatencyOutput|VulkanUseCopyForInputs|VulkanUseCopyForOutput|AnisotropyModifyComp|AnisotropyModifyMinMax|DlssNrVitFirstPassOnly|DlssNrPauseOnFocusLoss|DlssNrRuntime|FGDLSSGRenderPreset|FfxivAutomaticMipBias)\s*\{[^\n]+?;)', header, re.M)
-assert len(fields) == 34
+assert len(fields) == 35
 load_start = source.index('            if (auto v = readUInt("LowLatency", "Input")')
 load = source[load_start:source.index('            ForceHDR.set_from_config', load_start)]
 for field in ['AnisotropyModifyComp', 'AnisotropyModifyMinMax', 'DlssNrVitFirstPassOnly', 'DlssNrPauseOnFocusLoss', 'DlssNrRuntime', 'FGDLSSGRenderPreset', 'FfxivAutomaticMipBias']:
@@ -81,6 +81,7 @@ int main(int argc,char**argv) {
  c.DlssNrVitFirstPassOnly=false;c.DlssNrPauseOnFocusLoss=true;
  c.FfxivPreviewDLSS=true;c.FfxivPreviewNR=true;c.FfxivPreviewNRReuse=true;c.FfxivPreviewFG=true;c.FfxivPreviewAA=true;c.FfxivPreviewUpscale=false;c.FfxivPreviewNRTrace=true;
  c.FfxivPreviewGuideCapture=true;
+ c.FfxivHDRAdaptiveStabilizer=true;
  c.FfxivHDRNRSceneInput=true;c.FfxivHDRReShadeHighlights=true;c.FfxivHDRMode=1;c.FfxivHDR=true;c.FfxivHDRPeak=1450.0f;c.FfxivHDRPaper=185.0f;
  c.FfxivHDRExpansion=0.73f;c.FfxivHDRContrast=1.23f;
  c.FfxivHDRSaturation=1.17f;c.FfxivHDRVibrance=-0.32f;
@@ -103,7 +104,7 @@ int main(int argc,char**argv) {
  assert(!twice.FfxivHDRReShadeHighlights.value_or_default());
  assert(twice.FfxivHDRScreenshotKey.value_or_default()==UnboundKey);
  loaded.absoluteFileName=path/"missing"/"OptiScaler.ini";assert(!loaded.Save());
- std::cout<<"PASS: 34 settings round-trip including preview controls; independent HDR resets persist; failed writes report failure\n";
+ std::cout<<"PASS: 35 settings round-trip including preview controls; independent HDR resets persist; failed writes report failure\n";
 }
 '''
 simpleini = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else repo / 'external/simpleini'

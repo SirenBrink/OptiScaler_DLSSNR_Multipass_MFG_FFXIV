@@ -153,7 +153,7 @@ bool DLSSFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
                 InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_X,&mx);InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_Y,&my);
                 InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_X,&jx);InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y,&jy);
                 if(effectiveReset || (hdrHistory && GetTickCount64()-hdrHistory->lastUse>250))hdrHistory.reset();
-                DlssSceneInput::Stabilize(hdrPacket,InCommandList,std::move(hdrHistory),depthBinding.original,motionBinding.original,mx,my,jx,jy,LowResMV()&&!JitteredMV());
+                DlssSceneInput::Stabilize(hdrPacket,InCommandList,std::move(hdrHistory),depthBinding.original,motionBinding.original,mx,my,jx,jy,LowResMV()&&!JitteredMV(),Config::Instance()->FfxivHDRAdaptiveStabilizer.value_or_default());
                 const int stabilityState=hdrPacket->hasDepth?1:0;
                 if(stabilityState!=_hdrStabilityState){
                     _hdrStabilityState=stabilityState;
