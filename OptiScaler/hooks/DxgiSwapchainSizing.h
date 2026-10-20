@@ -46,3 +46,13 @@ inline HWND FindCompositionWindow()
     }, reinterpret_cast<LPARAM>(&search));
     return search.count == 1 ? search.window : nullptr;
 }
+
+// These are creation-time capabilities, not per-resize requests. In particular,
+// an SDR DX11 game's flags cannot describe its separately created DX12/FG chain.
+// DXGI rejects adding OR removing either bit in ResizeBuffers/ResizeBuffers1.
+inline UINT PreserveSwapchainResizeFlags(UINT requested, UINT existing)
+{
+    constexpr UINT immutable = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING |
+                               DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+    return (requested & ~immutable) | (existing & immutable);
+}

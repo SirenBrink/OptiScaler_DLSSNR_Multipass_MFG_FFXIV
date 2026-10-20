@@ -790,7 +790,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
 
     HRESULT result;
     DXGI_SWAP_CHAIN_DESC desc {};
-    _real->GetDesc(&desc);
+    const auto descResult = _real->GetDesc(&desc);
 
     if (Config::Instance()->FGEnabled.value_or_default())
     {
@@ -812,6 +812,11 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
         if (BufferCount < 2)
             BufferCount = 2;
     }
+
+    // Streamline may have added capabilities absent from the game's request.
+    // Use this native chain's descriptor, never a global/other-chain flag cache.
+    if (SUCCEEDED(descResult))
+        SwapChainFlags = PreserveSwapchainResizeFlags(SwapChainFlags, desc.Flags);
 
     State::Instance().SCAllowTearing = (SwapChainFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
 
@@ -1220,7 +1225,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
 
     HRESULT result = E_FAIL;
     DXGI_SWAP_CHAIN_DESC desc {};
-    _real->GetDesc(&desc);
+    const auto descResult = _real->GetDesc(&desc);
 
     if (Config::Instance()->FGEnabled.value_or_default())
     {
@@ -1242,6 +1247,11 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
         if (BufferCount < 2)
             BufferCount = 2;
     }
+
+    // Streamline may have added capabilities absent from the game's request.
+    // Use this native chain's descriptor, never a global/other-chain flag cache.
+    if (SUCCEEDED(descResult))
+        SwapChainFlags = PreserveSwapchainResizeFlags(SwapChainFlags, desc.Flags);
 
     State::Instance().SCAllowTearing = (SwapChainFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
 

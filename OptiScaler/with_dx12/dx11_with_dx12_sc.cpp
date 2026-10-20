@@ -15,6 +15,7 @@
 #include <with_dx12/with_dx12.h>
 
 #include <hooks/FG_Hooks.h>
+#include <hooks/DxgiSwapchainSizing.h>
 #include <menu/menu_overlay_dx.h>
 
 #include <Util.h>
@@ -470,9 +471,15 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
     HRESULT realResult = _real != nullptr ? _real->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags)
                                           : DXGI_ERROR_DEVICE_REMOVED;
 
+    // The game's DX11 chain and the visible FG chain can have different immutable flags.
+    UINT fgFlags = SwapChainFlags;
+    DXGI_SWAP_CHAIN_DESC fgDesc {};
+    if (_fgSwapChain != nullptr && SUCCEEDED(_fgSwapChain->GetDesc(&fgDesc)))
+        fgFlags = PreserveSwapchainResizeFlags(SwapChainFlags, fgDesc.Flags);
+
     HRESULT fgResult = DXGI_ERROR_DEVICE_REMOVED;
     if (SUCCEEDED(realResult) && _fgSwapChain != nullptr)
-        fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, _hdrOutput ? DXGI_FORMAT_R10G10B10A2_UNORM : NewFormat, SwapChainFlags);
+        fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, _hdrOutput ? DXGI_FORMAT_R10G10B10A2_UNORM : NewFormat, fgFlags);
 
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers results: real {:X}, fg {:X}", (UINT) realResult, (UINT) fgResult);
 
@@ -489,7 +496,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         }
 
         State::Instance().scChanged = true;
-        State::Instance().SCAllowTearing = (SwapChainFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
+        State::Instance().SCAllowTearing = (fgFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
 
         if (State::Instance().currentFeature == nullptr)
         {
@@ -688,11 +695,17 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
                                                                     pCreationNodeMask, ppPresentQueue)
                                            : ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
 
+    // The game's DX11 chain and the visible FG chain can have different immutable flags.
+    UINT fgFlags = SwapChainFlags;
+    DXGI_SWAP_CHAIN_DESC fgDesc {};
+    if (_fgSwapChain != nullptr && SUCCEEDED(_fgSwapChain->GetDesc(&fgDesc)))
+        fgFlags = PreserveSwapchainResizeFlags(SwapChainFlags, fgDesc.Flags);
+
     HRESULT fgResult = DXGI_ERROR_DEVICE_REMOVED;
     if (SUCCEEDED(realResult) && _fgSwapChain != nullptr)
     {
         // The game's ppPresentQueue is not valid for the DX12 FG swapchain. Use ResizeBuffers for phase 1.
-        fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, _hdrOutput ? DXGI_FORMAT_R10G10B10A2_UNORM : Format, SwapChainFlags);
+        fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, _hdrOutput ? DXGI_FORMAT_R10G10B10A2_UNORM : Format, fgFlags);
     }
 
     LOG_DEBUG("Dx11wDx12SC ResizeBuffers1 results: real {:X}, fg {:X}", (UINT) realResult, (UINT) fgResult);
@@ -710,7 +723,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         }
 
         State::Instance().scChanged = true;
-        State::Instance().SCAllowTearing = (SwapChainFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
+        State::Instance().SCAllowTearing = (fgFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
     }
 
     return FAILED(realResult) ? realResult : fgResult;
